@@ -1,0 +1,28 @@
+[Unit]
+Description=Partition Job Configuration UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partitionui
+Group=partitionui
+WorkingDirectory=/opt/partition-job-ui
+EnvironmentFile=/opt/partition-job-ui/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/partition-job-ui/.venv/bin/streamlit run /opt/partition-job-ui/app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
