@@ -36,7 +36,7 @@ APPLICATION_NAME = "partition-job-ui"
 # user input) so a deployment with different object names does not need a code
 # change. Both values are validated as plain PostgreSQL identifiers before use.
 DEFAULT_PARTITION_JOB_SCHEMA = "mubasher_oms"
-DEFAULT_PARTITION_JOB_FUNCTION = "insert_into_partition_job_table"
+DEFAULT_PARTITION_JOB_FUNCTION = "insert_data_to_partition_job_table"
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 

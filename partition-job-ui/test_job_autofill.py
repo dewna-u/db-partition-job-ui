@@ -349,8 +349,7 @@ class CreatePartitionJobCallTests(unittest.TestCase):
         self.assertEqual(len(conn.executed), 1)
         sql, params = conn.executed[0]
 
-        self.assertIn("mubasher_oms.insert_into_partition_job_table", sql)
-        self.assertNotIn("insert_data_to_partition_job_table", sql)
+        self.assertIn("mubasher_oms.insert_data_to_partition_job_table", sql)
         # The function is the only write path: no direct INSERT workaround.
         self.assertNotIn("insert into", sql.lower())
 
@@ -411,15 +410,15 @@ class CreatePartitionJobCallTests(unittest.TestCase):
 class ErrorClassificationTests(unittest.TestCase):
     def test_insufficient_privilege_maps_to_permission_error(self) -> None:
         exc = FakePgError(
-            "permission denied for table partition_job_table", sqlstate="42501"
+            "permission denied for table partitioning_job_table", sqlstate="42501"
         )
         mapped = database._map_psycopg_error(exc)
         self.assertIn("does not have the required permission", mapped.message)
-        self.assertIn("partition_job_table", mapped.message)
+        self.assertIn("partitioning_job_table", mapped.message)
 
     def test_undefined_function_is_not_a_permission_error(self) -> None:
         exc = FakePgError(
-            "function mubasher_oms.insert_into_partition_job_table(...) does not exist",
+            "function mubasher_oms.insert_data_to_partition_job_table(...) does not exist",
             sqlstate="42883",
         )
         mapped = database._map_psycopg_error(exc)
@@ -464,7 +463,7 @@ class ConfiguredObjectNameTests(unittest.TestCase):
     def test_default_function_identity(self) -> None:
         self.assertEqual(
             database.partition_job_function_identity(),
-            ("mubasher_oms", "insert_into_partition_job_table"),
+            ("mubasher_oms", "insert_data_to_partition_job_table"),
         )
 
     def test_environment_override_is_validated(self) -> None:

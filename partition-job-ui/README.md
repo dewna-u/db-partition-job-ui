@@ -1,3 +1,19 @@
+
+cd /opt/db-partition-job-ui-github
+
+GIT_SSH_COMMAND='ssh -i /root/.ssh/partition_job_ui_github -o IdentitiesOnly=yes' \
+git -c safe.directory=/opt/db-partition-job-ui-github pull --ff-only origin main
+
+chown -R partitionui:partitionui /opt/db-partition-job-ui-github
+
+systemctl restart partition-job-ui.service
+
+systemctl status partition-job-ui.service --no-pager -l
+
+
+
+
+
 # Partition Job Configuration UI
 
 Lightweight internal Streamlit application for configuring PostgreSQL/EDB partition jobs through an existing database function and listing pgAgent jobs with their job IDs.
@@ -8,8 +24,8 @@ Administrators use this UI to:
 
 * View existing pgAgent jobs (including **Job ID**)
 * Submit a new partition-job configuration by calling  
-  `mubasher_oms.insert_into_partition_job_table(...)`, which stores the row in
-  `mubasher_oms.partition_job_table`
+  `mubasher_oms.insert_data_to_partition_job_table(...)`, which stores the row in
+  `mubasher_oms.partitioning_job_table`
 
 The UI never inserts into the partition job table directly — the function is the
 only write path.
@@ -26,7 +42,7 @@ Streamlit UI on Database Server
         |
         +--> Local PostgreSQL/EDB database
         |      |
-        |      +--> insert_into_partition_job_table(...)
+        |      +--> insert_data_to_partition_job_table(...)
         |
         +--> pgAgent database
                |
@@ -86,11 +102,11 @@ GRANT USAGE ON SCHEMA mubasher_oms TO partition_job_ui;
 
 ```sql
 REVOKE ALL ON FUNCTION
-mubasher_oms.insert_into_partition_job_table(EXACT_PARAMETER_TYPES)
+mubasher_oms.insert_data_to_partition_job_table(EXACT_PARAMETER_TYPES)
 FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION
-mubasher_oms.insert_into_partition_job_table(EXACT_PARAMETER_TYPES)
+mubasher_oms.insert_data_to_partition_job_table(EXACT_PARAMETER_TYPES)
 TO partition_job_ui;
 ```
 
@@ -98,14 +114,14 @@ Replace `EXACT_PARAMETER_TYPES` with the argument types returned by the discover
 
 ### If the deployed object names differ
 
-The application calls `mubasher_oms.insert_into_partition_job_table` by default.
+The application calls `mubasher_oms.insert_data_to_partition_job_table` by default.
 If your deployment uses different names, set these optional environment
 variables instead of editing code. Both are validated as plain PostgreSQL
 identifiers and are never taken from user input:
 
 ```bash
 PARTITION_JOB_SCHEMA=mubasher_oms
-PARTITION_JOB_FUNCTION=insert_into_partition_job_table
+PARTITION_JOB_FUNCTION=insert_data_to_partition_job_table
 ```
 
 The application calls the function using **named notation** (`p_job_name => ...`),
@@ -142,7 +158,7 @@ SELECT
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = 'mubasher_oms'
-  AND p.proname = 'insert_into_partition_job_table';
+  AND p.proname = 'insert_data_to_partition_job_table';
 ```
 
 Use `argument_types` (or the full `function_signature`) when issuing `GRANT EXECUTE` / `REVOKE`.
