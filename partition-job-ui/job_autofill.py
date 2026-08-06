@@ -58,6 +58,29 @@ _CREATE_DROP_INTERVAL_ASSIGN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Common pattern used by the existing partition functions, for example:
+#   next_date := cur_date + INTERVAL '1 month';
+# The increment is the strongest signal for the partition width when the
+# function does not explicitly assign partition_unit / partition_period.
+_NEXT_DATE_INCREMENT_RE = re.compile(
+    r"\bnext_date\s*:?=\s*[^;]*?\+\s*interval\s*"
+    r"'\s*(\d+)\s*(day|days|week|weeks|month|months|year|years)\s*'",
+    re.IGNORECASE,
+)
+
+# Existing CREATE/DROP wrapper functions often calculate the first partition
+# boundary from cur_date.  We use the *last* interval literal in that
+# assignment as the lead/retention interval.  This intentionally ignores
+# inner normalisation offsets such as `start_date + interval '7 days'`.
+_CUR_DATE_ASSIGNMENT_RE = re.compile(
+    r"\bcur_date\s*:?=\s*([^;]+);",
+    re.IGNORECASE | re.DOTALL,
+)
+_INTERVAL_LITERAL_RE = re.compile(
+    r"\binterval\s*'\s*(\d+)\s*(day|days|week|weeks|month|months)\s*'",
+    re.IGNORECASE,
+)
+
 _SECRET_DB_CONFIG_KEYS = frozenset(
     {
         "password",
@@ -292,9 +315,19 @@ def extract_partition_settings(
             "Partition Unit was left unchanged."
         )
     else:
-        warnings.append(
-            "Partition Unit could not be determined reliably from the function definition."
-        )
+        # Fall back to the actual boundary increment used by the partition
+        # function (for example next_date := cur_date + interval '1 month').
+        increments = [
+            (int(m.group(1)), m.group(2).lower().rstrip("s"))
+            for m in _NEXT_DATE_INCREMENT_RE.finditer(cleaned)
+        ]
+        unique_increments = list(dict.fromkeys(increments))
+        if len(unique_increments) == 1:
+            values["partition_unit"] = unique_increments[0][1]
+        else:
+            warnings.append(
+                "Partition Unit could not be determined reliably from the function definition."
+            )
 
     periods = [int(m.group(1)) for m in _PARTITION_PERIOD_ASSIGN_RE.finditer(cleaned)]
     unique_periods = list(dict.fromkeys(periods))
@@ -306,9 +339,17 @@ def extract_partition_settings(
             "Partition Period was left unchanged."
         )
     else:
-        warnings.append(
-            "Partition Period could not be determined reliably from the function definition."
-        )
+        increments = [
+            (int(m.group(1)), m.group(2).lower().rstrip("s"))
+            for m in _NEXT_DATE_INCREMENT_RE.finditer(cleaned)
+        ]
+        unique_increments = list(dict.fromkeys(increments))
+        if len(unique_increments) == 1 and unique_increments[0][0] >= 1:
+            values["partition_period"] = unique_increments[0][0]
+        else:
+            warnings.append(
+                "Partition Period could not be determined reliably from the function definition."
+            )
 
     intervals: list[tuple[int, str]] = []
     for match in _CREATE_DROP_INTERVAL_ASSIGN_RE.finditer(cleaned):
@@ -326,9 +367,27 @@ def extract_partition_settings(
             "Create/Drop Interval was left unchanged."
         )
     else:
-        warnings.append(
-            "Create/Drop Interval could not be determined reliably from the function definition."
-        )
+        # For the existing wrapper functions the first partition boundary is
+        # derived from cur_date.  Take the outer/last interval in that
+        # assignment, e.g. `... + interval '7 days' + interval '2 months'`
+        # becomes 2 months rather than the inner 7-day date-normalisation.
+        inferred_offsets: list[tuple[int, str]] = []
+        for assignment in _CUR_DATE_ASSIGNMENT_RE.finditer(cleaned):
+            literals = list(_INTERVAL_LITERAL_RE.finditer(assignment.group(1)))
+            if literals:
+                last = literals[-1]
+                amount = int(last.group(1))
+                unit = last.group(2).lower().rstrip("s")
+                if amount >= 1:
+                    inferred_offsets.append((amount, unit))
+        unique_offsets = list(dict.fromkeys(inferred_offsets))
+        if len(unique_offsets) == 1:
+            values["create_drop_amount"] = unique_offsets[0][0]
+            values["create_drop_unit"] = unique_offsets[0][1]
+        else:
+            warnings.append(
+                "Create/Drop Interval could not be determined reliably from the function definition."
+            )
 
     return values, warnings
 
@@ -364,7 +423,9 @@ def _cron_field_from_flags(flags: list[bool], expected_length: int) -> Optional[
     usable = flags[:expected_length] if expected_length else flags
     selected = _selected_indexes(usable)
     if not selected:
-        return None
+        # pgAgent treats an all-false schedule array as a wildcard for that
+        # dimension (minutes, hours, weekdays, month-days, or months).
+        return "*"
     if len(selected) == len(usable):
         return "*"
     return ",".join(str(index) for index in selected)
@@ -402,7 +463,7 @@ def convert_pgagent_schedule_to_cron(
         last_day = True
     day_field = _cron_field_from_flags(day_flags_for_cron, 31)
 
-    if last_day and day_field != "*":
+    if last_day:
         warnings.append(
             "The pgAgent schedule uses last-day-of-month, which cannot be represented "
             "safely in the six-field schedule format. Job Schedule was left unchanged."
