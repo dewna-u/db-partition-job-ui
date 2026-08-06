@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
@@ -31,6 +32,14 @@ logger = logging.getLogger(__name__)
 
 APPLICATION_NAME = "partition-job-ui"
 
+# Authoritative partition-job objects. Overridable by environment only (never by
+# user input) so a deployment with different object names does not need a code
+# change. Both values are validated as plain PostgreSQL identifiers before use.
+DEFAULT_PARTITION_JOB_SCHEMA = "mubasher_oms"
+DEFAULT_PARTITION_JOB_FUNCTION = "insert_into_partition_job_table"
+
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
+
 # Fixed SQL — never built from user input via f-string / format / concatenation.
 _PGAGENT_EXISTS_SQL = "SELECT to_regclass('pgagent.pga_job') IS NOT NULL;"
 
@@ -47,13 +56,17 @@ FROM pgagent.pga_job
 ORDER BY jobid;
 """
 
-_CREATE_PARTITION_JOB_SQL = """
-SELECT mubasher_oms.insert_data_to_partition_job_table(
+# Named notation (=>) is used deliberately: it is independent of parameter order,
+# so a signature difference fails loudly as undefined_function instead of binding
+# the wrong value to the wrong column. Only the schema/function identifiers are
+# interpolated; every value is a bound parameter.
+_CREATE_PARTITION_JOB_SQL_TEMPLATE = """
+SELECT {schema}.{function}(
     p_job_name                 => %(job_name)s,
     p_is_enabled               => %(is_enabled)s,
     p_table_schema             => %(table_schema)s,
     p_table_name               => %(table_name)s,
-    p_db_config_para           => %(db_config)s::jsonb,
+    p_db_config_para           => %(db_config)s,
     p_job_schedule             => %(job_schedule)s,
     p_frequency                => %(frequency)s::interval,
     p_next_run_time            => %(next_run_time)s,
@@ -61,7 +74,7 @@ SELECT mubasher_oms.insert_data_to_partition_job_table(
     p_partition_period         => %(partition_period)s,
     p_is_create                => %(is_create)s,
     p_is_create_drop_interval  => %(create_drop_interval)s::interval
-);
+) AS result;
 """
 
 _PGAGENT_DETAIL_OBJECTS_SQL = """
@@ -152,6 +165,37 @@ def _optional_env(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
+def _configured_identifier(env_name: str, default: str) -> str:
+    """Return an environment-configured PostgreSQL identifier, strictly validated."""
+    value = _optional_env(env_name) or default
+    if not _IDENTIFIER_RE.match(value):
+        raise DatabaseError(
+            f"Invalid database configuration. {env_name} must be a plain "
+            "PostgreSQL identifier (letters, digits, and underscores only)."
+        )
+    return value
+
+
+def partition_job_function_identity() -> tuple[str, str]:
+    """Return the (schema, function) the application calls to store a configuration."""
+    return (
+        _configured_identifier(
+            "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
+        ),
+        _configured_identifier(
+            "PARTITION_JOB_FUNCTION", DEFAULT_PARTITION_JOB_FUNCTION
+        ),
+    )
+
+
+def build_create_partition_job_sql() -> str:
+    """Build the parameterised function call. Identifiers come from env, not user input."""
+    schema, function_name = partition_job_function_identity()
+    return _CREATE_PARTITION_JOB_SQL_TEMPLATE.format(
+        schema=schema, function=function_name
+    )
+
+
 def _main_db_kwargs() -> dict[str, Any]:
     """Connection kwargs for the main database (partition function)."""
     try:
@@ -213,53 +257,174 @@ def _pgagent_db_kwargs() -> dict[str, Any]:
     }
 
 
-def _map_psycopg_error(exc: PsycopgError) -> DatabaseError:
-    """Map a psycopg exception to a safe user-facing DatabaseError."""
-    sqlstate = getattr(exc, "sqlstate", None) or ""
-    # Diagnostic message for logging only — never shown to the user.
-    logger.exception("Database operation failed (sqlstate=%s)", sqlstate)
+_PERMISSION_OBJECT_RE = re.compile(
+    r"permission denied for (\w+) ([A-Za-z0-9_.]+)", re.IGNORECASE
+)
 
-    # Unique violation
+
+def _safe_diagnostics(exc: PsycopgError) -> dict[str, str]:
+    """
+    Collect non-secret PostgreSQL diagnostics for server-side logging.
+
+    Only structured diagnostic fields are read — never connection parameters,
+    passwords, DSNs, or bound parameter values.
+    """
+    diag = getattr(exc, "diag", None)
+    fields = (
+        "sqlstate",
+        "severity",
+        "message_primary",
+        "message_detail",
+        "message_hint",
+        "schema_name",
+        "table_name",
+        "column_name",
+        "constraint_name",
+        "datatype_name",
+        "context",
+    )
+    collected: dict[str, str] = {}
+    for field in fields:
+        value = getattr(diag, field, None) if diag is not None else None
+        if value:
+            collected[field] = str(value)
+    if "sqlstate" not in collected:
+        sqlstate = getattr(exc, "sqlstate", None)
+        if sqlstate:
+            collected["sqlstate"] = str(sqlstate)
+    return collected
+
+
+def _permission_detail(diagnostics: dict[str, str]) -> str:
+    """Return a short, non-secret description of which object was denied."""
+    match = _PERMISSION_OBJECT_RE.search(diagnostics.get("message_primary", ""))
+    if match:
+        return f" PostgreSQL reported: permission denied for {match.group(1)} {match.group(2)}."
+    return ""
+
+
+def _map_psycopg_error(exc: PsycopgError) -> DatabaseError:
+    """
+    Map a psycopg exception to a safe user-facing DatabaseError.
+
+    Classification is driven by SQLSTATE, which is authoritative. Message-text
+    matching is only a last resort for failures that carry no SQLSTATE (typically
+    connection-level errors), so unrelated failures are never reported as
+    permission problems.
+    """
+    diagnostics = _safe_diagnostics(exc)
+    sqlstate = diagnostics.get("sqlstate", "")
+    logger.exception(
+        "Database operation failed (%s)",
+        ", ".join(f"{key}={value}" for key, value in diagnostics.items())
+        or "no diagnostics available",
+    )
+
+    # 42501 insufficient_privilege — the only genuine permission classification.
+    if sqlstate == "42501":
+        return DatabaseError(
+            "The application database user does not have the required permission."
+            + _permission_detail(diagnostics)
+        )
+    # 42883 undefined_function — missing function or a parameter name/type mismatch.
+    if sqlstate == "42883":
+        schema, function_name = DEFAULT_PARTITION_JOB_SCHEMA, DEFAULT_PARTITION_JOB_FUNCTION
+        try:
+            schema, function_name = partition_job_function_identity()
+        except DatabaseError:
+            pass
+        return DatabaseError(
+            f"The partition-job function {schema}.{function_name} was not found, or its "
+            "parameter names and types do not match what the application sends. "
+            "Check the deployed function signature."
+        )
+    # 42809 wrong_object_type — for example a procedure invoked with SELECT.
+    if sqlstate == "42809":
+        return DatabaseError(
+            "The partition-job database object exists but is not a callable function "
+            "of the expected kind. Check the deployed object type."
+        )
+    if sqlstate == "42P01":
+        return DatabaseError(
+            "A table required by the partition-job function was not found."
+        )
+    if sqlstate in ("3F000", "42704"):
+        return DatabaseError(
+            "A schema or object required by the partition-job function was not found."
+        )
+    # Parameter / type adaptation problems, including malformed JSON and intervals.
+    if sqlstate in (
+        "22P02",
+        "22007",
+        "22008",
+        "22023",
+        "22032",
+        "42804",
+        "42P13",
+        "42601",
+    ):
+        return DatabaseError(
+            "One or more submitted values were rejected by the database as an "
+            "invalid type or format. Review the schedule, frequency, interval, "
+            "and Database Configuration JSON values."
+        )
     if sqlstate == "23505":
         return DatabaseError(
             "A partition job with the same unique value may already exist."
         )
-    # Insufficient privilege
-    if sqlstate in ("42501",):
+    if sqlstate == "23502":
         return DatabaseError(
-            "The application database user does not have the required permission."
+            "A required partition-job value was missing (NOT NULL constraint)."
         )
-    # Undefined function
-    if sqlstate in ("42883",):
+    if sqlstate == "23503":
         return DatabaseError(
-            "The partition-job function was not found in the configured database."
+            "A submitted value does not reference an existing related record "
+            "(foreign key constraint)."
         )
-    # Connection failures / cannot connect
+    if sqlstate in ("23514", "23P01"):
+        return DatabaseError(
+            "A submitted value was rejected by a database constraint."
+        )
+    if sqlstate in ("28000", "28P01"):
+        return DatabaseError(
+            "Database authentication failed. Check the application database configuration."
+        )
+    if sqlstate == "53300":
+        return DatabaseError(
+            "The database refused the connection because too many clients are connected."
+        )
+    if sqlstate.startswith("25"):
+        return DatabaseError(
+            "The database transaction failed and was rolled back. No configuration was stored."
+        )
     if sqlstate.startswith("08") or sqlstate in ("57P01", "57P02", "57P03"):
         return DatabaseError(
             "Unable to connect to the database. Check the database configuration and server logs."
         )
+    if sqlstate.startswith("P0"):
+        return DatabaseError(
+            "The partition-job function raised an error. Check the server logs for details."
+        )
 
-    msg = str(exc).lower()
-    if "could not connect" in msg or "connection refused" in msg:
+    if not sqlstate:
+        # No SQLSTATE: almost always a client/connection level failure.
+        msg = str(exc).lower()
+        if (
+            "could not connect" in msg
+            or "connection refused" in msg
+            or "timeout" in msg
+            or "could not translate host name" in msg
+        ):
+            return DatabaseError(
+                "Unable to connect to the database. Check the database configuration and server logs."
+            )
         return DatabaseError(
-            "Unable to connect to the database. Check the database configuration and server logs."
-        )
-    if "permission denied" in msg or "insufficient privilege" in msg:
-        return DatabaseError(
-            "The application database user does not have the required permission."
-        )
-    if "does not exist" in msg and "function" in msg:
-        return DatabaseError(
-            "The partition-job function was not found in the configured database."
-        )
-    if "unique" in msg or "duplicate" in msg:
-        return DatabaseError(
-            "A partition job with the same unique value may already exist."
+            "The database operation failed. Check the server logs for details."
         )
 
     return DatabaseError(
-        "The database operation failed. Check the server logs for details."
+        "The database operation failed "
+        f"(SQLSTATE {sqlstate}). Check the server logs for details."
     )
 
 
@@ -321,33 +486,42 @@ def get_pgagent_jobs() -> list[dict]:
 
 def create_partition_job(data: dict) -> Any:
     """
-    Call mubasher_oms.insert_data_to_partition_job_table(...) and return its result.
+    Call the partition-job insert function and return its result.
 
-    Uses a transaction: commit on success, roll back on failure.
-    Always closes the connection.
+    The function is the only write path — the UI never inserts into the partition
+    job table directly. Runs in a single transaction: commit once on success,
+    roll back on failure. Always closes the connection.
     """
     params = {
         "job_name": data["job_name"],
-        "is_enabled": data["is_enabled"],
+        "is_enabled": bool(data["is_enabled"]),
         "table_schema": data["table_schema"],
         "table_name": data["table_name"],
+        # Adapted to jsonb by psycopg — never pre-encoded, so it cannot double-encode.
         "db_config": Jsonb(data["db_config"]),
         "job_schedule": data["job_schedule"],
         "frequency": data["frequency"],
         "next_run_time": data["next_run_time"],
         "partition_unit": data["partition_unit"],
-        "partition_period": data["partition_period"],
-        "is_create": data["is_create"],
+        "partition_period": int(data["partition_period"]),
+        "is_create": bool(data["is_create"]),
         "create_drop_interval": data["create_drop_interval"],
     }
+
+    statement = build_create_partition_job_sql()
 
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
-                    cur.execute(_CREATE_PARTITION_JOB_SQL, params)
-                    row = cur.fetchone()
-                    result = row[0] if row else None
+                    cur.execute(statement, params)
+                    # A void-returning function still produces one row holding
+                    # NULL; a statement with no result set must not raise here.
+                    result = None
+                    if cur.description is not None:
+                        row = cur.fetchone()
+                        if row:
+                            result = row[0]
             return result
         except DatabaseError:
             raise

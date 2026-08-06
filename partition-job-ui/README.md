@@ -8,7 +8,11 @@ Administrators use this UI to:
 
 * View existing pgAgent jobs (including **Job ID**)
 * Submit a new partition-job configuration by calling  
-  `mubasher_oms.insert_data_to_partition_job_table(...)`
+  `mubasher_oms.insert_into_partition_job_table(...)`, which stores the row in
+  `mubasher_oms.partition_job_table`
+
+The UI never inserts into the partition job table directly — the function is the
+only write path.
 
 The browser never connects directly to PostgreSQL. All database access happens from the Streamlit process running on the database server.
 
@@ -22,7 +26,7 @@ Streamlit UI on Database Server
         |
         +--> Local PostgreSQL/EDB database
         |      |
-        |      +--> insert_data_to_partition_job_table(...)
+        |      +--> insert_into_partition_job_table(...)
         |
         +--> pgAgent database
                |
@@ -82,15 +86,32 @@ GRANT USAGE ON SCHEMA mubasher_oms TO partition_job_ui;
 
 ```sql
 REVOKE ALL ON FUNCTION
-mubasher_oms.insert_data_to_partition_job_table(EXACT_PARAMETER_TYPES)
+mubasher_oms.insert_into_partition_job_table(EXACT_PARAMETER_TYPES)
 FROM PUBLIC;
 
 GRANT EXECUTE ON FUNCTION
-mubasher_oms.insert_data_to_partition_job_table(EXACT_PARAMETER_TYPES)
+mubasher_oms.insert_into_partition_job_table(EXACT_PARAMETER_TYPES)
 TO partition_job_ui;
 ```
 
 Replace `EXACT_PARAMETER_TYPES` with the argument types returned by the discovery query.
+
+### If the deployed object names differ
+
+The application calls `mubasher_oms.insert_into_partition_job_table` by default.
+If your deployment uses different names, set these optional environment
+variables instead of editing code. Both are validated as plain PostgreSQL
+identifiers and are never taken from user input:
+
+```bash
+PARTITION_JOB_SCHEMA=mubasher_oms
+PARTITION_JOB_FUNCTION=insert_into_partition_job_table
+```
+
+The application calls the function using **named notation** (`p_job_name => ...`),
+so the deployed parameter *names* must match. A mismatch surfaces as a clear
+"parameter names and types do not match" error rather than silently binding
+values to the wrong columns.
 
 ### SECURITY INVOKER vs SECURITY DEFINER
 
@@ -121,7 +142,7 @@ SELECT
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
 WHERE n.nspname = 'mubasher_oms'
-  AND p.proname = 'insert_data_to_partition_job_table';
+  AND p.proname = 'insert_into_partition_job_table';
 ```
 
 Use `argument_types` (or the full `function_signature`) when issuing `GRANT EXECUTE` / `REVOKE`.

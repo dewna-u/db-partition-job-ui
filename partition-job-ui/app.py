@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date, datetime, time
 from typing import Any
@@ -123,6 +124,10 @@ def _init_session_state() -> None:
         st.session_state.loaded_job_id = None
     if "load_job_id" not in st.session_state:
         st.session_state.load_job_id = 1
+    if "create_in_flight" not in st.session_state:
+        st.session_state.create_in_flight = False
+    if "last_created_fingerprint" not in st.session_state:
+        st.session_state.last_created_fingerprint = None
 
     now = datetime.now().replace(microsecond=0)
     form_defaults: dict[str, Any] = {
@@ -222,6 +227,14 @@ def _render_jobs_section() -> None:
 
 def _combine_datetime(d: date, t: time) -> datetime:
     return datetime.combine(d, t)
+
+
+def submission_fingerprint(validated: dict[str, Any]) -> str:
+    """Stable signature of a validated payload, used to ignore duplicate submits."""
+    return json.dumps(
+        {key: str(value) for key, value in sorted(validated.items())},
+        sort_keys=True,
+    )
 
 
 def _apply_autofill(details: dict[str, Any]) -> None:
@@ -442,6 +455,50 @@ def _render_create_form() -> None:
     if not submitted:
         return
 
+    # Guard against re-entrant handling within one script run.
+    if st.session_state.create_in_flight:
+        return
+    st.session_state.create_in_flight = True
+    try:
+        _handle_create_submission(
+            job_name=job_name,
+            is_enabled=is_enabled,
+            table_schema=table_schema,
+            table_name=table_name,
+            db_config=db_config,
+            job_schedule=job_schedule,
+            frequency_amount=frequency_amount,
+            frequency_unit=frequency_unit,
+            next_run_date=next_run_date,
+            next_run_time_val=next_run_time_val,
+            partition_unit=partition_unit,
+            partition_period=partition_period,
+            is_create=is_create,
+            create_drop_amount=create_drop_amount,
+            create_drop_unit=create_drop_unit,
+        )
+    finally:
+        st.session_state.create_in_flight = False
+
+
+def _handle_create_submission(
+    *,
+    job_name: Any,
+    is_enabled: Any,
+    table_schema: Any,
+    table_name: Any,
+    db_config: Any,
+    job_schedule: Any,
+    frequency_amount: Any,
+    frequency_unit: Any,
+    next_run_date: Any,
+    next_run_time_val: Any,
+    partition_unit: Any,
+    partition_period: Any,
+    is_create: Any,
+    create_drop_amount: Any,
+    create_drop_unit: Any,
+) -> None:
     try:
         next_run_time = _combine_datetime(next_run_date, next_run_time_val)
         validated = validate_form_data(
@@ -466,6 +523,14 @@ def _render_create_form() -> None:
         st.error(exc.message)
         return
 
+    fingerprint = submission_fingerprint(validated)
+    if fingerprint == st.session_state.last_created_fingerprint:
+        st.info(
+            "This exact configuration was already created in this session. "
+            "Change a field before submitting again."
+        )
+        return
+
     # Snapshot job IDs before the create call.
     before_ids = _job_id_set(st.session_state.jobs)
 
@@ -480,6 +545,9 @@ def _render_create_form() -> None:
             "The database operation failed. Check the server logs for details."
         )
         return
+
+    # Reached only after the database transaction committed successfully.
+    st.session_state.last_created_fingerprint = fingerprint
 
     feedback: list[dict[str, str]] = [
         {

@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import inspect
+import re
 import unittest
 from contextlib import contextmanager
 from datetime import datetime
 from unittest.mock import patch
 
+from psycopg import Error as PsycopgError
+from psycopg.types.json import Jsonb
+
 import database
-from database import DatabaseError, get_pgagent_job_details
+from database import DatabaseError, create_partition_job, get_pgagent_job_details
 from job_autofill import (
     calculate_next_run,
     convert_pgagent_schedule_to_cron,
@@ -231,6 +235,255 @@ class UnknownJobIdTests(unittest.TestCase):
             with self.assertRaises(DatabaseError) as ctx:
                 get_pgagent_job_details(999999)
         self.assertIn("No pgAgent job was found", ctx.exception.message)
+
+
+class _FakeDiag:
+    def __init__(self, **fields) -> None:
+        for key, value in fields.items():
+            setattr(self, key, value)
+
+    def __getattr__(self, name):  # unspecified diagnostic fields are absent
+        return None
+
+
+class FakePgError(PsycopgError):
+    """psycopg error carrying a controllable SQLSTATE and diagnostics."""
+
+    def __init__(self, message: str, sqlstate: str = "", **diag_fields) -> None:
+        super().__init__(message)
+        self._fake_diag = _FakeDiag(
+            sqlstate=sqlstate or None,
+            message_primary=message,
+            **diag_fields,
+        )
+
+    @property
+    def diag(self):  # type: ignore[override]
+        return self._fake_diag
+
+
+class FakeCursor:
+    def __init__(self, owner: "FakeConnection") -> None:
+        self.owner = owner
+        self.description = owner.description
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def execute(self, sql, params=None) -> None:
+        self.owner.executed.append((sql, params))
+        if self.owner.error is not None:
+            raise self.owner.error
+
+    def fetchone(self):
+        return self.owner.row
+
+
+class FakeTransaction:
+    def __init__(self, owner: "FakeConnection") -> None:
+        self.owner = owner
+
+    def __enter__(self) -> "FakeTransaction":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is None:
+            self.owner.committed = True
+        else:
+            self.owner.rolled_back = True
+        return False
+
+
+class FakeConnection:
+    def __init__(self, row=(None,), description=(("result",),), error=None) -> None:
+        self.row = row
+        self.description = description
+        self.error = error
+        self.executed: list = []
+        self.committed = False
+        self.rolled_back = False
+
+    def cursor(self, row_factory=None) -> FakeCursor:
+        return FakeCursor(self)
+
+    def transaction(self) -> FakeTransaction:
+        return FakeTransaction(self)
+
+
+VALID_PAYLOAD = {
+    "job_name": "JOB_CREATE_PARTITIONS_R19_CUSTOMER_SUMMARY",
+    "is_enabled": True,
+    "table_schema": "mubasher_oms",
+    "table_name": "r19_customer_summary",
+    "db_config": {"work_mem": "512MB", "dbname": "example_db"},
+    "job_schedule": "0 0 2 26 * *",
+    "frequency": "1 month",
+    "next_run_time": datetime(2026, 8, 26, 2, 0, 0),
+    "partition_unit": "month",
+    "partition_period": 1,
+    "is_create": True,
+    "create_drop_interval": "2 months",
+}
+
+
+def _run_create(connection: FakeConnection):
+    @contextmanager
+    def fake_connection(_kwargs):
+        yield connection
+
+    with patch.object(database, "_connection", fake_connection), patch.object(
+        database, "_main_db_kwargs", return_value={}
+    ):
+        return create_partition_job(dict(VALID_PAYLOAD))
+
+
+class CreatePartitionJobCallTests(unittest.TestCase):
+    def test_calls_function_with_parameterized_named_arguments(self) -> None:
+        conn = FakeConnection(row=(42,))
+        result = _run_create(conn)
+
+        self.assertEqual(result, 42)
+        self.assertEqual(len(conn.executed), 1)
+        sql, params = conn.executed[0]
+
+        self.assertIn("mubasher_oms.insert_into_partition_job_table", sql)
+        self.assertNotIn("insert_data_to_partition_job_table", sql)
+        # The function is the only write path: no direct INSERT workaround.
+        self.assertNotIn("insert into", sql.lower())
+
+        placeholders = re.findall(r"%\(([a-z_]+)\)s", sql)
+        self.assertEqual(len(placeholders), 12)
+        self.assertEqual(sorted(placeholders), sorted(params.keys()))
+
+        self.assertEqual(
+            placeholders,
+            [
+                "job_name",
+                "is_enabled",
+                "table_schema",
+                "table_name",
+                "db_config",
+                "job_schedule",
+                "frequency",
+                "next_run_time",
+                "partition_unit",
+                "partition_period",
+                "is_create",
+                "create_drop_interval",
+            ],
+        )
+
+        self.assertEqual(params["frequency"], "1 month")
+        self.assertEqual(params["create_drop_interval"], "2 months")
+        self.assertEqual(params["partition_period"], 1)
+        self.assertEqual(params["next_run_time"], datetime(2026, 8, 26, 2, 0, 0))
+        self.assertIsInstance(params["db_config"], Jsonb)
+        # Values are bound, never interpolated into the statement text.
+        self.assertNotIn(VALID_PAYLOAD["job_name"], sql)
+
+    def test_commits_once_on_success(self) -> None:
+        conn = FakeConnection(row=(1,))
+        _run_create(conn)
+        self.assertTrue(conn.committed)
+        self.assertFalse(conn.rolled_back)
+
+    def test_void_returning_function_succeeds(self) -> None:
+        conn = FakeConnection(row=None, description=None)
+        self.assertIsNone(_run_create(conn))
+        self.assertTrue(conn.committed)
+
+    def test_void_returning_function_with_null_row_succeeds(self) -> None:
+        conn = FakeConnection(row=(None,))
+        self.assertIsNone(_run_create(conn))
+        self.assertTrue(conn.committed)
+
+    def test_rolls_back_on_failure(self) -> None:
+        conn = FakeConnection(error=FakePgError("boom", sqlstate="42501"))
+        with self.assertRaises(DatabaseError):
+            _run_create(conn)
+        self.assertTrue(conn.rolled_back)
+        self.assertFalse(conn.committed)
+
+
+class ErrorClassificationTests(unittest.TestCase):
+    def test_insufficient_privilege_maps_to_permission_error(self) -> None:
+        exc = FakePgError(
+            "permission denied for table partition_job_table", sqlstate="42501"
+        )
+        mapped = database._map_psycopg_error(exc)
+        self.assertIn("does not have the required permission", mapped.message)
+        self.assertIn("partition_job_table", mapped.message)
+
+    def test_undefined_function_is_not_a_permission_error(self) -> None:
+        exc = FakePgError(
+            "function mubasher_oms.insert_into_partition_job_table(...) does not exist",
+            sqlstate="42883",
+        )
+        mapped = database._map_psycopg_error(exc)
+        self.assertNotIn("permission", mapped.message.lower())
+        self.assertIn("parameter names and types", mapped.message)
+
+    def test_type_mismatch_is_not_a_permission_error(self) -> None:
+        exc = FakePgError("invalid input syntax for type interval", sqlstate="22P02")
+        mapped = database._map_psycopg_error(exc)
+        self.assertNotIn("permission", mapped.message.lower())
+        self.assertIn("invalid type or format", mapped.message)
+
+    def test_unique_violation_is_not_a_permission_error(self) -> None:
+        exc = FakePgError("duplicate key value", sqlstate="23505")
+        mapped = database._map_psycopg_error(exc)
+        self.assertNotIn("permission", mapped.message.lower())
+        self.assertIn("already exist", mapped.message)
+
+    def test_permission_text_without_42501_is_not_misclassified(self) -> None:
+        # A non-permission SQLSTATE must never be reported as a permission error
+        # merely because the message text mentions permission denied.
+        exc = FakePgError(
+            "check constraint failed: permission denied for legacy row",
+            sqlstate="23514",
+        )
+        mapped = database._map_psycopg_error(exc)
+        self.assertNotIn("required permission", mapped.message)
+
+    def test_connection_failure_without_sqlstate(self) -> None:
+        exc = FakePgError("could not connect to server", sqlstate="")
+        mapped = database._map_psycopg_error(exc)
+        self.assertIn("Unable to connect", mapped.message)
+
+    def test_unknown_sqlstate_reports_code_without_secrets(self) -> None:
+        exc = FakePgError("something odd", sqlstate="XX000")
+        mapped = database._map_psycopg_error(exc)
+        self.assertIn("XX000", mapped.message)
+        self.assertNotIn("password", mapped.message.lower())
+
+
+class ConfiguredObjectNameTests(unittest.TestCase):
+    def test_default_function_identity(self) -> None:
+        self.assertEqual(
+            database.partition_job_function_identity(),
+            ("mubasher_oms", "insert_into_partition_job_table"),
+        )
+
+    def test_environment_override_is_validated(self) -> None:
+        with patch.dict(
+            "os.environ", {"PARTITION_JOB_FUNCTION": "bad name; DROP TABLE x"}
+        ):
+            with self.assertRaises(DatabaseError):
+                database.build_create_partition_job_sql()
+
+    def test_environment_override_applies(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "PARTITION_JOB_SCHEMA": "other_schema",
+                "PARTITION_JOB_FUNCTION": "other_function",
+            },
+        ):
+            sql = database.build_create_partition_job_sql()
+        self.assertIn("other_schema.other_function", sql)
 
 
 class BoundParameterTests(unittest.TestCase):
