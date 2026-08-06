@@ -12,7 +12,7 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _FORBIDDEN_CHARS = ('"', "'", ";", "--", "/*", "*/", "\\", " ", "\t", "\n", "\r")
 
 ALLOWED_PARTITION_UNITS = frozenset({"day", "week", "month", "year"})
-ALLOWED_FREQUENCY_UNITS = frozenset({"minute", "hour", "day", "week"})
+ALLOWED_FREQUENCY_UNITS = frozenset({"minute", "hour", "day", "week", "month"})
 ALLOWED_CREATE_DROP_UNITS = frozenset({"day", "week", "month"})
 
 MAX_JOB_NAME_LENGTH = 100
@@ -129,7 +129,7 @@ def validate_frequency_unit(unit: str) -> str:
     value = trim_text(unit).lower()
     if value not in ALLOWED_FREQUENCY_UNITS:
         raise ValidationError(
-            "Frequency unit must be one of: minute, hour, day, week."
+            "Frequency unit must be one of: minute, hour, day, week, month."
         )
     return value
 

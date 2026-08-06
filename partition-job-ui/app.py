@@ -50,7 +50,7 @@ JOB_COLUMN_LABELS = {
     "description": "Description",
 }
 
-FREQUENCY_UNITS = ["minute", "hour", "day", "week"]
+FREQUENCY_UNITS = ["minute", "hour", "day", "week", "month"]
 PARTITION_UNITS = ["day", "week", "month", "year"]
 CREATE_DROP_UNITS = ["day", "week", "month"]
 

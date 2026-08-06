@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 
 from job_autofill import (
     build_db_config_json,
+    calculate_next_run,
     convert_pgagent_schedule_to_cron,
     count_top_level_call_arguments,
     extract_partition_settings,
@@ -506,12 +507,6 @@ def get_pgagent_job_details(
     autofill["is_enabled"] = bool(job.get("enabled"))
 
     next_run = job.get("next_run")
-    if next_run is not None:
-        autofill["next_run_time"] = next_run
-    else:
-        warnings.append(
-            "Next Run Time is not set on the pgAgent job and was left unchanged."
-        )
 
     is_create = infer_is_create(job_name)
     if is_create is None:
@@ -554,12 +549,28 @@ def get_pgagent_job_details(
         if cron:
             autofill["job_schedule"] = cron
             schedule_info["cron"] = cron
+            derived_next_run = calculate_next_run(
+                cron,
+                start_time=chosen_schedule.get("start_time"),
+                end_time=chosen_schedule.get("end_time"),
+            )
+            if derived_next_run is not None:
+                next_run = derived_next_run
+                autofill["next_run_time"] = derived_next_run
             frequency, frequency_warning = infer_frequency(cron)
             if frequency:
                 autofill["frequency_amount"] = frequency[0]
                 autofill["frequency_unit"] = frequency[1]
             elif frequency_warning:
                 warnings.append(frequency_warning)
+
+    if "next_run_time" not in autofill:
+        if next_run is not None:
+            autofill["next_run_time"] = next_run
+        else:
+            warnings.append(
+                "Next Run Time could not be derived from the pgAgent schedule and was left unchanged."
+            )
 
     sql_steps = _select_sql_steps(steps)
     step_summaries = []
