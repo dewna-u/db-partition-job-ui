@@ -22,6 +22,7 @@ from job_autofill import (
     extract_single_target_table,
     infer_frequency,
     infer_is_create,
+    infer_is_create_from_definition,
 )
 
 load_dotenv()
@@ -451,6 +452,11 @@ def _inspect_called_function(
     elif table_warning:
         warnings.append(table_warning)
 
+    # Prefer actual ADD/DROP PARTITION behaviour over the job-name heuristic.
+    create_from_def = infer_is_create_from_definition(definition)
+    if create_from_def is not None:
+        autofill["is_create"] = create_from_def
+
     settings, setting_warnings = extract_partition_settings(definition)
     warnings.extend(setting_warnings)
     autofill.update(settings)
@@ -509,12 +515,7 @@ def get_pgagent_job_details(
     next_run = job.get("next_run")
 
     is_create = infer_is_create(job_name)
-    if is_create is None:
-        warnings.append(
-            "Create Partitions could not be inferred from the job name "
-            "(CREATE/DROP token is missing or ambiguous) and was left unchanged."
-        )
-    else:
+    if is_create is not None:
         autofill["is_create"] = is_create
 
     enabled_schedules = [row for row in schedules if row.get("enabled")]
@@ -652,6 +653,13 @@ def get_pgagent_job_details(
             )
             autofill.update(func_autofill)
             warnings.extend(func_warnings)
+
+    if "is_create" not in autofill:
+        warnings.append(
+            "Create Partitions could not be inferred from the job name or "
+            "called function (CREATE/DROP / ADD/DROP PARTITION was missing "
+            "or ambiguous) and was left unchanged."
+        )
 
     public_steps = []
     for step in steps:

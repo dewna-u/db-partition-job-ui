@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Optional
+from calendar import monthrange
+from datetime import datetime, timedelta
+from typing import Any, Optional, Set
 
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
@@ -81,6 +83,9 @@ _INTERVAL_LITERAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_ADD_PARTITION_RE = re.compile(r"\bADD\s+PARTITION\b", re.IGNORECASE)
+_DROP_PARTITION_RE = re.compile(r"\bDROP\s+PARTITION\b", re.IGNORECASE)
+
 _SECRET_DB_CONFIG_KEYS = frozenset(
     {
         "password",
@@ -113,6 +118,23 @@ def infer_is_create(job_name: str) -> Optional[bool]:
     if has_create and not has_drop:
         return True
     if has_drop and not has_create:
+        return False
+    return None
+
+
+def infer_is_create_from_definition(function_definition: str) -> Optional[bool]:
+    """
+    Infer Create Partitions from function SQL behaviour.
+
+    Prefers ADD PARTITION / DROP PARTITION statements over job-name heuristics.
+    Returns True / False when unambiguous, otherwise None.
+    """
+    cleaned = strip_sql_comments(function_definition or "")
+    has_add = bool(_ADD_PARTITION_RE.search(cleaned))
+    has_drop = bool(_DROP_PARTITION_RE.search(cleaned))
+    if has_add and not has_drop:
+        return True
+    if has_drop and not has_add:
         return False
     return None
 
@@ -504,12 +526,17 @@ def convert_pgagent_schedule_to_cron(
     return schedule, warnings
 
 
+def _single_cron_number(field: str) -> bool:
+    return bool(re.fullmatch(r"\d+", field or ""))
+
+
 def infer_frequency(
     schedule: str,
 ) -> tuple[Optional[tuple[int, str]], Optional[str]]:
     """
-    Infer frequency only for unambiguous common cases.
+    Infer how often the job runs from a simple cron schedule.
 
+    Frequency is the run cadence (not the partition period).
     Returns ((amount, unit), warning).
     """
     fields = (schedule or "").split()
@@ -520,51 +547,269 @@ def infer_frequency(
     else:
         return None, "Frequency could not be inferred from the schedule."
 
-    def _single_number(field: str) -> bool:
-        return bool(re.fullmatch(r"\d+", field))
-
     if month != "*":
         return None, (
-            "Frequency was not inferred because the schedule is not a simple "
-            "repeating minute/hour/day/week pattern."
+            "Frequency was not inferred because the schedule restricts specific months "
+            "and is not a simple repeating minute/hour/day/week/month pattern."
         )
 
-    # Every hour: one minute, every hour, every day, every weekday.
-    if _single_number(minute) and hour == "*" and day == "*" and weekday == "*":
+    # Every minute: every minute of every hour/day.
+    if minute == "*" and hour == "*" and day == "*" and weekday == "*":
+        return (1, "minute"), None
+
+    # Every hour: one fixed minute, every hour.
+    if (
+        _single_cron_number(minute)
+        and hour == "*"
+        and day == "*"
+        and weekday == "*"
+    ):
         return (1, "hour"), None
 
-    # Every day: one minute, one hour, every day, every weekday.
+    # Every day: one fixed minute and hour, every calendar day.
     if (
-        _single_number(minute)
-        and _single_number(hour)
+        _single_cron_number(minute)
+        and _single_cron_number(hour)
         and day == "*"
         and weekday == "*"
     ):
         return (1, "day"), None
 
-    # Every week: one minute, one hour, every month-day, one weekday.
+    # Every week: one fixed minute/hour and one weekday.
     if (
-        _single_number(minute)
-        and _single_number(hour)
+        _single_cron_number(minute)
+        and _single_cron_number(hour)
         and day == "*"
-        and _single_number(weekday)
+        and _single_cron_number(weekday)
     ):
         return (1, "week"), None
 
-    # Same day every month — interval would be 1 month, which the form cannot represent.
+    # Same calendar day every month (for example 0 0 2 26 * *).
     if (
-        _single_number(minute)
-        and _single_number(hour)
-        and _single_number(day)
+        _single_cron_number(minute)
+        and _single_cron_number(hour)
+        and _single_cron_number(day)
         and weekday == "*"
     ):
-        return None, (
-            "The schedule looks like the same day every month. "
-            "Frequency was left unchanged because the form only accepts "
-            "minute, hour, day, or week."
-        )
+        return (1, "month"), None
 
-    return None, "Frequency could not be inferred reliably from the schedule."
+    return None, (
+        "Frequency could not be inferred reliably from the schedule. "
+        "Complex schedules were left unchanged."
+    )
+
+
+def _parse_cron_field(field: str, minimum: int, maximum: int) -> Optional[Set[int]]:
+    """Parse a single cron field into allowed integers, or None if unsupported."""
+    text = (field or "").strip()
+    if not text:
+        return None
+    if text == "*":
+        return set(range(minimum, maximum + 1))
+
+    values: Set[int] = set()
+    for part in text.split(","):
+        token = part.strip()
+        if not token:
+            return None
+        if token.startswith("*/"):
+            try:
+                step = int(token[2:])
+            except ValueError:
+                return None
+            if step < 1:
+                return None
+            values.update(range(minimum, maximum + 1, step))
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            if not (
+                re.fullmatch(r"\d+", start_text) and re.fullmatch(r"\d+", end_text)
+            ):
+                return None
+            start = int(start_text)
+            end = int(end_text)
+            if start > end or start < minimum or end > maximum:
+                return None
+            values.update(range(start, end + 1))
+            continue
+        if not re.fullmatch(r"\d+", token):
+            return None
+        number = int(token)
+        if number < minimum or number > maximum:
+            return None
+        values.add(number)
+    return values if values else None
+
+
+def _cron_weekday(dt: datetime) -> int:
+    """Map datetime to cron weekday where Sunday=0 ... Saturday=6."""
+    return (dt.weekday() + 1) % 7
+
+
+def _normalize_schedule_datetime(
+    value: Optional[datetime],
+    reference: datetime,
+) -> Optional[datetime]:
+    """Align tz-awareness with reference so comparisons stay consistent."""
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        return None
+    if reference.tzinfo is None and value.tzinfo is not None:
+        return value.replace(tzinfo=None)
+    if reference.tzinfo is not None and value.tzinfo is None:
+        return value.replace(tzinfo=reference.tzinfo)
+    return value
+
+
+def calculate_next_run(
+    schedule: str,
+    *,
+    now: Optional[datetime] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> Optional[datetime]:
+    """
+    Return the next future occurrence of a five- or six-field cron schedule.
+
+    Six-field format: second minute hour day-of-month month day-of-week.
+    jscstart / jscend only constrain the allowed window; they are not used as
+    the next-run value themselves.
+    """
+    fields = (schedule or "").split()
+    if len(fields) == 6:
+        second_field, minute_field, hour_field, day_field, month_field, weekday_field = (
+            fields
+        )
+    elif len(fields) == 5:
+        second_field = "0"
+        minute_field, hour_field, day_field, month_field, weekday_field = fields
+    else:
+        return None
+
+    seconds = _parse_cron_field(second_field, 0, 59)
+    minutes = _parse_cron_field(minute_field, 0, 59)
+    hours = _parse_cron_field(hour_field, 0, 23)
+    days = _parse_cron_field(day_field, 1, 31)
+    months = _parse_cron_field(month_field, 1, 12)
+    weekdays = _parse_cron_field(weekday_field, 0, 6)
+    if None in (seconds, minutes, hours, days, months, weekdays):
+        return None
+
+    assert seconds is not None
+    assert minutes is not None
+    assert hours is not None
+    assert days is not None
+    assert months is not None
+    assert weekdays is not None
+
+    reference = now if isinstance(now, datetime) else datetime.now()
+    reference = reference.replace(microsecond=0)
+
+    bound_start = _normalize_schedule_datetime(start_time, reference)
+    bound_end = _normalize_schedule_datetime(end_time, reference)
+
+    # Next run must be strictly after "now".
+    candidate = reference + timedelta(seconds=1)
+    if bound_start is not None and candidate < bound_start:
+        candidate = bound_start
+
+    # Search at most ~5 years ahead to avoid infinite loops on impossible crons.
+    limit = candidate + timedelta(days=366 * 5)
+    if bound_end is not None and bound_end < limit:
+        limit = bound_end
+
+    day_restricted = day_field != "*"
+    weekday_restricted = weekday_field != "*"
+
+    while candidate <= limit:
+        if candidate.month not in months:
+            year = candidate.year + (1 if candidate.month == 12 else 0)
+            month = 1 if candidate.month == 12 else candidate.month + 1
+            candidate = candidate.replace(
+                year=year, month=month, day=1, hour=0, minute=0, second=0
+            )
+            continue
+
+        day_ok = candidate.day in days
+        weekday_ok = _cron_weekday(candidate) in weekdays
+        # Converted pgAgent schedules never restrict both day and weekday at once.
+        # When both are wildcards, any day matches. When only one is restricted,
+        # require that restriction. If both somehow restricted, use cron OR.
+        if day_restricted and weekday_restricted:
+            date_ok = day_ok or weekday_ok
+        elif day_restricted:
+            date_ok = day_ok
+        elif weekday_restricted:
+            date_ok = weekday_ok
+        else:
+            date_ok = True
+
+        if not date_ok:
+            next_day = (candidate + timedelta(days=1)).replace(
+                hour=0, minute=0, second=0
+            )
+            candidate = next_day
+            continue
+
+        if candidate.hour not in hours:
+            advanced = False
+            for hour in sorted(hours):
+                if hour > candidate.hour:
+                    candidate = candidate.replace(
+                        hour=hour, minute=0, second=0
+                    )
+                    advanced = True
+                    break
+            if not advanced:
+                candidate = (candidate + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0
+                )
+            continue
+
+        if candidate.minute not in minutes:
+            advanced = False
+            for minute in sorted(minutes):
+                if minute > candidate.minute:
+                    candidate = candidate.replace(minute=minute, second=0)
+                    advanced = True
+                    break
+            if not advanced:
+                candidate = candidate + timedelta(hours=1)
+                candidate = candidate.replace(minute=0, second=0)
+            continue
+
+        if candidate.second not in seconds:
+            advanced = False
+            for second in sorted(seconds):
+                if second > candidate.second:
+                    candidate = candidate.replace(second=second)
+                    advanced = True
+                    break
+            if not advanced:
+                candidate = candidate + timedelta(minutes=1)
+                candidate = candidate.replace(second=0)
+            continue
+
+        # Guard against impossible day-of-month values (e.g. Feb 31).
+        last_day = monthrange(candidate.year, candidate.month)[1]
+        if candidate.day > last_day:
+            candidate = candidate.replace(
+                year=candidate.year + (1 if candidate.month == 12 else 0),
+                month=1 if candidate.month == 12 else candidate.month + 1,
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+            )
+            continue
+
+        if bound_end is not None and candidate > bound_end:
+            return None
+        return candidate
+
+    return None
 
 
 def build_db_config_json(dbname: Optional[str]) -> Optional[str]:
