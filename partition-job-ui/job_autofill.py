@@ -642,6 +642,88 @@ def _parse_cron_field(field: str, minimum: int, maximum: int) -> Optional[Set[in
     return values if values else None
 
 
+CRON_FIELD_BOUNDS = (
+    ("second", 0, 59),
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day-of-month", 1, 31),
+    ("month", 1, 12),
+    ("day-of-week", 0, 6),
+)
+
+_WEEKDAY_NAMES = (
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+)
+
+
+def validate_six_field_cron(schedule: str) -> Optional[str]:
+    """
+    Validate a six-field schedule (second minute hour day-of-month month day-of-week).
+
+    Returns None when valid, otherwise a user-facing error message.
+    """
+    fields = (schedule or "").split()
+    if len(fields) != 6:
+        return (
+            "Job Schedule must contain exactly six whitespace-separated fields: "
+            "second minute hour day-of-month month day-of-week."
+        )
+    for value, (name, minimum, maximum) in zip(fields, CRON_FIELD_BOUNDS):
+        if _parse_cron_field(value, minimum, maximum) is None:
+            return (
+                f"The {name} field of the Job Schedule is invalid: '{value}'. "
+                f"Use *, a number between {minimum} and {maximum}, a list, "
+                "a range, or a */step value."
+            )
+    return None
+
+
+def describe_schedule(schedule: str) -> Optional[str]:
+    """Return a short human-readable meaning for common six-field schedules."""
+    if validate_six_field_cron(schedule):
+        return None
+    second, minute, hour, day, month, weekday = schedule.split()
+
+    def _step(field: str) -> Optional[int]:
+        if field.startswith("*/"):
+            try:
+                return int(field[2:])
+            except ValueError:
+                return None
+        return None
+
+    if _step(second) and minute == "*" and hour == "*":
+        return f"Every {_step(second)} seconds"
+    if _step(minute) and hour == "*" and day == "*" and month == "*":
+        return f"Every {_step(minute)} minutes"
+    if second == "0" and minute == "*" and hour == "*":
+        return "Every minute"
+
+    if not (
+        _single_cron_number(second)
+        and _single_cron_number(minute)
+        and _single_cron_number(hour)
+    ):
+        return None
+
+    at_time = f"{int(hour):02d}:{int(minute):02d}"
+    if month != "*":
+        return None
+    if day == "*" and weekday == "*":
+        return f"Every day at {at_time}"
+    if day == "*" and _single_cron_number(weekday):
+        return f"Every {_WEEKDAY_NAMES[int(weekday)]} at {at_time}"
+    if _single_cron_number(day) and weekday == "*":
+        return f"{at_time} on day {int(day)} of every month"
+    return None
+
+
 def _cron_weekday(dt: datetime) -> int:
     """Map datetime to cron weekday where Sunday=0 ... Saturday=6."""
     return (dt.weekday() + 1) % 7

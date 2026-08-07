@@ -6,14 +6,18 @@ import json
 import re
 from typing import Any
 
+from job_autofill import validate_six_field_cron
+
 # PostgreSQL unquoted identifier: starts with letter/underscore, then letters, digits, underscores.
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 _FORBIDDEN_CHARS = ('"', "'", ";", "--", "/*", "*/", "\\", " ", "\t", "\n", "\r")
 
 ALLOWED_PARTITION_UNITS = frozenset({"day", "week", "month", "year"})
-ALLOWED_FREQUENCY_UNITS = frozenset({"minute", "hour", "day", "week", "month"})
-ALLOWED_CREATE_DROP_UNITS = frozenset({"day", "week", "month"})
+ALLOWED_FREQUENCY_UNITS = frozenset(
+    {"minute", "hour", "day", "week", "month", "year"}
+)
+ALLOWED_CREATE_DROP_UNITS = frozenset({"day", "week", "month", "year"})
 
 MAX_JOB_NAME_LENGTH = 100
 MAX_IDENTIFIER_LENGTH = 63
@@ -95,15 +99,15 @@ def validate_db_config_json(raw: str) -> dict[str, Any]:
 
 
 def validate_cron_schedule(schedule: str) -> str:
+    """Validate the six-field schedule: second minute hour day-of-month month day-of-week."""
     text = trim_text(schedule)
     if not text:
         raise ValidationError("Job Schedule is required.")
-    fields = text.split()
-    if len(fields) not in (5, 6):
-        raise ValidationError(
-            "Job Schedule must contain exactly five or six whitespace-separated cron fields."
-        )
-    return " ".join(fields)
+    normalised = " ".join(text.split())
+    error = validate_six_field_cron(normalised)
+    if error:
+        raise ValidationError(error)
+    return normalised
 
 
 def validate_positive_int(value: Any, field_label: str) -> int:
@@ -129,7 +133,7 @@ def validate_frequency_unit(unit: str) -> str:
     value = trim_text(unit).lower()
     if value not in ALLOWED_FREQUENCY_UNITS:
         raise ValidationError(
-            "Frequency unit must be one of: minute, hour, day, week, month."
+            "Frequency unit must be one of: minute, hour, day, week, month, year."
         )
     return value
 
@@ -138,7 +142,7 @@ def validate_create_drop_unit(unit: str) -> str:
     value = trim_text(unit).lower()
     if value not in ALLOWED_CREATE_DROP_UNITS:
         raise ValidationError(
-            "Create/Drop Interval unit must be one of: day, week, month."
+            "Create/Drop Interval unit must be one of: day, week, month, year."
         )
     return value
 

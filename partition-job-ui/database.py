@@ -18,6 +18,7 @@ from job_autofill import (
     calculate_next_run,
     convert_pgagent_schedule_to_cron,
     count_top_level_call_arguments,
+    extract_called_functions,
     extract_partition_settings,
     extract_single_called_function,
     extract_single_target_table,
@@ -37,6 +38,31 @@ APPLICATION_NAME = "partition-job-ui"
 # change. Both values are validated as plain PostgreSQL identifiers before use.
 DEFAULT_PARTITION_JOB_SCHEMA = "mubasher_oms"
 DEFAULT_PARTITION_JOB_FUNCTION = "insert_data_to_partition_job_table"
+DEFAULT_PARTITION_JOB_TABLE = "partitioning_job_table"
+DEFAULT_PARTITION_JOB_LOG_TABLE = "partitioning_job_table_log"
+DEFAULT_PARTITION_JOB_SEQUENCE = "seq_partitioning_job_id"
+DEFAULT_MANUAL_RUN_FUNCTION = "run_partition_job_manual"
+
+# The two generic scanners that replace per-table pgAgent jobs. The application
+# only ever *detects* these; it never creates pgAgent jobs.
+GENERIC_CREATE_SCANNER = "run_partition_create_jobs"
+GENERIC_DROP_SCANNER = "run_partition_drop_jobs"
+
+# Identity argument list of the insert function, used for the readiness check.
+INSERT_FUNCTION_ARGUMENT_TYPES = (
+    "character varying,"
+    "boolean,"
+    "character varying,"
+    "character varying,"
+    "jsonb,"
+    "character varying,"
+    "interval,"
+    "timestamp without time zone,"
+    "character varying,"
+    "numeric,"
+    "boolean,"
+    "interval"
+)
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,62}$")
 
@@ -75,6 +101,115 @@ SELECT {schema}.{function}(
     p_is_create                => %(is_create)s,
     p_is_create_drop_interval  => %(create_drop_interval)s::interval
 ) AS result;
+"""
+
+# Read-only view of the parameterised configurations. Each row IS a partition job.
+_PARTITION_JOBS_SQL_TEMPLATE = """
+SELECT
+    job_id,
+    job_name,
+    is_enabled,
+    table_schema,
+    table_name,
+    db_config_para,
+    frequency,
+    last_run_time,
+    next_run_time,
+    last_run_status,
+    partition_unit,
+    partition_period,
+    is_create,
+    create_drop_interval,
+    job_schedule
+FROM {schema}.{table}
+ORDER BY job_id DESC;
+"""
+
+_PARTITION_JOB_BY_ID_SQL_TEMPLATE = """
+SELECT
+    job_id,
+    job_name,
+    is_enabled,
+    table_schema,
+    table_name,
+    db_config_para,
+    frequency,
+    last_run_time,
+    next_run_time,
+    last_run_status,
+    partition_unit,
+    partition_period,
+    is_create,
+    create_drop_interval,
+    job_schedule
+FROM {schema}.{table}
+WHERE job_id = %(job_id)s;
+"""
+
+_PARTITION_JOB_LOGS_SQL_TEMPLATE = """
+SELECT
+    job_log_id,
+    job_id,
+    job_name,
+    last_run_status,
+    job_runtime,
+    job_error
+FROM {schema}.{table}
+ORDER BY job_runtime DESC
+LIMIT %(row_limit)s;
+"""
+
+# Manual execution of an already-configured row. The database function decides
+# between create/drop and writes history; next_run_time is intentionally left
+# untouched so a manual retry never disturbs the automatic schedule.
+_RUN_PARTITION_JOB_MANUAL_SQL_TEMPLATE = """
+SELECT {schema}.{function}(%(job_id)s) AS result;
+"""
+
+# Read-only privilege introspection. to_reg* keeps the check safe when an object
+# is absent, so a missing object reports as "missing" instead of raising.
+_DATABASE_READINESS_SQL = """
+SELECT
+    current_user AS db_user,
+    current_database() AS db_name,
+    to_regnamespace(%(schema_name)s) IS NOT NULL AS schema_exists,
+    CASE WHEN to_regnamespace(%(schema_name)s) IS NOT NULL
+         THEN has_schema_privilege(current_user, %(schema_name)s, 'USAGE')
+    END AS schema_usage,
+    to_regprocedure(%(insert_function)s) IS NOT NULL AS insert_function_exists,
+    CASE WHEN to_regprocedure(%(insert_function)s) IS NOT NULL
+         THEN has_function_privilege(current_user, %(insert_function)s, 'EXECUTE')
+    END AS insert_function_execute,
+    to_regclass(%(config_table)s) IS NOT NULL AS config_table_exists,
+    CASE WHEN to_regclass(%(config_table)s) IS NOT NULL
+         THEN has_table_privilege(current_user, %(config_table)s, 'INSERT')
+    END AS config_table_insert,
+    CASE WHEN to_regclass(%(config_table)s) IS NOT NULL
+         THEN has_table_privilege(current_user, %(config_table)s, 'SELECT')
+    END AS config_table_select,
+    to_regclass(%(log_table)s) IS NOT NULL AS log_table_exists,
+    CASE WHEN to_regclass(%(log_table)s) IS NOT NULL
+         THEN has_table_privilege(current_user, %(log_table)s, 'SELECT')
+    END AS log_table_select,
+    to_regclass(%(sequence_name)s) IS NOT NULL AS sequence_exists,
+    CASE WHEN to_regclass(%(sequence_name)s) IS NOT NULL
+         THEN has_sequence_privilege(current_user, %(sequence_name)s, 'USAGE')
+    END AS sequence_usage;
+"""
+
+# Every enabled SQL step, used to detect the two generic scanner jobs.
+_PGAGENT_ALL_STEPS_SQL = """
+SELECT
+    j.jobid AS job_id,
+    j.jobname AS job_name,
+    j.jobenabled AS enabled,
+    s.jstid AS step_id,
+    s.jstenabled AS step_enabled,
+    s.jstcode AS code
+FROM pgagent.pga_job j
+JOIN pgagent.pga_jobstep s ON s.jstjobid = j.jobid
+WHERE s.jstkind = 's'
+ORDER BY j.jobid, s.jstid;
 """
 
 _PGAGENT_DETAIL_OBJECTS_SQL = """
@@ -188,11 +323,65 @@ def partition_job_function_identity() -> tuple[str, str]:
     )
 
 
+def partition_job_schema() -> str:
+    return _configured_identifier(
+        "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
+    )
+
+
+def partition_job_table_name() -> str:
+    return _configured_identifier(
+        "PARTITION_JOB_TABLE", DEFAULT_PARTITION_JOB_TABLE
+    )
+
+
+def partition_job_log_table_name() -> str:
+    return _configured_identifier(
+        "PARTITION_JOB_LOG_TABLE", DEFAULT_PARTITION_JOB_LOG_TABLE
+    )
+
+
+def partition_job_sequence_name() -> str:
+    return _configured_identifier(
+        "PARTITION_JOB_SEQUENCE", DEFAULT_PARTITION_JOB_SEQUENCE
+    )
+
+
+def manual_run_function_name() -> str:
+    return _configured_identifier(
+        "PARTITION_JOB_MANUAL_FUNCTION", DEFAULT_MANUAL_RUN_FUNCTION
+    )
+
+
 def build_create_partition_job_sql() -> str:
     """Build the parameterised function call. Identifiers come from env, not user input."""
     schema, function_name = partition_job_function_identity()
     return _CREATE_PARTITION_JOB_SQL_TEMPLATE.format(
         schema=schema, function=function_name
+    )
+
+
+def build_partition_jobs_sql() -> str:
+    return _PARTITION_JOBS_SQL_TEMPLATE.format(
+        schema=partition_job_schema(), table=partition_job_table_name()
+    )
+
+
+def build_partition_job_by_id_sql() -> str:
+    return _PARTITION_JOB_BY_ID_SQL_TEMPLATE.format(
+        schema=partition_job_schema(), table=partition_job_table_name()
+    )
+
+
+def build_partition_job_logs_sql() -> str:
+    return _PARTITION_JOB_LOGS_SQL_TEMPLATE.format(
+        schema=partition_job_schema(), table=partition_job_log_table_name()
+    )
+
+
+def build_run_partition_job_manual_sql() -> str:
+    return _RUN_PARTITION_JOB_MANUAL_SQL_TEMPLATE.format(
+        schema=partition_job_schema(), function=manual_run_function_name()
     )
 
 
@@ -854,3 +1043,181 @@ def get_pgagent_job_details(
         "autofill": autofill,
         "step_choices": step_choices,
     }
+
+
+def _validate_job_id(job_id: Any) -> int:
+    try:
+        value = int(job_id)
+    except (TypeError, ValueError) as exc:
+        raise DatabaseError("Partition Job ID must be a whole number.") from exc
+    if value < 1:
+        raise DatabaseError("Partition Job ID must be greater than zero.")
+    return value
+
+
+def get_partition_jobs() -> list[dict]:
+    """Return every parameterised configuration row. Read-only."""
+    statement = build_partition_jobs_sql()
+    with _connection(_main_db_kwargs()) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(statement)
+                return [dict(row) for row in cur.fetchall()]
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def get_partition_job(job_id: Any) -> Optional[dict]:
+    """Return one parameterised configuration row, or None. Read-only."""
+    job_id_int = _validate_job_id(job_id)
+    statement = build_partition_job_by_id_sql()
+    with _connection(_main_db_kwargs()) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(statement, {"job_id": job_id_int})
+                row = cur.fetchone()
+                return dict(row) if row else None
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def get_partition_job_logs(limit: int = 100) -> list[dict]:
+    """Return the most recent execution history rows. Read-only."""
+    try:
+        row_limit = int(limit)
+    except (TypeError, ValueError):
+        row_limit = 100
+    row_limit = max(1, min(row_limit, 1000))
+
+    statement = build_partition_job_logs_sql()
+    with _connection(_main_db_kwargs()) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(statement, {"row_limit": row_limit})
+                return [dict(row) for row in cur.fetchall()]
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def run_partition_job_manual(job_id: Any) -> Any:
+    """
+    Execute an already-configured partition job immediately.
+
+    Delegates entirely to the database function, which chooses create or drop and
+    writes execution history. next_run_time is deliberately never modified here —
+    scheduling stays under database control so a manual retry does not disturb
+    the automatic schedule.
+    """
+    job_id_int = _validate_job_id(job_id)
+    statement = build_run_partition_job_manual_sql()
+
+    with _connection(_main_db_kwargs()) as conn:
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(statement, {"job_id": job_id_int})
+                    result = None
+                    if cur.description is not None:
+                        row = cur.fetchone()
+                        if row:
+                            result = row[0]
+            return result
+        except DatabaseError:
+            raise
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def get_generic_partition_schedulers() -> dict[str, Any]:
+    """
+    Detect the two generic pgAgent scanner jobs. Strictly read-only.
+
+    These are the only pgAgent jobs the new architecture needs: they poll the
+    configuration table. The application never creates or modifies pgAgent jobs.
+    """
+    schema = partition_job_schema()
+    wanted = {
+        GENERIC_CREATE_SCANNER: "create_scheduler",
+        GENERIC_DROP_SCANNER: "drop_scheduler",
+    }
+    found: dict[str, Any] = {"create_scheduler": None, "drop_scheduler": None}
+
+    with _connection(_pgagent_db_kwargs()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(_PGAGENT_EXISTS_SQL)
+            exists_row = cur.fetchone()
+            if not exists_row or not exists_row[0]:
+                raise PgAgentNotInstalledError(
+                    "pgAgent is not installed in the configured pgAgent database, "
+                    "or its objects are stored in another database."
+                )
+
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(_PGAGENT_ALL_STEPS_SQL)
+            steps = [dict(row) for row in cur.fetchall()]
+
+            matched_job_ids: dict[str, int] = {}
+            for step in steps:
+                for called_schema, called_function in extract_called_functions(
+                    step.get("code") or ""
+                ):
+                    if called_schema.lower() != schema.lower():
+                        continue
+                    key = wanted.get(called_function.lower())
+                    if key is None or found[key] is not None:
+                        continue
+                    found[key] = {
+                        "job_id": step.get("job_id"),
+                        "job_name": step.get("job_name"),
+                        "enabled": bool(step.get("enabled")),
+                        "step_enabled": bool(step.get("step_enabled")),
+                        "function": f"{called_schema}.{called_function}",
+                        "schedule": None,
+                    }
+                    matched_job_ids[key] = int(step.get("job_id"))
+
+            # Render each detected scanner's own pgAgent schedule for the demo view.
+            for key, job_id in matched_job_ids.items():
+                cur.execute(_PGAGENT_SCHEDULES_SQL, {"job_id": job_id})
+                schedules = [dict(row) for row in cur.fetchall()]
+                enabled = [row for row in schedules if row.get("enabled")]
+                if len(enabled) != 1:
+                    continue
+                cron, _warnings = convert_pgagent_schedule_to_cron(
+                    enabled[0].get("minutes"),
+                    enabled[0].get("hours"),
+                    enabled[0].get("monthdays"),
+                    enabled[0].get("months"),
+                    enabled[0].get("weekdays"),
+                )
+                found[key]["schedule"] = cron
+
+    return found
+
+
+def get_database_readiness() -> dict[str, Any]:
+    """
+    Report whether the current role can use the partition-job objects.
+
+    Read-only introspection only — this never grants or changes any privilege.
+    """
+    schema = partition_job_schema()
+    _fn_schema, function_name = partition_job_function_identity()
+    params = {
+        "schema_name": schema,
+        "insert_function": (
+            f"{schema}.{function_name}({INSERT_FUNCTION_ARGUMENT_TYPES})"
+        ),
+        "config_table": f"{schema}.{partition_job_table_name()}",
+        "log_table": f"{schema}.{partition_job_log_table_name()}",
+        "sequence_name": f"{schema}.{partition_job_sequence_name()}",
+    }
+
+    with _connection(_main_db_kwargs()) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(_DATABASE_READINESS_SQL, params)
+                row = cur.fetchone()
+                return dict(row) if row else {}
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
