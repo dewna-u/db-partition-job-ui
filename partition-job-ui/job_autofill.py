@@ -56,7 +56,7 @@ _PARTITION_PERIOD_ASSIGN_RE = re.compile(
 )
 _CREATE_DROP_INTERVAL_ASSIGN_RE = re.compile(
     r"\b(?:v_|p_)?(?:is_)?create_drop_interval\s*:="
-    r"[^;]*?(\d+)\s*(day|days|week|weeks|month|months)\b",
+    r"[^;]*?(\d+)\s*(day|days|week|weeks|month|months|year|years)\b",
     re.IGNORECASE,
 )
 
@@ -79,7 +79,7 @@ _CUR_DATE_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _INTERVAL_LITERAL_RE = re.compile(
-    r"\binterval\s*'\s*(\d+)\s*(day|days|week|weeks|month|months)\s*'",
+    r"\binterval\s*'\s*(\d+)\s*(day|days|week|weeks|month|months|year|years)\s*'",
     re.IGNORECASE,
 )
 
@@ -377,7 +377,7 @@ def extract_partition_settings(
     for match in _CREATE_DROP_INTERVAL_ASSIGN_RE.finditer(cleaned):
         amount = int(match.group(1))
         unit = match.group(2).lower().rstrip("s")
-        if amount >= 1 and unit in {"day", "week", "month"}:
+        if amount >= 1 and unit in {"day", "week", "month", "year"}:
             intervals.append((amount, unit))
     unique_intervals = list(dict.fromkeys(intervals))
     if len(unique_intervals) == 1:
@@ -539,7 +539,7 @@ def infer_frequency(
     Frequency is the run cadence (not the partition period).
     Returns ((amount, unit), warning).
     """
-    fields = (schedule or "").split()
+    fields = (normalize_cron_expression(schedule) or schedule or "").split()
     if len(fields) == 6:
         _second, minute, hour, day, month, weekday = fields
     elif len(fields) == 5:
@@ -599,12 +599,64 @@ def infer_frequency(
     )
 
 
-def _parse_cron_field(field: str, minimum: int, maximum: int) -> Optional[Set[int]]:
-    """Parse a single cron field into allowed integers, or None if unsupported."""
+_MONTH_NAME_VALUES = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
+_WEEKDAY_NAME_VALUES = {
+    "sun": 0,
+    "mon": 1,
+    "tue": 2,
+    "wed": 3,
+    "thu": 4,
+    "fri": 5,
+    "sat": 6,
+}
+
+# "?" means "no specific value" in Quartz-style schedules; treated as a wildcard.
+_CRON_WILDCARDS = ("*", "?")
+
+
+def _is_cron_wildcard(field: str) -> bool:
+    return (field or "").strip() in _CRON_WILDCARDS
+
+
+def _cron_token_value(token: str, names: Optional[dict]) -> Optional[int]:
+    text = (token or "").strip().lower()
+    if names and text in names:
+        return names[text]
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    return None
+
+
+def _parse_cron_field(
+    field: str,
+    minimum: int,
+    maximum: int,
+    names: Optional[dict] = None,
+) -> Optional[Set[int]]:
+    """
+    Parse a single cron field into allowed integers, or None if unsupported.
+
+    Supports wildcards (* and ?), single values, comma lists, ranges, step
+    expressions on wildcards and ranges, and symbolic month/day names.
+    """
     text = (field or "").strip()
     if not text:
         return None
-    if text == "*":
+    if text in _CRON_WILDCARDS:
         return set(range(minimum, maximum + 1))
 
     values: Set[int] = set()
@@ -612,44 +664,76 @@ def _parse_cron_field(field: str, minimum: int, maximum: int) -> Optional[Set[in
         token = part.strip()
         if not token:
             return None
-        if token.startswith("*/"):
-            try:
-                step = int(token[2:])
-            except ValueError:
+
+        step = 1
+        if "/" in token:
+            base, _, step_text = token.partition("/")
+            if not re.fullmatch(r"\d+", step_text.strip()):
                 return None
+            step = int(step_text)
             if step < 1:
                 return None
-            values.update(range(minimum, maximum + 1, step))
-            continue
-        if "-" in token:
-            start_text, end_text = token.split("-", 1)
-            if not (
-                re.fullmatch(r"\d+", start_text) and re.fullmatch(r"\d+", end_text)
-            ):
+            token = base.strip()
+            if not token:
                 return None
-            start = int(start_text)
-            end = int(end_text)
-            if start > end or start < minimum or end > maximum:
+
+        if token in _CRON_WILDCARDS:
+            start, end = minimum, maximum
+        elif "-" in token:
+            start_text, _, end_text = token.partition("-")
+            start_value = _cron_token_value(start_text, names)
+            end_value = _cron_token_value(end_text, names)
+            if start_value is None or end_value is None:
                 return None
-            values.update(range(start, end + 1))
-            continue
-        if not re.fullmatch(r"\d+", token):
+            start, end = start_value, end_value
+        else:
+            single = _cron_token_value(token, names)
+            if single is None:
+                return None
+            start = end = single
+
+        if start > end or start < minimum or end > maximum:
             return None
-        number = int(token)
-        if number < minimum or number > maximum:
-            return None
-        values.add(number)
+        values.update(range(start, end + 1, step))
+
     return values if values else None
 
 
 CRON_FIELD_BOUNDS = (
-    ("second", 0, 59),
-    ("minute", 0, 59),
-    ("hour", 0, 23),
-    ("day-of-month", 1, 31),
-    ("month", 1, 12),
-    ("day-of-week", 0, 6),
+    ("second", 0, 59, None),
+    ("minute", 0, 59, None),
+    ("hour", 0, 23, None),
+    ("day-of-month", 1, 31, None),
+    ("month", 1, 12, _MONTH_NAME_VALUES),
+    ("day-of-week", 0, 6, _WEEKDAY_NAME_VALUES),
 )
+
+
+def normalize_cron_expression(schedule: str) -> Optional[str]:
+    """
+    Rewrite a valid six-field schedule into purely numeric form.
+
+    Symbolic names become numbers and "?" becomes "*", so downstream inference
+    works on one canonical representation. Returns None if the schedule is not
+    six fields.
+    """
+    fields = (schedule or "").split()
+    if len(fields) != 6:
+        return None
+
+    normalised: list[str] = []
+    for value, (_name, _minimum, _maximum, names) in zip(fields, CRON_FIELD_BOUNDS):
+        if value == "?":
+            normalised.append("*")
+            continue
+        if names:
+            def _replace(match: "re.Match") -> str:
+                mapped = names.get(match.group(0).lower())
+                return str(mapped) if mapped is not None else match.group(0)
+
+            value = re.sub(r"[A-Za-z]+", _replace, value)
+        normalised.append(value)
+    return " ".join(normalised)
 
 _WEEKDAY_NAMES = (
     "Sunday",
@@ -674,12 +758,12 @@ def validate_six_field_cron(schedule: str) -> Optional[str]:
             "Job Schedule must contain exactly six whitespace-separated fields: "
             "second minute hour day-of-month month day-of-week."
         )
-    for value, (name, minimum, maximum) in zip(fields, CRON_FIELD_BOUNDS):
-        if _parse_cron_field(value, minimum, maximum) is None:
+    for value, (name, minimum, maximum, names) in zip(fields, CRON_FIELD_BOUNDS):
+        if _parse_cron_field(value, minimum, maximum, names) is None:
             return (
                 f"The {name} field of the Job Schedule is invalid: '{value}'. "
-                f"Use *, a number between {minimum} and {maximum}, a list, "
-                "a range, or a */step value."
+                f"Use * or ?, a number between {minimum} and {maximum}, a list, "
+                "a range, or a step value."
             )
     return None
 
@@ -688,7 +772,10 @@ def describe_schedule(schedule: str) -> Optional[str]:
     """Return a short human-readable meaning for common six-field schedules."""
     if validate_six_field_cron(schedule):
         return None
-    second, minute, hour, day, month, weekday = schedule.split()
+    normalised = normalize_cron_expression(schedule)
+    if not normalised:
+        return None
+    second, minute, hour, day, month, weekday = normalised.split()
 
     def _step(field: str) -> Optional[int]:
         if field.startswith("*/"):
@@ -774,8 +861,8 @@ def calculate_next_run(
     minutes = _parse_cron_field(minute_field, 0, 59)
     hours = _parse_cron_field(hour_field, 0, 23)
     days = _parse_cron_field(day_field, 1, 31)
-    months = _parse_cron_field(month_field, 1, 12)
-    weekdays = _parse_cron_field(weekday_field, 0, 6)
+    months = _parse_cron_field(month_field, 1, 12, _MONTH_NAME_VALUES)
+    weekdays = _parse_cron_field(weekday_field, 0, 6, _WEEKDAY_NAME_VALUES)
     if None in (seconds, minutes, hours, days, months, weekdays):
         return None
 
@@ -802,8 +889,8 @@ def calculate_next_run(
     if bound_end is not None and bound_end < limit:
         limit = bound_end
 
-    day_restricted = day_field != "*"
-    weekday_restricted = weekday_field != "*"
+    day_restricted = not _is_cron_wildcard(day_field)
+    weekday_restricted = not _is_cron_wildcard(weekday_field)
 
     while candidate <= limit:
         if candidate.month not in months:

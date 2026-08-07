@@ -17,6 +17,7 @@ from database import DatabaseError, create_partition_job, get_pgagent_job_detail
 from job_autofill import (
     calculate_next_run,
     convert_pgagent_schedule_to_cron,
+    describe_schedule,
     extract_called_functions,
     extract_partition_settings,
     extract_single_called_function,
@@ -24,6 +25,15 @@ from job_autofill import (
     infer_frequency,
     infer_is_create,
     infer_is_create_from_definition,
+    validate_six_field_cron,
+)
+from validators import (
+    ValidationError,
+    to_interval_string,
+    validate_create_drop_unit,
+    validate_cron_schedule,
+    validate_form_data,
+    validate_frequency_unit,
 )
 
 
@@ -281,6 +291,9 @@ class FakeCursor:
     def fetchone(self):
         return self.owner.row
 
+    def fetchall(self):
+        return self.owner.rows
+
 
 class FakeTransaction:
     def __init__(self, owner: "FakeConnection") -> None:
@@ -298,8 +311,11 @@ class FakeTransaction:
 
 
 class FakeConnection:
-    def __init__(self, row=(None,), description=(("result",),), error=None) -> None:
+    def __init__(
+        self, row=(None,), description=(("result",),), error=None, rows=()
+    ) -> None:
         self.row = row
+        self.rows = list(rows)
         self.description = description
         self.error = error
         self.executed: list = []
@@ -483,6 +499,235 @@ class ConfiguredObjectNameTests(unittest.TestCase):
         ):
             sql = database.build_create_partition_job_sql()
         self.assertIn("other_schema.other_function", sql)
+
+
+class ManualRunTests(unittest.TestCase):
+    def _run(self, connection: FakeConnection, job_id=7):
+        @contextmanager
+        def fake_connection(_kwargs):
+            yield connection
+
+        with patch.object(database, "_connection", fake_connection), patch.object(
+            database, "_main_db_kwargs", return_value={}
+        ):
+            return database.run_partition_job_manual(job_id)
+
+    def test_uses_bound_parameter_and_manual_function(self) -> None:
+        conn = FakeConnection(row=("MANUAL_SUCCESS",))
+        result = self._run(conn)
+        sql, params = conn.executed[0]
+
+        self.assertEqual(result, "MANUAL_SUCCESS")
+        self.assertIn("mubasher_oms.run_partition_job_manual", sql)
+        self.assertIn("%(job_id)s", sql)
+        self.assertEqual(params, {"job_id": 7})
+        self.assertNotIn("7", sql)
+        self.assertTrue(conn.committed)
+
+    def test_does_not_touch_next_run_time(self) -> None:
+        conn = FakeConnection(row=(None,))
+        self._run(conn)
+        sql, _params = conn.executed[0]
+        self.assertNotIn("next_run_time", sql.lower())
+        self.assertNotIn("update", sql.lower())
+
+    def test_rejects_non_numeric_job_id(self) -> None:
+        with self.assertRaises(DatabaseError):
+            database.run_partition_job_manual("not-a-number")
+
+    def test_rolls_back_on_failure(self) -> None:
+        conn = FakeConnection(error=FakePgError("boom", sqlstate="42883"))
+        with self.assertRaises(DatabaseError):
+            self._run(conn)
+        self.assertTrue(conn.rolled_back)
+        self.assertFalse(conn.committed)
+
+
+class ReadOnlyQueryTests(unittest.TestCase):
+    def _capture(self, loader, *args):
+        conn = FakeConnection(row=None, description=None)
+
+        @contextmanager
+        def fake_connection(_kwargs):
+            yield conn
+
+        with patch.object(database, "_connection", fake_connection), patch.object(
+            database, "_main_db_kwargs", return_value={}
+        ):
+            loader(*args)
+        return conn.executed[0]
+
+    def test_configured_jobs_query_is_read_only(self) -> None:
+        sql, _params = self._capture(database.get_partition_jobs)
+        lowered = sql.lower()
+        self.assertIn("select", lowered)
+        self.assertIn("order by job_id desc", lowered)
+        self.assertIn("frequency", lowered)
+        self.assertNotIn("job_frequency", lowered)
+        for forbidden in ("insert", "update", "delete", "truncate", "drop "):
+            self.assertNotIn(forbidden, lowered)
+
+    def test_history_query_is_read_only_and_bounded(self) -> None:
+        sql, params = self._capture(database.get_partition_job_logs, 100)
+        lowered = sql.lower()
+        self.assertIn("order by job_runtime desc", lowered)
+        self.assertIn("%(row_limit)s", sql)
+        self.assertEqual(params, {"row_limit": 100})
+        for forbidden in ("insert", "update", "delete", "truncate"):
+            self.assertNotIn(forbidden, lowered)
+
+    def test_history_limit_is_clamped(self) -> None:
+        _sql, params = self._capture(database.get_partition_job_logs, 10_000)
+        self.assertEqual(params, {"row_limit": 1000})
+
+    def test_configured_job_by_id_uses_bound_parameter(self) -> None:
+        sql, params = self._capture(database.get_partition_job, 5)
+        self.assertIn("%(job_id)s", sql)
+        self.assertEqual(params, {"job_id": 5})
+
+
+class ArchitectureTests(unittest.TestCase):
+    """The UI must not recreate the old one-pgAgent-job-per-table design."""
+
+    def _sources(self) -> dict[str, str]:
+        sources = {}
+        for name in ("app.py", "database.py", "validators.py", "job_autofill.py"):
+            with open(name, "r", encoding="utf-8") as handle:
+                sources[name] = handle.read()
+        return sources
+
+    def test_wrong_function_name_is_absent(self) -> None:
+        for name, source in self._sources().items():
+            self.assertNotIn("insert_into_partition_job_table", source, name)
+
+    def test_job_frequency_column_is_absent(self) -> None:
+        for name, source in self._sources().items():
+            self.assertNotIn("job_frequency", source, name)
+
+    def test_no_direct_insert_into_configuration_table(self) -> None:
+        for name, source in self._sources().items():
+            lowered = source.lower()
+            self.assertNotIn("insert into mubasher_oms", lowered, name)
+            self.assertNotIn("insert into {schema}", lowered, name)
+            self.assertNotIn("insert into partitioning_job_table", lowered, name)
+
+    def test_no_writes_to_pgagent_catalog(self) -> None:
+        for name, source in self._sources().items():
+            lowered = source.lower()
+            for forbidden in (
+                "insert into pgagent",
+                "update pgagent",
+                "delete from pgagent",
+                "pgagent.pga_jobclass",
+            ):
+                self.assertNotIn(forbidden, lowered, name)
+
+    def test_both_tabs_share_one_submission_pathway(self) -> None:
+        import app
+
+        source = inspect.getsource(app)
+        # Exactly one place calls the database create method.
+        self.assertEqual(source.count("create_partition_job(validated)"), 1)
+        self.assertIn("def submit_partition_configuration", source)
+        # Both prefixes flow through the same field renderer and submit button.
+        self.assertIn("_render_job_fields(CONVERT_PREFIX)", source)
+        self.assertIn("_render_job_fields(NEW_PREFIX)", source)
+        self.assertEqual(source.count("_render_submit_button("), 3)
+
+    def test_generic_scanner_names_are_defined(self) -> None:
+        self.assertEqual(database.GENERIC_CREATE_SCANNER, "run_partition_create_jobs")
+        self.assertEqual(database.GENERIC_DROP_SCANNER, "run_partition_drop_jobs")
+
+
+class TimeConceptIndependenceTests(unittest.TestCase):
+    """Frequency, partition period and create/drop interval must stay separate."""
+
+    def test_three_concepts_map_to_distinct_parameters(self) -> None:
+        payload = dict(VALID_PAYLOAD)
+        payload["frequency"] = "1 month"
+        payload["partition_period"] = 3
+        payload["partition_unit"] = "week"
+        payload["create_drop_interval"] = "6 months"
+
+        conn = FakeConnection(row=(None,))
+
+        @contextmanager
+        def fake_connection(_kwargs):
+            yield conn
+
+        with patch.object(database, "_connection", fake_connection), patch.object(
+            database, "_main_db_kwargs", return_value={}
+        ):
+            create_partition_job(payload)
+
+        _sql, params = conn.executed[0]
+        self.assertEqual(params["frequency"], "1 month")
+        self.assertEqual(params["partition_period"], 3)
+        self.assertEqual(params["partition_unit"], "week")
+        self.assertEqual(params["create_drop_interval"], "6 months")
+
+    def test_validator_keeps_units_independent(self) -> None:
+        validated = validate_form_data(
+            {
+                "job_name": "JOB_X",
+                "is_enabled": True,
+                "table_schema": "mubasher_oms",
+                "table_name": "some_table",
+                "db_config": "{}",
+                "job_schedule": "0 0 2 26 * *",
+                "frequency_amount": 1,
+                "frequency_unit": "month",
+                "next_run_time": datetime(2026, 8, 26, 2, 0, 0),
+                "partition_unit": "day",
+                "partition_period": 7,
+                "is_create": False,
+                "create_drop_amount": 6,
+                "create_drop_unit": "month",
+            }
+        )
+        self.assertEqual(validated["frequency"], "1 month")
+        self.assertEqual(validated["partition_unit"], "day")
+        self.assertEqual(validated["partition_period"], 7)
+        self.assertEqual(validated["create_drop_interval"], "6 months")
+        self.assertFalse(validated["is_create"])
+
+
+class CronValidationTests(unittest.TestCase):
+    def test_six_field_schedules_are_accepted(self) -> None:
+        for expression in (
+            "0 0 2 26 * *",
+            "0 */10 * * * *",
+            "0 0 2 ? * MON",
+            "0 0 2 1-5 * *",
+            "0 0 2 * JAN *",
+            "*/30 * * * * *",
+        ):
+            self.assertIsNone(validate_six_field_cron(expression), expression)
+            self.assertEqual(validate_cron_schedule(expression), expression)
+
+    def test_invalid_schedules_are_rejected(self) -> None:
+        for expression in (
+            "0 0 2 26 *",
+            "0 0 99 * * *",
+            "0 0 2 32 * *",
+            "0 0 2 * FOO *",
+            "0 0 2 * * 9",
+        ):
+            self.assertIsNotNone(validate_six_field_cron(expression), expression)
+            with self.assertRaises(ValidationError):
+                validate_cron_schedule(expression)
+
+    def test_monthly_schedule_is_described_and_monthly(self) -> None:
+        self.assertEqual(
+            describe_schedule("0 0 2 26 * *"), "02:00 on day 26 of every month"
+        )
+        self.assertEqual(infer_frequency("0 0 2 26 * *"), ((1, "month"), None))
+
+    def test_year_units_are_supported_end_to_end(self) -> None:
+        self.assertEqual(validate_frequency_unit("year"), "year")
+        self.assertEqual(validate_create_drop_unit("year"), "year")
+        self.assertEqual(to_interval_string(1, "year"), "1 year")
+        self.assertEqual(to_interval_string(2, "year"), "2 years")
 
 
 class BoundParameterTests(unittest.TestCase):
