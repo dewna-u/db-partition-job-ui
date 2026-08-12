@@ -32,12 +32,9 @@ logger = logging.getLogger(__name__)
 
 PAGE_TITLE = "Database Partition Job Management"
 
-DEFAULT_DB_CONFIG = """{
-  "work_mem": "512MB",
-  "maintenance_work_mem": "1GB"
-}"""
-
-NEW_JOB_DB_CONFIG = "{}"
+# Never seed example settings here: Database Configuration is either extracted
+# from the called partition function or entered deliberately by the user.
+EMPTY_DB_CONFIG = "{}"
 
 GENERIC_DB_ERROR = "The database operation failed. Check the server logs for details."
 
@@ -209,7 +206,7 @@ def _init_session_state() -> None:
     _init_form_state(
         CONVERT_PREFIX,
         _shared_form_defaults(
-            db_config=DEFAULT_DB_CONFIG,
+            db_config=EMPTY_DB_CONFIG,
             schedule="0 0 2 * * *",
             job_name="",
         ),
@@ -217,7 +214,7 @@ def _init_session_state() -> None:
     _init_form_state(
         NEW_PREFIX,
         _shared_form_defaults(
-            db_config=NEW_JOB_DB_CONFIG,
+            db_config=EMPTY_DB_CONFIG,
             schedule="0 0 2 * * *",
             job_name="",
         ),
@@ -312,8 +309,11 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
         key=prefix + "db_config",
         height=110,
         help=(
-            "Session settings applied while the partition operation runs. "
-            "A database trigger adds a default lock_timeout when it is missing."
+            "Session settings applied while the partition operation runs. When a "
+            "pgAgent job is loaded this is read from the called function's own "
+            "SET / set_config statements, so an empty object means the function "
+            "sets nothing. A database trigger adds a default lock_timeout when "
+            "it is missing."
         ),
     )
 

@@ -14,17 +14,19 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from job_autofill import (
+    PartitionOperationEvidence,
     build_db_config_json,
     calculate_next_run,
     convert_pgagent_schedule_to_cron,
     count_top_level_call_arguments,
     extract_called_functions,
+    extract_db_config_from_function,
     extract_partition_settings,
     extract_single_called_function,
     extract_single_target_table,
     infer_frequency,
     infer_is_create,
-    infer_is_create_from_definition,
+    infer_partition_operation_from_function,
 )
 
 load_dotenv()
@@ -759,8 +761,16 @@ def _inspect_called_function(
     function_schema: str,
     function_name: str,
     step_code: str,
-) -> tuple[dict[str, Any], list[str]]:
-    """Read function metadata only. Never execute the function or jstcode."""
+) -> tuple[dict[str, Any], list[str], Optional[PartitionOperationEvidence]]:
+    """
+    Read function metadata only. Never execute the function or jstcode.
+
+    The third return value is the CREATE/DROP evidence gathered from the
+    executable function body, or None when the body could not be inspected at
+    all (function missing, unresolved overload, or a failed catalog read).
+    Callers must treat those two cases differently: an inspected-but-inconclusive
+    body means "ask the user", never "guess from the name".
+    """
     autofill: dict[str, Any] = {}
     warnings: list[str] = []
 
@@ -777,7 +787,7 @@ def _inspect_called_function(
                 rows = [dict(row) for row in cur.fetchall()]
     except DatabaseError as exc:
         warnings.append(exc.message)
-        return autofill, warnings
+        return autofill, warnings, None
 
     if not rows:
         warnings.append(
@@ -785,7 +795,7 @@ def _inspect_called_function(
             "Table Schema, Table Name, Partition Unit, Partition Period, "
             "and Create/Drop Interval were left unchanged."
         )
-        return autofill, warnings
+        return autofill, warnings, None
 
     chosen = rows[0]
     if len(rows) > 1:
@@ -804,7 +814,7 @@ def _inspect_called_function(
                 "Multiple overloads exist for the called function and the correct one "
                 "could not be identified safely. Function-derived fields were left unchanged."
             )
-            return autofill, warnings
+            return autofill, warnings, None
 
     definition = chosen.get("function_definition") or ""
 
@@ -815,15 +825,33 @@ def _inspect_called_function(
     elif table_warning:
         warnings.append(table_warning)
 
-    # Prefer actual ADD/DROP PARTITION behaviour over the job-name heuristic.
-    create_from_def = infer_is_create_from_definition(definition)
-    if create_from_def is not None:
-        autofill["is_create"] = create_from_def
+    # The executable body is the authoritative source for CREATE vs DROP.
+    operation = infer_partition_operation_from_function(definition)
+    if operation.is_create is not None:
+        autofill["is_create"] = operation.is_create
+    logger.info(
+        "Partition operation inferred for %s.%s: %s — %s",
+        function_schema,
+        function_name,
+        operation.operation,
+        operation.reason,
+    )
+
+    # Database Configuration comes from the function's own SET / set_config
+    # statements. Reuses the definition already fetched above — no second query.
+    db_config, config_warnings = extract_db_config_from_function(definition)
+    warnings.extend(config_warnings)
+    autofill["db_config"] = build_db_config_json(db_config)
+    if not db_config:
+        warnings.append(
+            "The called function sets no session configuration, so Database "
+            "Configuration was left empty."
+        )
 
     settings, setting_warnings = extract_partition_settings(definition)
     warnings.extend(setting_warnings)
     autofill.update(settings)
-    return autofill, warnings
+    return autofill, warnings, operation
 
 
 def get_pgagent_job_details(
@@ -877,9 +905,8 @@ def get_pgagent_job_details(
 
     next_run = job.get("next_run")
 
-    is_create = infer_is_create(job_name)
-    if is_create is not None:
-        autofill["is_create"] = is_create
+    # Weak fallback only, and never applied while the function body is readable.
+    name_based_is_create = infer_is_create(job_name)
 
     enabled_schedules = [row for row in schedules if row.get("enabled")]
     schedule_info: dict[str, Any] = {
@@ -994,22 +1021,21 @@ def get_pgagent_job_details(
                 step_choices.append(choice)
 
     database_name = None
+    called_function_pair: Optional[tuple[str, str]] = None
+    operation_evidence: Optional[PartitionOperationEvidence] = None
     if selected_step is not None:
         database_name = selected_step.get("dbname")
-        db_config_json = build_db_config_json(database_name)
-        if db_config_json:
-            autofill["db_config"] = db_config_json
-        else:
-            warnings.append(
-                "The job step has no database name. "
-                "Database Configuration was left unchanged."
-            )
 
         function_pair, _already_warned = extract_single_called_function(
             selected_step.get("code") or ""
         )
         if function_pair:
-            func_autofill, func_warnings = _inspect_called_function(
+            called_function_pair = function_pair
+            (
+                func_autofill,
+                func_warnings,
+                operation_evidence,
+            ) = _inspect_called_function(
                 function_pair[0],
                 function_pair[1],
                 selected_step.get("code") or "",
@@ -1018,11 +1044,36 @@ def get_pgagent_job_details(
             warnings.extend(func_warnings)
 
     if "is_create" not in autofill:
-        warnings.append(
-            "Create Partitions could not be inferred from the job name or "
-            "called function (CREATE/DROP / ADD/DROP PARTITION was missing "
-            "or ambiguous) and was left unchanged."
-        )
+        if operation_evidence is not None:
+            # The body was readable but inconclusive. A name must not override
+            # or substitute for that, so the user decides.
+            warnings.append(
+                "Could not safely determine CREATE/DROP from the partition function. "
+                + operation_evidence.reason
+                + " Please review the operation manually."
+            )
+        else:
+            fallback = None
+            fallback_source = ""
+            if called_function_pair is not None:
+                fallback = infer_is_create(called_function_pair[1])
+                fallback_source = "called function name"
+            if fallback is None:
+                fallback = name_based_is_create
+                fallback_source = "job name"
+            if fallback is None:
+                warnings.append(
+                    "Could not safely determine CREATE/DROP: the partition function "
+                    "body could not be inspected and the names are not conclusive. "
+                    "Please review the operation manually."
+                )
+            else:
+                autofill["is_create"] = fallback
+                warnings.append(
+                    "The partition function body could not be inspected, so the "
+                    f"operation was taken from the {fallback_source}. A name is only "
+                    "metadata — verify CREATE/DROP before saving."
+                )
 
     public_steps = []
     for step in steps:

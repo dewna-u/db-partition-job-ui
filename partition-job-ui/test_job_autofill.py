@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import re
 import unittest
 from contextlib import contextmanager
@@ -15,16 +17,19 @@ from psycopg.types.json import Jsonb
 import database
 from database import DatabaseError, create_partition_job, get_pgagent_job_details
 from job_autofill import (
+    build_db_config_json,
     calculate_next_run,
     convert_pgagent_schedule_to_cron,
     describe_schedule,
     extract_called_functions,
+    extract_db_config_from_function,
     extract_partition_settings,
     extract_single_called_function,
     extract_single_target_table,
     infer_frequency,
     infer_is_create,
     infer_is_create_from_definition,
+    infer_partition_operation_from_function,
     validate_six_field_cron,
 )
 from validators import (
@@ -200,6 +205,429 @@ class PartitionSettingsExtractionTests(unittest.TestCase):
             || quote_ident(part_name);
         """
         self.assertFalse(infer_is_create_from_definition(definition))
+
+
+# Simplified from the real mubasher_oms.drop_partitions_m77_* function: the only
+# destructive statement is dynamic, and everything before it is discovery logic.
+REAL_DROP_FUNCTION_BODY = """
+CREATE OR REPLACE FUNCTION mubasher_oms.drop_partitions_m77_fi_consolidated_price_data()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $BODY$
+DECLARE
+    partition_name_arr text[];
+BEGIN
+    SET datestyle = 'ISO, DMY';
+
+    SELECT array_agg(c.relname)
+      INTO partition_name_arr
+      FROM pg_inherits i
+      JOIN pg_class c ON c.oid = i.inhrelid
+     WHERE pg_get_expr(c.relpartbound, c.oid) < cutoff_bound;
+
+    FOR i IN 1..COALESCE(ARRAY_LENGTH(partition_name_arr, 1), 0)
+    LOOP
+        EXECUTE format(
+            'DROP TABLE %I',
+            partition_name_arr[i]
+        );
+    END LOOP;
+END;
+$BODY$;
+"""
+
+EDB_ADD_PARTITION_BODY = """
+BEGIN
+    EXECUTE format(
+        'ALTER TABLE %I.%I ADD PARTITION %I VALUES LESS THAN (%L)',
+        v_schema, v_table, v_partition, v_bound
+    );
+END;
+"""
+
+DECLARATIVE_PARTITION_OF_BODY = """
+BEGIN
+    EXECUTE format(
+        'CREATE TABLE %I.%I PARTITION OF %I.%I FOR VALUES FROM (%L) TO (%L)',
+        v_schema, v_child, v_schema, v_parent, v_from, v_to
+    );
+END;
+"""
+
+
+class PartitionOperationInferenceTests(unittest.TestCase):
+    """CREATE/DROP must come from executable SQL, never from a name."""
+
+    def test_real_dynamic_drop_table_function(self) -> None:
+        evidence = infer_partition_operation_from_function(REAL_DROP_FUNCTION_BODY)
+        self.assertEqual(evidence.operation, "DROP")
+        self.assertIs(evidence.is_create, False)
+        self.assertIn("DROP TABLE", evidence.drop_evidence)
+        self.assertIn("DROP TABLE", evidence.reason)
+
+    def test_dynamic_drop_table_format(self) -> None:
+        body = "BEGIN EXECUTE format('DROP TABLE %I', partition_name); END;"
+        self.assertIs(infer_is_create_from_definition(body), False)
+
+    def test_direct_drop_table(self) -> None:
+        self.assertIs(
+            infer_is_create_from_definition("BEGIN DROP TABLE old_partition; END;"),
+            False,
+        )
+
+    def test_edb_add_partition_is_create(self) -> None:
+        evidence = infer_partition_operation_from_function(EDB_ADD_PARTITION_BODY)
+        self.assertEqual(evidence.operation, "CREATE")
+        self.assertIs(evidence.is_create, True)
+
+    def test_declarative_partition_of_is_create(self) -> None:
+        evidence = infer_partition_operation_from_function(
+            DECLARATIVE_PARTITION_OF_BODY
+        )
+        self.assertEqual(evidence.operation, "CREATE")
+        self.assertIs(evidence.is_create, True)
+
+    def test_attach_partition_is_create(self) -> None:
+        body = "BEGIN EXECUTE 'ALTER TABLE p ATTACH PARTITION c FOR VALUES ...'; END;"
+        self.assertIs(infer_is_create_from_definition(body), True)
+
+    def test_detach_partition_is_drop(self) -> None:
+        body = "BEGIN EXECUTE 'ALTER TABLE p DETACH PARTITION c'; END;"
+        self.assertIs(infer_is_create_from_definition(body), False)
+
+    def test_drop_inside_line_comment_is_ignored(self) -> None:
+        body = """
+        BEGIN
+            -- EXECUTE format('DROP TABLE %I', partition_name);
+            SELECT 1;
+        END;
+        """
+        evidence = infer_partition_operation_from_function(body)
+        self.assertEqual(evidence.operation, "UNKNOWN")
+        self.assertIsNone(evidence.is_create)
+
+    def test_create_inside_block_comment_is_ignored(self) -> None:
+        body = """
+        BEGIN
+            /* ALTER TABLE x ADD PARTITION y VALUES LESS THAN ('2026-01-01') */
+            SELECT 1;
+        END;
+        """
+        evidence = infer_partition_operation_from_function(body)
+        self.assertEqual(evidence.operation, "UNKNOWN")
+        self.assertIsNone(evidence.is_create)
+
+    def test_raise_notice_prose_is_not_evidence(self) -> None:
+        body = """
+        BEGIN
+            RAISE NOTICE 'About to drop table % for retention', v_name;
+            EXECUTE format('ALTER TABLE %I.%I ADD PARTITION %I', a, b, c);
+        END;
+        """
+        evidence = infer_partition_operation_from_function(body)
+        self.assertEqual(evidence.operation, "CREATE")
+
+    def test_both_create_and_drop_is_ambiguous(self) -> None:
+        body = """
+        BEGIN
+            EXECUTE format('ALTER TABLE %I.%I ADD PARTITION %I', a, b, c);
+            EXECUTE format('DROP TABLE %I', d);
+        END;
+        """
+        evidence = infer_partition_operation_from_function(body)
+        self.assertEqual(evidence.operation, "AMBIGUOUS")
+        self.assertIsNone(evidence.is_create)
+
+    def test_no_evidence_is_unknown_not_create(self) -> None:
+        body = "BEGIN SELECT count(*) FROM pg_class; END;"
+        evidence = infer_partition_operation_from_function(body)
+        self.assertEqual(evidence.operation, "UNKNOWN")
+        self.assertIsNone(evidence.is_create)
+
+    def test_discovery_selects_do_not_mask_drop(self) -> None:
+        # pg_inherits / pg_class / pg_get_expr lookups are not counter-evidence.
+        self.assertIs(
+            infer_is_create_from_definition(REAL_DROP_FUNCTION_BODY), False
+        )
+
+
+class DbConfigExtractionTests(unittest.TestCase):
+    """Database Configuration must mirror the function, never a default."""
+
+    def _config(self, body: str) -> dict:
+        config, _warnings = extract_db_config_from_function(body)
+        return config
+
+    def test_set_assignment(self) -> None:
+        self.assertEqual(
+            self._config("BEGIN SET datestyle = 'ISO, DMY'; END;"),
+            {"datestyle": "ISO, DMY"},
+        )
+
+    def test_set_to_syntax(self) -> None:
+        self.assertEqual(
+            self._config("BEGIN SET work_mem TO '512MB'; END;"),
+            {"work_mem": "512MB"},
+        )
+
+    def test_multiple_parameters(self) -> None:
+        body = """
+        BEGIN
+            SET work_mem = '512MB';
+            SET maintenance_work_mem = '1GB';
+            SET lock_timeout = '5s';
+        END;
+        """
+        self.assertEqual(
+            self._config(body),
+            {
+                "work_mem": "512MB",
+                "maintenance_work_mem": "1GB",
+                "lock_timeout": "5s",
+            },
+        )
+
+    def test_set_local_is_recognised(self) -> None:
+        self.assertEqual(
+            self._config("BEGIN SET LOCAL lock_timeout = '5s'; END;"),
+            {"lock_timeout": "5s"},
+        )
+
+    def test_set_config_perform(self) -> None:
+        self.assertEqual(
+            self._config("BEGIN PERFORM set_config('lock_timeout', '5s', true); END;"),
+            {"lock_timeout": "5s"},
+        )
+
+    def test_set_config_select(self) -> None:
+        self.assertEqual(
+            self._config("BEGIN SELECT set_config('work_mem', '512MB', true); END;"),
+            {"work_mem": "512MB"},
+        )
+
+    def test_line_comment_is_not_configuration(self) -> None:
+        self.assertEqual(self._config("-- SET work_mem = '512MB';"), {})
+
+    def test_block_comment_is_not_configuration(self) -> None:
+        body = """
+        /*
+        SET maintenance_work_mem = '1GB';
+        */
+        """
+        self.assertEqual(self._config(body), {})
+
+    def test_no_configuration_returns_empty(self) -> None:
+        self.assertEqual(self._config("BEGIN SELECT now(); END;"), {})
+
+    def test_dynamic_set_config_value_is_not_invented(self) -> None:
+        config, warnings = extract_db_config_from_function(
+            "BEGIN PERFORM set_config('work_mem', v_work_mem, true); END;"
+        )
+        self.assertEqual(config, {})
+        self.assertTrue(any("run-time value" in warning for warning in warnings))
+
+    def test_update_set_is_not_configuration(self) -> None:
+        body = """
+        BEGIN
+            UPDATE mubasher_oms.partitioning_job_table
+               SET last_run_status = 'SUCCESS'
+             WHERE job_id = v_job_id;
+        END;
+        """
+        self.assertEqual(self._config(body), {})
+
+    def test_unrelated_sql_is_not_configuration(self) -> None:
+        body = """
+        BEGIN
+            SELECT now() + INTERVAL '7 days';
+            RAISE NOTICE 'partition maintenance';
+            EXECUTE format('DROP TABLE %I', v_name);
+        END;
+        """
+        self.assertEqual(self._config(body), {})
+
+    def test_repeated_parameter_uses_last_value_and_warns(self) -> None:
+        body = """
+        BEGIN
+            SET work_mem = '256MB';
+            SET work_mem = '512MB';
+        END;
+        """
+        config, warnings = extract_db_config_from_function(body)
+        self.assertEqual(config, {"work_mem": "512MB"})
+        self.assertTrue(any("more than once" in warning for warning in warnings))
+
+    def test_real_m77_function_configuration(self) -> None:
+        config, _warnings = extract_db_config_from_function(REAL_DROP_FUNCTION_BODY)
+        self.assertEqual(config, {"datestyle": "ISO, DMY"})
+
+    def test_serialisation_is_valid_json(self) -> None:
+        rendered = build_db_config_json({"datestyle": "ISO, DMY"})
+        self.assertEqual(json.loads(rendered), {"datestyle": "ISO, DMY"})
+        self.assertEqual(json.loads(build_db_config_json({})), {})
+        self.assertEqual(json.loads(build_db_config_json(None)), {})
+
+    def test_credential_like_keys_are_dropped(self) -> None:
+        config, _warnings = extract_db_config_from_function(
+            "BEGIN SET password = 'hunter2'; SET work_mem = '512MB'; END;"
+        )
+        self.assertEqual(config, {"work_mem": "512MB"})
+
+    def test_no_dummy_defaults_remain_in_autofill_modules(self) -> None:
+        # Guards against a demo default creeping back into the production path.
+        source_dir = os.path.dirname(os.path.abspath(__file__))
+        for module_name in ("job_autofill.py", "database.py", "app.py"):
+            path = os.path.join(source_dir, module_name)
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+            self.assertNotIn("512MB", source, module_name)
+            self.assertNotIn("maintenance_work_mem", source, module_name)
+
+
+def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
+    """Drive get_pgagent_job_details() against a fake pgAgent job and function."""
+
+    job = {
+        "job_id": 7,
+        "job_name": job_name,
+        "enabled": True,
+        "host_agent": None,
+        "next_run": datetime(2026, 9, 1, 2, 0, 0),
+        "description": None,
+    }
+    steps = [
+        {
+            "step_id": 1,
+            "step_name": "run",
+            "enabled": True,
+            "kind": "s",
+            "code": "SELECT mubasher_oms.partition_maintenance_m77(current_date);",
+            "dbname": "demo_db",
+        }
+    ]
+    function_rows = [
+        {"oid": 1, "function_definition": function_body, "argument_count": 1}
+    ]
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.sql = ""
+
+        def __enter__(self) -> "Cursor":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def execute(self, sql, params=None) -> None:
+            self.sql = sql
+
+        def fetchone(self):
+            if "to_regclass" in self.sql:
+                return (True,)
+            if "WHERE jobid" in self.sql:
+                return dict(job)
+            return None
+
+        def fetchall(self):
+            if "jstjobid" in self.sql:
+                return [dict(row) for row in steps]
+            if "jscjobid" in self.sql:
+                return []
+            if "pg_get_functiondef" in self.sql:
+                return [dict(row) for row in function_rows]
+            return []
+
+    class Connection:
+        def cursor(self, row_factory=None) -> "Cursor":
+            return Cursor()
+
+    @contextmanager
+    def fake_connection(_kwargs):
+        yield Connection()
+
+    with patch.object(database, "_connection", fake_connection), patch.object(
+        database, "_pgagent_db_kwargs", return_value={}
+    ), patch.object(database, "_main_db_kwargs", return_value={}):
+        return get_pgagent_job_details(7)
+
+
+class OperationOverridesJobNameTests(unittest.TestCase):
+    """The executable body outranks the job name and the function name."""
+
+    def test_create_named_job_with_drop_body_infers_drop(self) -> None:
+        # The name alone would say CREATE.
+        self.assertIs(infer_is_create("JOB_CREATE_SOMETHING"), True)
+        details = _load_details_with_function_body(
+            "JOB_CREATE_SOMETHING", REAL_DROP_FUNCTION_BODY
+        )
+        self.assertIs(details["autofill"]["is_create"], False)
+
+    def test_drop_named_job_with_add_partition_body_infers_create(self) -> None:
+        self.assertIs(infer_is_create("JOB_DROP_SOMETHING"), False)
+        details = _load_details_with_function_body(
+            "JOB_DROP_SOMETHING", EDB_ADD_PARTITION_BODY
+        )
+        self.assertIs(details["autofill"]["is_create"], True)
+
+    def test_ambiguous_body_is_not_rescued_by_job_name(self) -> None:
+        body = """
+        BEGIN
+            EXECUTE format('ALTER TABLE %I.%I ADD PARTITION %I', a, b, c);
+            EXECUTE format('DROP TABLE %I', d);
+        END;
+        """
+        details = _load_details_with_function_body("JOB_CREATE_SOMETHING", body)
+        self.assertNotIn("is_create", details["autofill"])
+        self.assertTrue(
+            any(
+                "review the operation manually" in warning
+                for warning in details["warnings"]
+            )
+        )
+
+    def test_body_without_evidence_is_not_defaulted_to_create(self) -> None:
+        details = _load_details_with_function_body(
+            "JOB_CREATE_SOMETHING", "BEGIN SELECT 1; END;"
+        )
+        self.assertNotIn("is_create", details["autofill"])
+
+    def test_db_config_comes_from_the_loaded_function(self) -> None:
+        details = _load_details_with_function_body(
+            "JOB_DROP_PARTITIONS_M77", REAL_DROP_FUNCTION_BODY
+        )
+        autofill = details["autofill"]
+        self.assertEqual(
+            json.loads(autofill["db_config"]), {"datestyle": "ISO, DMY"}
+        )
+        # Operation and configuration are independent analyses of the same body.
+        self.assertIs(autofill["is_create"], False)
+
+    def test_db_config_is_empty_when_function_sets_nothing(self) -> None:
+        details = _load_details_with_function_body(
+            "JOB_CREATE_SOMETHING", EDB_ADD_PARTITION_BODY
+        )
+        self.assertEqual(json.loads(details["autofill"]["db_config"]), {})
+        self.assertTrue(
+            any(
+                "sets no session configuration" in warning
+                for warning in details["warnings"]
+            )
+        )
+
+    def test_existing_create_autofill_still_works(self) -> None:
+        details = _load_details_with_function_body(
+            "JOB_CREATE_PARTITIONS_R19_CUSTOMER_SUMMARY",
+            PartitionSettingsExtractionTests.SAMPLE_CREATE_FN,
+        )
+        autofill = details["autofill"]
+        self.assertIs(autofill["is_create"], True)
+        self.assertEqual(autofill["table_schema"], "mubasher_oms")
+        self.assertEqual(autofill["table_name"], "r19_customer_summary")
+        self.assertEqual(autofill["partition_unit"], "month")
+        self.assertEqual(autofill["partition_period"], 1)
+        self.assertEqual(autofill["create_drop_amount"], 2)
+        self.assertEqual(autofill["create_drop_unit"], "month")
 
 
 class UnknownJobIdTests(unittest.TestCase):

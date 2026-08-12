@@ -6,7 +6,7 @@ import json
 import re
 from calendar import monthrange
 from datetime import datetime, timedelta
-from typing import Any, Optional, Set
+from typing import Any, NamedTuple, Optional, Set
 
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
@@ -83,8 +83,44 @@ _INTERVAL_LITERAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Partition DDL evidence. These are matched against the function body *with SQL
+# string literals left intact*, because partition DDL is normally assembled
+# inside EXECUTE format('...') and stripping literals would discard the only
+# proof of what a function actually does.
 _ADD_PARTITION_RE = re.compile(r"\bADD\s+PARTITION\b", re.IGNORECASE)
 _DROP_PARTITION_RE = re.compile(r"\bDROP\s+PARTITION\b", re.IGNORECASE)
+_ATTACH_PARTITION_RE = re.compile(r"\bATTACH\s+PARTITION\b", re.IGNORECASE)
+_DETACH_PARTITION_RE = re.compile(r"\bDETACH\s+PARTITION\b", re.IGNORECASE)
+_DROP_TABLE_RE = re.compile(r"\bDROP\s+TABLE\b", re.IGNORECASE)
+# Declarative PostgreSQL partitioning: CREATE TABLE child PARTITION OF parent.
+# The bounded gap keeps an unrelated CREATE TABLE elsewhere in the body from
+# pairing with a distant PARTITION OF.
+_CREATE_TABLE_PARTITION_OF_RE = re.compile(
+    r"\bCREATE\s+TABLE\b[\s\S]{0,400}?\bPARTITION\s+OF\b", re.IGNORECASE
+)
+
+# RAISE messages describe behaviour in prose and routinely contain words such as
+# "drop table", so they are removed before evidence matching.
+_RAISE_STATEMENT_RE = re.compile(
+    r"\bRAISE\s+(?:DEBUG|LOG|INFO|NOTICE|WARNING|EXCEPTION)\b[^;]*;",
+    re.IGNORECASE,
+)
+
+_CREATE_EVIDENCE_RULES = (
+    ("ALTER TABLE ... ADD PARTITION", _ADD_PARTITION_RE),
+    ("CREATE TABLE ... PARTITION OF", _CREATE_TABLE_PARTITION_OF_RE),
+    ("ALTER TABLE ... ATTACH PARTITION", _ATTACH_PARTITION_RE),
+)
+_DROP_EVIDENCE_RULES = (
+    ("ALTER TABLE ... DROP PARTITION", _DROP_PARTITION_RE),
+    ("ALTER TABLE ... DETACH PARTITION", _DETACH_PARTITION_RE),
+    ("DROP TABLE", _DROP_TABLE_RE),
+)
+
+OPERATION_CREATE = "CREATE"
+OPERATION_DROP = "DROP"
+OPERATION_AMBIGUOUS = "AMBIGUOUS"
+OPERATION_UNKNOWN = "UNKNOWN"
 
 _SECRET_DB_CONFIG_KEYS = frozenset(
     {
@@ -99,15 +135,55 @@ _SECRET_DB_CONFIG_KEYS = frozenset(
     }
 )
 
-DEFAULT_DB_CONFIG_OBJECT: dict[str, Any] = {
-    "work_mem": "512MB",
-    "maintenance_work_mem": "1GB",
-}
+_QUOTED_LITERAL = r"'(?:[^']|'')*'"
+_UNQUOTED_VALUE = r"[A-Za-z0-9_.+-]+"
+_CONFIG_PARAM = r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?"
+
+# A configuration SET must begin a statement. Requiring a preceding statement
+# boundary is what stops "UPDATE t SET col = 'x'" from being read as database
+# configuration. The trailing semicolon is a lookahead so that it stays
+# available as the boundary of the statement that follows.
+_SET_STATEMENT_RE = re.compile(
+    r"(?:\A|;|\bBEGIN\b|\bTHEN\b|\bELSE\b|\bLOOP\b|\$[A-Za-z_]*\$)\s*"
+    rf"SET\s+(?:LOCAL\s+|SESSION\s+)?({_CONFIG_PARAM})\s*(?:=|\bTO\b)\s*"
+    rf"({_QUOTED_LITERAL}|{_UNQUOTED_VALUE})\s*(?=;)",
+    re.IGNORECASE,
+)
+
+# set_config(parameter, value, is_local)
+_SET_CONFIG_CALL_RE = re.compile(
+    rf"\bset_config\s*\(\s*({_QUOTED_LITERAL}|[^,()]+?)\s*,\s*"
+    rf"({_QUOTED_LITERAL}|[^,()]+?)\s*,",
+    re.IGNORECASE,
+)
+
+# SET forms that change session state rather than a configuration parameter.
+_NON_CONFIG_SET_KEYWORDS = frozenset(
+    {
+        "authorization",
+        "constraints",
+        "local",
+        "names",
+        "role",
+        "schema",
+        "session",
+        "time",
+        "transaction",
+    }
+)
+
+# A value meaning "reset this parameter", not a concrete setting.
+_NON_CONFIG_SET_VALUES = frozenset({"default"})
 
 
 def infer_is_create(job_name: str) -> Optional[bool]:
     """
-    Infer Create Partitions from the job name.
+    Infer Create Partitions from a job or function *name*.
+
+    This is a weak fallback only. A name is metadata; the executable function
+    body is authoritative and is inspected by
+    infer_partition_operation_from_function(). Callers must not use this to
+    override body evidence.
 
     Returns True / False when unambiguous, otherwise None.
     Uses case-insensitive whole-token matching (underscores and punctuation split tokens).
@@ -122,21 +198,98 @@ def infer_is_create(job_name: str) -> Optional[bool]:
     return None
 
 
+class PartitionOperationEvidence(NamedTuple):
+    """Outcome of inspecting a partition function body."""
+
+    operation: str
+    is_create: Optional[bool]
+    reason: str
+    create_evidence: tuple
+    drop_evidence: tuple
+
+
+def executable_sql_for_analysis(function_definition: str) -> str:
+    """
+    Return the parts of a function definition that actually execute.
+
+    Comments and RAISE messages are removed because they describe behaviour
+    rather than perform it. SQL string literals are deliberately KEPT: dynamic
+    partition DDL lives inside EXECUTE format('...'), and discarding literals
+    would remove the strongest available evidence.
+    """
+    cleaned = strip_sql_comments(function_definition or "")
+    return _RAISE_STATEMENT_RE.sub(" ", cleaned)
+
+
+def infer_partition_operation_from_function(
+    function_definition: str,
+) -> PartitionOperationEvidence:
+    """
+    Determine CREATE vs DROP from the executable body of a partition function.
+
+    Evidence is collected from partition DDL patterns rather than from any
+    single substring, so names, comments and prose cannot influence the result.
+    Conflicting or absent evidence yields no verdict — an unknown operation is
+    reported instead of a guess.
+    """
+    analysed = executable_sql_for_analysis(function_definition)
+    create_evidence = tuple(
+        label for label, regex in _CREATE_EVIDENCE_RULES if regex.search(analysed)
+    )
+    drop_evidence = tuple(
+        label for label, regex in _DROP_EVIDENCE_RULES if regex.search(analysed)
+    )
+
+    if create_evidence and not drop_evidence:
+        return PartitionOperationEvidence(
+            OPERATION_CREATE,
+            True,
+            "Detected partition-creating SQL in the function body: "
+            + ", ".join(create_evidence)
+            + ".",
+            create_evidence,
+            drop_evidence,
+        )
+    if drop_evidence and not create_evidence:
+        return PartitionOperationEvidence(
+            OPERATION_DROP,
+            False,
+            "Detected partition-removing SQL in the function body: "
+            + ", ".join(drop_evidence)
+            + ".",
+            create_evidence,
+            drop_evidence,
+        )
+    if create_evidence and drop_evidence:
+        return PartitionOperationEvidence(
+            OPERATION_AMBIGUOUS,
+            None,
+            "The function body contains both partition-creating SQL ("
+            + ", ".join(create_evidence)
+            + ") and partition-removing SQL ("
+            + ", ".join(drop_evidence)
+            + ").",
+            create_evidence,
+            drop_evidence,
+        )
+    return PartitionOperationEvidence(
+        OPERATION_UNKNOWN,
+        None,
+        "No partition-creating or partition-removing SQL was found in the "
+        "function body.",
+        create_evidence,
+        drop_evidence,
+    )
+
+
 def infer_is_create_from_definition(function_definition: str) -> Optional[bool]:
     """
     Infer Create Partitions from function SQL behaviour.
 
-    Prefers ADD PARTITION / DROP PARTITION statements over job-name heuristics.
-    Returns True / False when unambiguous, otherwise None.
+    Thin wrapper over infer_partition_operation_from_function() for callers that
+    only need the boolean. Returns True / False when unambiguous, otherwise None.
     """
-    cleaned = strip_sql_comments(function_definition or "")
-    has_add = bool(_ADD_PARTITION_RE.search(cleaned))
-    has_drop = bool(_DROP_PARTITION_RE.search(cleaned))
-    if has_add and not has_drop:
-        return True
-    if has_drop and not has_add:
-        return False
-    return None
+    return infer_partition_operation_from_function(function_definition).is_create
 
 
 def strip_sql_comments(sql_text: str) -> str:
@@ -981,12 +1134,90 @@ def calculate_next_run(
     return None
 
 
-def build_db_config_json(dbname: Optional[str]) -> Optional[str]:
-    """Build the expected JSON object, adding dbname when available. No secrets."""
-    if not dbname or not str(dbname).strip():
-        return None
-    payload = dict(DEFAULT_DB_CONFIG_OBJECT)
-    payload["dbname"] = str(dbname).strip()
+def _unquote_sql_literal(token: str) -> Optional[str]:
+    """Return the text of a single-quoted SQL literal, or None if unquoted."""
+    text = (token or "").strip()
+    if len(text) >= 2 and text.startswith("'") and text.endswith("'"):
+        return text[1:-1].replace("''", "'")
+    return None
+
+
+def extract_db_config_from_function(
+    function_definition: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """
+    Extract the session configuration a partition function applies to itself.
+
+    Only statically known configuration statements are recognised:
+    `SET name = value`, `SET name TO value`, and `set_config('name', 'value', ...)`.
+    Comments and RAISE messages are removed first, values are parsed rather than
+    evaluated, and a parameter whose value is only known at run time is reported
+    as a warning instead of being guessed.
+
+    Returns ({}, warnings) when the function configures nothing. No value is ever
+    invented, so an empty result means the function genuinely sets nothing.
+    """
+    analysed = executable_sql_for_analysis(function_definition)
+    warnings: list[str] = []
+    found: list[tuple[int, str, str]] = []
+
+    for match in _SET_STATEMENT_RE.finditer(analysed):
+        name = match.group(1)
+        raw_value = match.group(2)
+        if name.lower() in _NON_CONFIG_SET_KEYWORDS:
+            continue
+        value = _unquote_sql_literal(raw_value)
+        if value is None:
+            if raw_value.lower() in _NON_CONFIG_SET_VALUES:
+                continue
+            value = raw_value
+        found.append((match.start(), name.lower(), value))
+
+    for match in _SET_CONFIG_CALL_RE.finditer(analysed):
+        name = _unquote_sql_literal(match.group(1))
+        if name is None:
+            warnings.append(
+                "A set_config() call builds its parameter name at run time, so it "
+                "was not added to Database Configuration."
+            )
+            continue
+        value = _unquote_sql_literal(match.group(2))
+        if value is None:
+            warnings.append(
+                f"set_config('{name}', ...) uses a run-time value, so no value was "
+                "assumed. Add it manually if this job needs it."
+            )
+            continue
+        found.append((match.start(), name.lower(), value))
+
+    # Textual order approximates execution order in the straight-line bodies these
+    # partition functions use; the last assignment wins.
+    found.sort(key=lambda item: item[0])
+    config: dict[str, Any] = {}
+    conflicting: set = set()
+    for _position, name, value in found:
+        if name in config and config[name] != value:
+            conflicting.add(name)
+        config[name] = value
+
+    for name in sorted(conflicting):
+        warnings.append(
+            f"The function sets {name} more than once with different values. "
+            f"The last statement in the body was used ('{config[name]}'). "
+            "Review it before saving."
+        )
+
+    return sanitize_db_config_object(config), warnings
+
+
+def build_db_config_json(config: Optional[dict[str, Any]] = None) -> str:
+    """
+    Serialise an extracted configuration object for the UI.
+
+    Always valid JSON, and always exactly what was extracted — an empty
+    configuration renders as {} rather than as invented defaults.
+    """
+    payload = sanitize_db_config_object(dict(config or {}))
     return json.dumps(payload, indent=2)
 
 
