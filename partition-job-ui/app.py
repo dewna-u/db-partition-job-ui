@@ -32,8 +32,14 @@ logger = logging.getLogger(__name__)
 
 PAGE_TITLE = "Partition Job Management"
 PAGE_SUBTITLE = (
-    "Convert legacy pgAgent partition jobs into centralized configuration records."
+    "Centralized management of parameterized PostgreSQL/EDB partition operations"
 )
+
+NAV_CONVERT = "Convert Existing Job"
+NAV_CREATE = "Create New Job"
+NAV_CONFIGURED = "Configured Jobs"
+NAV_HISTORY = "Execution History"
+NAV_OPTIONS = [NAV_CONVERT, NAV_CREATE, NAV_CONFIGURED, NAV_HISTORY]
 
 # Never seed example settings here: Database Configuration is either extracted
 # from the called partition routine or entered deliberately by the user.
@@ -93,118 +99,132 @@ _INTEGER_FIELDS = {"frequency_amount", "partition_period", "create_drop_amount"}
 
 
 def _inject_css() -> None:
-    """Corporate internal-tool styling: clear hierarchy, status badges, calm colour."""
+    """Compact corporate dark-theme polish on top of Streamlit's theme config."""
     st.markdown(
         """
 <style>
-    .block-container {
-        max-width: 1180px;
-        padding-top: 1.25rem;
-        padding-bottom: 2.5rem;
+    :root {
+        --pj-bg: #0E1117;
+        --pj-panel: #161B22;
+        --pj-input: #1F2937;
+        --pj-border: #30363D;
+        --pj-text: #F0F3F6;
+        --pj-muted: #9CA3AF;
+        --pj-accent: #3B82F6;
+        --pj-success-bg: #052E1C;
+        --pj-success: #3FB950;
+        --pj-warn-bg: #3D2E00;
+        --pj-warn: #D29922;
+        --pj-danger-bg: #3D1214;
+        --pj-danger: #F85149;
+        --pj-info-bg: #0D2140;
+        --pj-info: #58A6FF;
     }
-    [data-testid="stSidebar"],
-    [data-testid="stSidebarCollapsedControl"] {
-        display: none;
+    .block-container {
+        max-width: 1280px;
+        padding-top: 1rem;
+        padding-bottom: 2rem;
     }
     div[data-testid="stCaptionContainer"] {
-        margin-top: -0.35rem;
-        margin-bottom: 0.65rem;
-        color: #4B5563;
-        font-size: 0.9rem;
+        margin-top: -0.25rem;
+        margin-bottom: 0.5rem;
+        color: var(--pj-muted);
+        font-size: 0.88rem;
     }
-    h1 { font-size: 1.85rem !important; margin-bottom: 0.15rem !important; }
-    h2, h3 { margin-top: 0.35rem !important; }
+    h1 { font-size: 1.65rem !important; margin-bottom: 0.1rem !important; }
+    h2, h3 { margin-top: 0.25rem !important; }
     .pj-subtitle {
-        color: #4B5563;
-        font-size: 1rem;
-        margin: 0 0 1rem 0;
+        color: var(--pj-muted);
+        font-size: 0.95rem;
+        margin: 0 0 0.75rem 0;
+    }
+    .pj-header-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin: 0 0 0.85rem 0;
     }
     .pj-step-bar {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.45rem;
-        margin: 0.4rem 0 1rem 0;
+        gap: 0.4rem;
+        margin: 0.25rem 0 0.85rem 0;
     }
     .pj-step {
-        background: #E5E7EB;
-        color: #374151;
+        background: var(--pj-input);
+        color: var(--pj-muted);
+        border: 1px solid var(--pj-border);
         border-radius: 999px;
-        padding: 0.28rem 0.75rem;
-        font-size: 0.82rem;
+        padding: 0.22rem 0.7rem;
+        font-size: 0.8rem;
         font-weight: 600;
     }
     .pj-step-active {
-        background: #DBEAFE;
-        color: #1E40AF;
+        background: var(--pj-info-bg);
+        color: var(--pj-info);
+        border-color: #1F4B7A;
     }
     .pj-step-done {
-        background: #D1FAE5;
-        color: #065F46;
+        background: var(--pj-success-bg);
+        color: var(--pj-success);
+        border-color: #1A4D32;
     }
     .pj-badge {
         display: inline-block;
         border-radius: 999px;
-        padding: 0.15rem 0.55rem;
-        font-size: 0.78rem;
+        padding: 0.12rem 0.5rem;
+        font-size: 0.75rem;
         font-weight: 700;
-        letter-spacing: 0.02em;
-        margin-right: 0.25rem;
+        margin-right: 0.2rem;
+        border: 1px solid transparent;
     }
-    .pj-badge-ok { background: #D1FAE5; color: #065F46; }
-    .pj-badge-warn { background: #FEF3C7; color: #92400E; }
-    .pj-badge-fail { background: #FEE2E2; color: #991B1B; }
-    .pj-badge-info { background: #DBEAFE; color: #1E40AF; }
-    .pj-badge-mute { background: #E5E7EB; color: #374151; }
-    .pj-badge-drop { background: #FEE2E2; color: #7F1D1D; }
-    .pj-panel {
-        border: 1px solid #E5E7EB;
-        background: #FFFFFF;
+    .pj-badge-ok { background: var(--pj-success-bg); color: var(--pj-success); border-color: #1A4D32; }
+    .pj-badge-warn { background: var(--pj-warn-bg); color: var(--pj-warn); border-color: #5C4510; }
+    .pj-badge-fail { background: var(--pj-danger-bg); color: var(--pj-danger); border-color: #6E2226; }
+    .pj-badge-info { background: var(--pj-info-bg); color: var(--pj-info); border-color: #1F4B7A; }
+    .pj-badge-mute { background: var(--pj-input); color: var(--pj-muted); border-color: var(--pj-border); }
+    .pj-badge-drop { background: var(--pj-danger-bg); color: var(--pj-danger); border-color: #6E2226; }
+    .pj-panel, .pj-preview {
+        border: 1px solid var(--pj-border);
+        background: var(--pj-panel);
         border-radius: 8px;
-        padding: 0.85rem 1rem;
-        margin: 0.5rem 0 1rem 0;
+        padding: 0.75rem 0.9rem;
+        margin: 0.45rem 0 0.85rem 0;
     }
+    .pj-preview { border-left: 3px solid var(--pj-accent); }
     .pj-panel-title {
         font-weight: 700;
-        color: #111827;
-        margin-bottom: 0.45rem;
+        color: var(--pj-text);
+        margin-bottom: 0.4rem;
     }
     .pj-kv {
-        font-size: 0.92rem;
-        line-height: 1.55;
-        color: #1F2937;
+        font-size: 0.9rem;
+        line-height: 1.5;
+        color: var(--pj-text);
     }
     .pj-kv code {
-        background: #F3F4F6;
+        background: var(--pj-input);
+        border: 1px solid var(--pj-border);
         padding: 0.05rem 0.3rem;
         border-radius: 4px;
     }
-    .pj-preview {
-        border-left: 4px solid #2563EB;
-        background: #F8FAFC;
-        padding: 0.75rem 1rem;
-        margin: 0.75rem 0 1rem 0;
-    }
     .pj-section-label {
-        font-size: 0.78rem;
+        font-size: 0.75rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        color: #6B7280;
-        margin: 0.75rem 0 0.35rem 0;
-    }
-    .pj-note {
-        color: #4B5563;
-        font-size: 0.88rem;
-        margin-top: 0.2rem;
+        color: var(--pj-muted);
+        margin: 0.7rem 0 0.3rem 0;
     }
     .pj-danger {
-        border: 1px solid #FECACA;
-        background: #FEF2F2;
-        color: #7F1D1D;
+        border: 1px solid #6E2226;
+        background: var(--pj-danger-bg);
+        color: #FFB4B0;
         border-radius: 8px;
-        padding: 0.65rem 0.85rem;
-        margin: 0.5rem 0 0.85rem 0;
+        padding: 0.55rem 0.75rem;
+        margin: 0.4rem 0 0.7rem 0;
         font-weight: 600;
+        font-size: 0.9rem;
     }
 </style>
 """,
@@ -280,6 +300,7 @@ def _init_session_state() -> None:
         "config_enabled_filter": "All",
         "config_status_filter": "All",
         "config_search": "",
+        "main_nav": NAV_CONVERT,
     }
     for key, value in simple_defaults.items():
         if key not in st.session_state:
@@ -313,10 +334,19 @@ def _init_session_state() -> None:
     )
 
 
-def _load_into_state(state_key: str, loader: Callable[..., Any], *args: Any) -> None:
+def _load_into_state(
+    state_key: str,
+    loader: Callable[..., Any],
+    *args: Any,
+    spinner_text: Optional[str] = None,
+) -> None:
     """Run a read-only loader once and keep result/error in session state."""
     try:
-        st.session_state[state_key] = loader(*args)
+        if spinner_text:
+            with st.spinner(spinner_text):
+                st.session_state[state_key] = loader(*args)
+        else:
+            st.session_state[state_key] = loader(*args)
         st.session_state[state_key + "_error"] = None
     except DatabaseError as exc:
         st.session_state[state_key] = None
@@ -329,10 +359,22 @@ def _load_into_state(state_key: str, loader: Callable[..., Any], *args: Any) -> 
         st.session_state[state_key + "_loaded"] = True
 
 
+def _ensure_loaded(
+    state_key: str,
+    loader: Callable[..., Any],
+    *args: Any,
+    spinner_text: str,
+) -> None:
+    """Load operational data on first use of a view (not at app startup)."""
+    if not st.session_state.get(state_key + "_loaded"):
+        _load_into_state(state_key, loader, *args, spinner_text=spinner_text)
+
+
 def _load_jobs() -> None:
     """Fetch pgAgent jobs and store them in session state."""
     try:
-        st.session_state.jobs = get_pgagent_jobs()
+        with st.spinner("Loading pgAgent jobs..."):
+            st.session_state.jobs = get_pgagent_jobs()
         st.session_state.jobs_error = None
         st.session_state.pgagent_missing = False
     except PgAgentNotInstalledError as exc:
@@ -458,11 +500,8 @@ def _render_db_config_editor(prefix: str, *, from_inference: bool) -> str:
     db_config = st.text_area(
         "Database configuration (JSON object)",
         key=prefix + "db_config",
-        height=110,
-        help=(
-            "Session settings applied while the partition operation runs. "
-            "Stored as-is in db_config_para. No settings are invented for you."
-        ),
+        height=90,
+        help="Session/database parameters applied when this job executes. Stored as-is.",
     )
     if _db_config_is_empty(db_config):
         note = "No routine-level DB configuration was detected." if from_inference else (
@@ -539,7 +578,7 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
         prefix == CONVERT_PREFIX and st.session_state.inference_summary is not None
     )
 
-    st.markdown('<div class="pj-section-label">A. Operation and target</div>', unsafe_allow_html=True)
+    st.markdown('<div class="pj-section-label">Basic information</div>', unsafe_allow_html=True)
     operation = st.radio(
         "Operation",
         options=OPERATIONS,
@@ -566,7 +605,7 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
         is_enabled = st.checkbox("Enabled", key=prefix + "is_enabled")
         table_name = st.text_input("Table name", key=prefix + "table_name")
 
-    st.markdown('<div class="pj-section-label">B. Schedule</div>', unsafe_allow_html=True)
+    st.markdown('<div class="pj-section-label">Schedule</div>', unsafe_allow_html=True)
     job_schedule = st.text_input(
         "Job schedule (six-field cron)",
         key=prefix + "job_schedule",
@@ -613,7 +652,7 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
             next_run_value = st.time_input("Next run time", key=prefix + "next_run_time")
         next_run_time = _combine_datetime(next_run_date, next_run_value)
 
-    st.markdown('<div class="pj-section-label">C. Partition rules</div>', unsafe_allow_html=True)
+    st.markdown('<div class="pj-section-label">Partition configuration</div>', unsafe_allow_html=True)
     st.markdown("**Partition size** — how much data each partition covers")
     part_col1, part_col2 = st.columns(2)
     with part_col1:
@@ -666,7 +705,7 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
             key=prefix + "create_drop_unit",
         )
 
-    st.markdown('<div class="pj-section-label">D. Database configuration</div>', unsafe_allow_html=True)
+    st.markdown('<div class="pj-section-label">Database configuration</div>', unsafe_allow_html=True)
     db_config = _render_db_config_editor(prefix, from_inference=from_inference)
 
     raw = {
@@ -712,7 +751,8 @@ def submit_partition_configuration(raw: dict[str, Any]) -> list[tuple[str, str]]
         ]
 
     try:
-        result = create_partition_job(validated)
+        with st.spinner("Creating partition configuration..."):
+            result = create_partition_job(validated)
     except DatabaseError as exc:
         return [("error", _format_error_for_ui(exc.message))]
     except Exception:  # noqa: BLE001
@@ -724,12 +764,12 @@ def submit_partition_configuration(raw: dict[str, Any]) -> list[tuple[str, str]]
     feedback: list[tuple[str, str]] = [
         (
             "success",
-            "Partition job configuration stored by "
+            "Partition configuration created successfully via "
             "mubasher_oms.insert_data_to_partition_job_table().",
         ),
         (
             "info",
-            "No pgAgent job was created. The two generic scanners "
+            "No pgAgent job was created. The generic scanners "
             "(run_partition_create_jobs / run_partition_drop_jobs) pick this "
             "configuration up when its next run time is due.",
         ),
@@ -921,14 +961,15 @@ def _apply_autofill(details: dict[str, Any]) -> None:
     job_label = details.get("job_name") or details.get("job_id")
     st.session_state.load_info = (
         f"Loaded pgAgent job {details.get('job_id')}: {job_label}. "
-        "Nothing was written. Review the inference summary and editable fields, "
-        "then create the configuration."
+        "Nothing has been written yet. Review the inference summary, edit if "
+        "needed, then create the configuration."
     )
 
 
 def _load_job_details(job_id: int, step_id: Any = None) -> None:
     try:
-        details = get_pgagent_job_details(job_id, step_id=step_id)
+        with st.spinner("Loading pgAgent job and reading routine definition..."):
+            details = get_pgagent_job_details(job_id, step_id=step_id)
     except (PgAgentNotInstalledError, DatabaseError) as exc:
         st.session_state.load_error = _format_error_for_ui(exc.message)
         st.session_state.load_warnings = []
@@ -977,10 +1018,14 @@ def _render_pgagent_jobs() -> None:
             and not st.session_state.pgagent_missing
         ):
             st.markdown(f"**Total pgAgent jobs:** {len(st.session_state.jobs)}")
+        elif not st.session_state.jobs_loaded:
+            st.caption("Optional browse list — click Refresh to load (read-only).")
     with col_btn:
         if st.button("Refresh Jobs", use_container_width=True, help="Read-only refresh"):
             _load_jobs()
 
+    if not st.session_state.jobs_loaded:
+        return
     if st.session_state.pgagent_missing:
         st.warning(st.session_state.jobs_error)
         return
@@ -1021,7 +1066,7 @@ def _render_convert_tab() -> None:
         _render_pgagent_jobs()
 
     st.markdown("##### Step 1 — Enter pgAgent Job ID")
-    col_id, col_btn = st.columns([2, 1])
+    col_id, col_btn = st.columns([1.4, 1])
     with col_id:
         st.number_input("pgAgent Job ID", min_value=1, step=1, key="load_job_id")
     with col_btn:
@@ -1284,8 +1329,18 @@ def _render_configured_jobs_tab() -> None:
         "per-table pgAgent jobs."
     )
 
+    _ensure_loaded(
+        "partition_jobs",
+        get_partition_jobs,
+        spinner_text="Loading configured jobs...",
+    )
+
     if st.button("Refresh Configured Jobs", help="Read-only refresh"):
-        _load_into_state("partition_jobs", get_partition_jobs)
+        _load_into_state(
+            "partition_jobs",
+            get_partition_jobs,
+            spinner_text="Refreshing configured jobs...",
+        )
 
     if st.session_state.partition_jobs_error:
         _render_db_error(st.session_state.partition_jobs_error)
@@ -1299,6 +1354,15 @@ def _render_configured_jobs_tab() -> None:
     if not jobs:
         st.info("No parameterised partition jobs are configured yet.")
         return
+
+    enabled_count = sum(1 for job in jobs if job.get("is_enabled"))
+    create_count = sum(1 for job in jobs if job.get("is_create"))
+    drop_count = len(jobs) - create_count
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total", len(jobs))
+    m2.metric("Enabled", enabled_count)
+    m3.metric("CREATE", create_count)
+    m4.metric("DROP", drop_count)
 
     f1, f2, f3, f4 = st.columns([1, 1, 1, 2])
     with f1:
@@ -1406,8 +1470,20 @@ def _render_history_tab() -> None:
         "`mubasher_oms.partitioning_job_table_log`."
     )
 
+    _ensure_loaded(
+        "partition_job_logs",
+        get_partition_job_logs,
+        100,
+        spinner_text="Loading execution history...",
+    )
+
     if st.button("Refresh History", help="Read-only refresh"):
-        _load_into_state("partition_job_logs", get_partition_job_logs, 100)
+        _load_into_state(
+            "partition_job_logs",
+            get_partition_job_logs,
+            100,
+            spinner_text="Refreshing execution history...",
+        )
 
     if st.session_state.partition_job_logs_error:
         _render_db_error(st.session_state.partition_job_logs_error)
@@ -1493,160 +1569,217 @@ def _readiness_badge(exists: Any, allowed: Any) -> str:
 
 
 def _render_readiness_panel() -> None:
-    with st.expander("Database readiness (read-only)", expanded=False):
-        if st.button("Re-check readiness", help="Read-only privilege check"):
-            _load_into_state("database_readiness", get_database_readiness)
-
-        if st.session_state.database_readiness_error:
-            _render_db_error(st.session_state.database_readiness_error)
-            return
-
-        readiness = st.session_state.database_readiness
-        if not readiness:
-            st.info("Readiness information is not available.")
-            return
-
-        st.caption(
-            f"Role `{readiness.get('db_user')}` on database "
-            f"`{readiness.get('db_name')}`. This panel only reports privileges; "
-            "it never grants them."
+    st.markdown("#### Database readiness")
+    st.caption("Read-only privilege report. This UI never grants privileges.")
+    if st.button("Re-check readiness", help="Read-only privilege check"):
+        _load_into_state(
+            "database_readiness",
+            get_database_readiness,
+            spinner_text="Checking database readiness...",
         )
 
-        rows = [
-            (
-                "Schema USAGE",
-                readiness.get("schema_exists"),
-                readiness.get("schema_usage"),
-            ),
-            (
-                "Insert function EXECUTE",
-                readiness.get("insert_function_exists"),
-                readiness.get("insert_function_execute"),
-            ),
-            (
-                "Configuration table INSERT",
-                readiness.get("config_table_exists"),
-                readiness.get("config_table_insert"),
-            ),
-            (
-                "Job ID sequence USAGE",
-                readiness.get("sequence_exists"),
-                readiness.get("sequence_usage"),
-            ),
-            (
-                "Configuration table SELECT",
-                readiness.get("config_table_exists"),
-                readiness.get("config_table_select"),
-            ),
-            (
-                "Log table SELECT",
-                readiness.get("log_table_exists"),
-                readiness.get("log_table_select"),
-            ),
-        ]
-        for label, exists, allowed in rows:
-            st.markdown(
-                f"**{label}** {_readiness_badge(exists, allowed)}",
-                unsafe_allow_html=True,
-            )
-        st.caption(
-            "Configuration table INSERT and sequence USAGE are only required when "
-            "the insert function is SECURITY INVOKER. Do not grant ALL."
+    if st.session_state.database_readiness_error:
+        _render_db_error(st.session_state.database_readiness_error)
+        return
+
+    readiness = st.session_state.database_readiness
+    if not readiness:
+        st.info("Readiness information is not available.")
+        return
+
+    st.caption(
+        f"Role `{readiness.get('db_user')}` on database "
+        f"`{readiness.get('db_name')}`."
+    )
+
+    rows = [
+        (
+            "Schema USAGE",
+            readiness.get("schema_exists"),
+            readiness.get("schema_usage"),
+        ),
+        (
+            "Insert function EXECUTE",
+            readiness.get("insert_function_exists"),
+            readiness.get("insert_function_execute"),
+        ),
+        (
+            "Config table INSERT",
+            readiness.get("config_table_exists"),
+            readiness.get("config_table_insert"),
+        ),
+        (
+            "Job ID sequence USAGE",
+            readiness.get("sequence_exists"),
+            readiness.get("sequence_usage"),
+        ),
+        (
+            "Config table SELECT",
+            readiness.get("config_table_exists"),
+            readiness.get("config_table_select"),
+        ),
+        (
+            "Log table SELECT",
+            readiness.get("log_table_exists"),
+            readiness.get("log_table_select"),
+        ),
+    ]
+    for label, exists, allowed in rows:
+        st.markdown(
+            f"**{label}** {_readiness_badge(exists, allowed)}",
+            unsafe_allow_html=True,
         )
+    st.caption(
+        "Config INSERT and sequence USAGE are only needed when the insert "
+        "function is SECURITY INVOKER. Do not grant ALL."
+    )
 
 
 def _render_scheduler_panel() -> None:
-    with st.expander("Generic scheduler status (read-only)", expanded=False):
-        st.caption(
-            "These are generic scanner jobs, not one job per table. They poll "
-            "`partitioning_job_table` and execute due CREATE or DROP rows."
+    st.markdown("#### Generic schedulers")
+    st.caption(
+        "These are generic scanner jobs, not one job per table."
+    )
+    if st.button("Re-check schedulers", help="Read-only pgAgent inspection"):
+        _load_into_state(
+            "generic_schedulers",
+            get_generic_partition_schedulers,
+            spinner_text="Checking generic schedulers...",
         )
-        if st.button("Re-check schedulers", help="Read-only pgAgent inspection"):
-            _load_into_state("generic_schedulers", get_generic_partition_schedulers)
 
-        if st.session_state.generic_schedulers_error:
-            _render_db_error(st.session_state.generic_schedulers_error)
-            return
+    if st.session_state.generic_schedulers_error:
+        _render_db_error(st.session_state.generic_schedulers_error)
+        return
 
-        schedulers = st.session_state.generic_schedulers
-        if schedulers is None:
-            st.info("Scheduler information is not available.")
-            return
+    schedulers = st.session_state.generic_schedulers
+    if schedulers is None:
+        st.info("Scheduler information is not available.")
+        return
 
-        for key, title, scanner in (
-            ("create_scheduler", "CREATE scanner", "run_partition_create_jobs"),
-            ("drop_scheduler", "DROP scanner", "run_partition_drop_jobs"),
-        ):
-            found = schedulers.get(key)
-            st.markdown(f"**{title}** (`{scanner}`)")
-            if not found:
-                st.markdown(_badge("Missing", "fail"), unsafe_allow_html=True)
-                continue
-            enabled = bool(found.get("enabled"))
-            st.markdown(
-                f'{_badge("Found", "ok")}'
-                f'{_badge("Enabled" if enabled else "Disabled", "info" if enabled else "warn")}'
-                f" Job ID `{found.get('job_id')}` — "
-                f"`{found.get('job_name')}` — "
-                f"schedule `{found.get('schedule') or 'not shown'}`",
-                unsafe_allow_html=True,
-            )
+    for key, title, scanner in (
+        ("create_scheduler", "CREATE scanner", "run_partition_create_jobs"),
+        ("drop_scheduler", "DROP scanner", "run_partition_drop_jobs"),
+    ):
+        found = schedulers.get(key)
+        st.markdown(f"**{title}**")
+        st.caption(f"`{scanner}`")
+        if not found:
+            st.markdown(_badge("Missing", "fail"), unsafe_allow_html=True)
+            continue
+        enabled = bool(found.get("enabled"))
+        st.markdown(
+            f'{_badge("Found", "ok")}'
+            f'{_badge("Enabled" if enabled else "Disabled", "info" if enabled else "warn")}'
+            f" Job ID `{found.get('job_id')}`",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"`{found.get('job_name')}` · schedule "
+            f"`{found.get('schedule') or 'not shown'}`"
+        )
 
-        if not schedulers.get("create_scheduler") or not schedulers.get(
-            "drop_scheduler"
-        ):
-            st.info(
-                "A generic scheduler is missing. Create it through the approved "
-                "pgAgent/DBA deployment process. This application never writes to "
-                "the pgAgent catalog."
-            )
+    if not schedulers.get("create_scheduler") or not schedulers.get("drop_scheduler"):
+        st.info(
+            "A generic scheduler is missing. Deploy it through the approved "
+            "pgAgent/DBA process. This application never writes to pgAgent."
+        )
 
 
-# ---------------------------------------------------------------------------
+def _header_status_badges() -> None:
+    readiness = st.session_state.database_readiness
+    schedulers = st.session_state.generic_schedulers
+
+    if st.session_state.database_readiness_error:
+        db_badge = _badge("Database error", "fail")
+    elif not st.session_state.database_readiness_loaded:
+        db_badge = _badge("Database not checked", "mute")
+    elif readiness and readiness.get("insert_function_execute"):
+        db_badge = _badge("Database ready", "ok")
+    elif readiness:
+        db_badge = _badge("Database limited", "warn")
+    else:
+        db_badge = _badge("Database unknown", "mute")
+
+    if st.session_state.generic_schedulers_error:
+        sch_badge = _badge("Scheduler error", "fail")
+    elif not st.session_state.generic_schedulers_loaded:
+        sch_badge = _badge("Scheduler not checked", "mute")
+    elif schedulers and schedulers.get("create_scheduler") and schedulers.get(
+        "drop_scheduler"
+    ):
+        sch_badge = _badge("Schedulers found", "ok")
+    elif schedulers:
+        sch_badge = _badge("Scheduler incomplete", "warn")
+    else:
+        sch_badge = _badge("Scheduler unknown", "mute")
+
+    st.markdown(
+        f'<div class="pj-header-meta">{db_badge}{sch_badge}'
+        f'{_badge("Theme: dark", "info")}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_header() -> None:
+    st.title(PAGE_TITLE)
+    st.markdown(f'<p class="pj-subtitle">{PAGE_SUBTITLE}</p>', unsafe_allow_html=True)
+    _header_status_badges()
 
 
 def main() -> None:
     st.set_page_config(
         page_title=PAGE_TITLE,
         page_icon=None,
-        layout="centered",
-        initial_sidebar_state="collapsed",
+        layout="wide",
+        initial_sidebar_state="expanded",
     )
     _inject_css()
     _init_session_state()
 
-    st.title(PAGE_TITLE)
-    st.markdown(f'<p class="pj-subtitle">{PAGE_SUBTITLE}</p>', unsafe_allow_html=True)
-
-    if not st.session_state.jobs_loaded:
-        _load_jobs()
+    # Lightweight status only — heavy job/log lists load when their view opens.
     if not st.session_state.database_readiness_loaded:
-        _load_into_state("database_readiness", get_database_readiness)
+        _load_into_state(
+            "database_readiness",
+            get_database_readiness,
+            spinner_text="Checking database readiness...",
+        )
     if not st.session_state.generic_schedulers_loaded:
-        _load_into_state("generic_schedulers", get_generic_partition_schedulers)
-    if not st.session_state.partition_jobs_loaded:
-        _load_into_state("partition_jobs", get_partition_jobs)
-    if not st.session_state.partition_job_logs_loaded:
-        _load_into_state("partition_job_logs", get_partition_job_logs, 100)
+        _load_into_state(
+            "generic_schedulers",
+            get_generic_partition_schedulers,
+            spinner_text="Checking generic schedulers...",
+        )
 
-    _render_readiness_panel()
-    _render_scheduler_panel()
+    _render_header()
 
-    convert_tab, new_tab, configured_tab, history_tab = st.tabs(
-        [
-            "Convert Existing Job",
-            "Create New Job",
-            "Configured Jobs",
-            "Execution History",
-        ]
+    with st.sidebar:
+        st.caption(
+            "Status panels are read-only. Default appearance is dark "
+            "(.streamlit/config.toml). Use the Streamlit menu ▸ Settings to "
+            "switch Light/Dark when available."
+        )
+        st.divider()
+        _render_readiness_panel()
+        st.divider()
+        _render_scheduler_panel()
+
+    # Single-view navigation: only the active section renders widgets/queries.
+    view = st.radio(
+        "Section",
+        options=NAV_OPTIONS,
+        horizontal=True,
+        key="main_nav",
+        label_visibility="collapsed",
     )
-    with convert_tab:
+    st.divider()
+
+    if view == NAV_CONVERT:
         _render_convert_tab()
-    with new_tab:
+    elif view == NAV_CREATE:
         _render_new_job_tab()
-    with configured_tab:
+    elif view == NAV_CONFIGURED:
         _render_configured_jobs_tab()
-    with history_tab:
+    else:
         _render_history_tab()
 
 
