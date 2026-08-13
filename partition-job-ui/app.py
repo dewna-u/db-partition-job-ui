@@ -1,4 +1,4 @@
-"""Database Partition Job Management — lightweight Streamlit UI."""
+"""Partition Job Management — Streamlit UI for DBAs."""
 
 from __future__ import annotations
 
@@ -30,13 +30,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-PAGE_TITLE = "Database Partition Job Management"
+PAGE_TITLE = "Partition Job Management"
+PAGE_SUBTITLE = (
+    "Convert legacy pgAgent partition jobs into centralized configuration records."
+)
 
 # Never seed example settings here: Database Configuration is either extracted
-# from the called partition function or entered deliberately by the user.
+# from the called partition routine or entered deliberately by the user.
 EMPTY_DB_CONFIG = "{}"
 
-GENERIC_DB_ERROR = "The database operation failed. Check the server logs for details."
+GENERIC_DB_ERROR = (
+    "The database operation failed. Check the server logs for details. "
+    "This is not automatically a permission problem."
+)
 
 JOB_COLUMNS = [
     "job_id",
@@ -58,36 +64,11 @@ JOB_COLUMN_LABELS = {
     "description": "Description",
 }
 
-CONFIGURED_JOB_COLUMNS = [
-    "job_id",
-    "job_name",
-    "is_enabled",
-    "table_schema",
-    "table_name",
-    "frequency",
-    "last_run_time",
-    "next_run_time",
-    "last_run_status",
-    "partition_unit",
-    "partition_period",
-    "is_create",
-    "create_drop_interval",
-    "job_schedule",
-]
-
-LOG_COLUMNS = [
-    "job_log_id",
-    "job_id",
-    "job_name",
-    "last_run_status",
-    "job_runtime",
-    "job_error",
-]
-
 FREQUENCY_UNITS = ["minute", "hour", "day", "week", "month", "year"]
 PARTITION_UNITS = ["day", "week", "month", "year"]
 INTERVAL_UNITS = ["day", "week", "month", "year"]
 OPERATIONS = ["CREATE", "DROP"]
+STATUS_FILTER_OPTIONS = ["All", "SUCCESS", "FAIL", "MANUAL_SUCCESS", "MANUAL_FAIL"]
 
 CONVERT_PREFIX = "convert_"
 NEW_PREFIX = "new_"
@@ -112,32 +93,138 @@ _INTEGER_FIELDS = {"frequency_amount", "partition_period", "create_drop_amount"}
 
 
 def _inject_css() -> None:
-    """Minimal CSS: centred layout, plain controls."""
+    """Corporate internal-tool styling: clear hierarchy, status badges, calm colour."""
     st.markdown(
         """
 <style>
     .block-container {
-        max-width: 1100px;
-        padding-top: 1.5rem;
-        padding-bottom: 2rem;
+        max-width: 1180px;
+        padding-top: 1.25rem;
+        padding-bottom: 2.5rem;
     }
     [data-testid="stSidebar"],
     [data-testid="stSidebarCollapsedControl"] {
         display: none;
     }
     div[data-testid="stCaptionContainer"] {
-        margin-top: -0.5rem;
-        margin-bottom: 0.75rem;
-        color: #6B7280;
-        font-size: 0.85rem;
+        margin-top: -0.35rem;
+        margin-bottom: 0.65rem;
+        color: #4B5563;
+        font-size: 0.9rem;
     }
-    h2 {
-        margin-top: 0.5rem;
+    h1 { font-size: 1.85rem !important; margin-bottom: 0.15rem !important; }
+    h2, h3 { margin-top: 0.35rem !important; }
+    .pj-subtitle {
+        color: #4B5563;
+        font-size: 1rem;
+        margin: 0 0 1rem 0;
+    }
+    .pj-step-bar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.4rem 0 1rem 0;
+    }
+    .pj-step {
+        background: #E5E7EB;
+        color: #374151;
+        border-radius: 999px;
+        padding: 0.28rem 0.75rem;
+        font-size: 0.82rem;
+        font-weight: 600;
+    }
+    .pj-step-active {
+        background: #DBEAFE;
+        color: #1E40AF;
+    }
+    .pj-step-done {
+        background: #D1FAE5;
+        color: #065F46;
+    }
+    .pj-badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 0.15rem 0.55rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        margin-right: 0.25rem;
+    }
+    .pj-badge-ok { background: #D1FAE5; color: #065F46; }
+    .pj-badge-warn { background: #FEF3C7; color: #92400E; }
+    .pj-badge-fail { background: #FEE2E2; color: #991B1B; }
+    .pj-badge-info { background: #DBEAFE; color: #1E40AF; }
+    .pj-badge-mute { background: #E5E7EB; color: #374151; }
+    .pj-badge-drop { background: #FEE2E2; color: #7F1D1D; }
+    .pj-panel {
+        border: 1px solid #E5E7EB;
+        background: #FFFFFF;
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+        margin: 0.5rem 0 1rem 0;
+    }
+    .pj-panel-title {
+        font-weight: 700;
+        color: #111827;
+        margin-bottom: 0.45rem;
+    }
+    .pj-kv {
+        font-size: 0.92rem;
+        line-height: 1.55;
+        color: #1F2937;
+    }
+    .pj-kv code {
+        background: #F3F4F6;
+        padding: 0.05rem 0.3rem;
+        border-radius: 4px;
+    }
+    .pj-preview {
+        border-left: 4px solid #2563EB;
+        background: #F8FAFC;
+        padding: 0.75rem 1rem;
+        margin: 0.75rem 0 1rem 0;
+    }
+    .pj-section-label {
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: #6B7280;
+        margin: 0.75rem 0 0.35rem 0;
+    }
+    .pj-note {
+        color: #4B5563;
+        font-size: 0.88rem;
+        margin-top: 0.2rem;
+    }
+    .pj-danger {
+        border: 1px solid #FECACA;
+        background: #FEF2F2;
+        color: #7F1D1D;
+        border-radius: 8px;
+        padding: 0.65rem 0.85rem;
+        margin: 0.5rem 0 0.85rem 0;
+        font-weight: 600;
     }
 </style>
 """,
         unsafe_allow_html=True,
     )
+
+
+def _badge(text: str, kind: str = "mute") -> str:
+    return f'<span class="pj-badge pj-badge-{kind}">{text}</span>'
+
+
+def _status_badge_kind(status: Any) -> str:
+    value = str(status or "").upper()
+    if value in {"SUCCESS", "MANUAL_SUCCESS"}:
+        return "ok"
+    if value in {"FAIL", "MANUAL_FAIL", "ERROR"}:
+        return "fail"
+    if value in {"RUNNING", "PENDING"}:
+        return "info"
+    return "mute"
 
 
 def _shared_form_defaults(
@@ -186,9 +273,14 @@ def _init_session_state() -> None:
         "create_in_flight": False,
         "last_created_fingerprint": None,
         "manual_run_feedback": None,
+        "inference_summary": None,
+        "history_job_id_filter": "",
+        "history_status_filter": "All",
+        "config_op_filter": "All",
+        "config_enabled_filter": "All",
+        "config_status_filter": "All",
+        "config_search": "",
     }
-    # selected_config_job_id is deliberately not pre-seeded: Streamlit rejects a
-    # selectbox session value that is not present in its options list.
     for key, value in simple_defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
@@ -272,9 +364,168 @@ def submission_fingerprint(validated: dict[str, Any]) -> str:
     )
 
 
+def _format_error_for_ui(message: str) -> str:
+    """Keep errors actionable without inventing permission claims."""
+    text = (message or "").strip()
+    if not text:
+        return GENERIC_DB_ERROR
+    lower = text.lower()
+    tips: list[str] = []
+    if "sqlstate 42501" in lower or "does not have the required permission" in lower:
+        tips.append(
+            "Next step: ask a DBA to grant only the missing privilege shown above. "
+            "This application never grants privileges itself."
+        )
+    elif "sqlstate 42883" in lower or "was not found" in lower:
+        tips.append(
+            "Next step: confirm the function name/signature in the database matches "
+            "what the application calls."
+        )
+    elif "sqlstate 23505" in lower or "already exist" in lower:
+        tips.append(
+            "Next step: search Configured Jobs for an existing row with the same key."
+        )
+    elif "unable to connect" in lower or "authentication failed" in lower:
+        tips.append(
+            "Next step: verify host, port, database name, and credentials in the "
+            "application environment — never paste passwords into the UI."
+        )
+    if tips:
+        return text + "\n\n" + " ".join(tips)
+    return text
+
+
+def _render_db_error(message: str) -> None:
+    st.error(_format_error_for_ui(message))
+
+
+def _shorten(text: Any, limit: int = 120) -> str:
+    value = "" if text is None else str(text)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
+def _normalize_db_config_text(raw: Any) -> str:
+    text = ("" if raw is None else str(raw)).strip() or EMPTY_DB_CONFIG
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, indent=2, sort_keys=True)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return text
+
+
+def _db_config_is_empty(raw: Any) -> bool:
+    try:
+        parsed = json.loads(str(raw or "").strip() or "{}")
+        return isinstance(parsed, dict) and not parsed
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Shared configuration form
 # ---------------------------------------------------------------------------
+
+
+def _render_cron_helper(job_schedule: str) -> tuple[Optional[datetime], Optional[str]]:
+    """Show field hint, meaning, next run, or the exact invalid field."""
+    st.caption("Fields: `second minute hour day-of-month month day-of-week`")
+    cron_error = validate_six_field_cron(job_schedule or "")
+    if cron_error:
+        st.error(cron_error)
+        return None, cron_error
+
+    calculated = calculate_next_run(job_schedule)
+    meaning = describe_schedule(job_schedule)
+    bits: list[str] = []
+    if meaning:
+        bits.append(f"**Meaning:** {meaning}")
+    if calculated:
+        bits.append(f"**Next run:** `{calculated:%Y-%m-%d %H:%M:%S}`")
+    else:
+        bits.append(
+            "The next occurrence could not be calculated from this schedule. "
+            "Set the next run manually."
+        )
+    st.markdown("  \n".join(bits))
+    return calculated, None
+
+
+def _render_db_config_editor(prefix: str, *, from_inference: bool) -> str:
+    db_config = st.text_area(
+        "Database configuration (JSON object)",
+        key=prefix + "db_config",
+        height=110,
+        help=(
+            "Session settings applied while the partition operation runs. "
+            "Stored as-is in db_config_para. No settings are invented for you."
+        ),
+    )
+    if _db_config_is_empty(db_config):
+        note = "No routine-level DB configuration was detected." if from_inference else (
+            "Empty configuration (`{}`). Add session settings only when needed."
+        )
+        st.caption(note)
+    elif from_inference:
+        st.caption(
+            "Extracted from SET / set_config statements in the routine definition."
+        )
+    else:
+        try:
+            json.loads(str(db_config))
+            st.caption("JSON looks valid.")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            st.caption("JSON is not valid yet — fix it before submitting.")
+    return db_config
+
+
+def _render_configuration_preview(raw: dict[str, Any]) -> None:
+    """Compact pre-submit review so the DBA need not scroll back up."""
+    is_create = bool(raw.get("is_create"))
+    operation = "CREATE" if is_create else "DROP"
+    interval_label = "Create ahead interval" if is_create else "Retention interval"
+    schema = raw.get("table_schema") or "—"
+    table = raw.get("table_name") or "—"
+    freq = f"{raw.get('frequency_amount')} {raw.get('frequency_unit')}"
+    part = f"{raw.get('partition_period')} {raw.get('partition_unit')}"
+    interval = f"{raw.get('create_drop_amount')} {raw.get('create_drop_unit')}"
+    next_run = raw.get("next_run_time")
+    next_run_text = (
+        next_run.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(next_run, datetime)
+        else str(next_run or "—")
+    )
+    db_config = _normalize_db_config_text(raw.get("db_config"))
+
+    st.markdown('<div class="pj-preview">', unsafe_allow_html=True)
+    st.markdown("##### Configuration preview")
+    st.caption(
+        "This is what will be sent to "
+        "`mubasher_oms.insert_data_to_partition_job_table(...)`. "
+        "No pgAgent job is created."
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(
+            f"**Job name:** `{raw.get('job_name') or '—'}`  \n"
+            f"**Operation:** `{operation}`  \n"
+            f"**Target table:** `{schema}.{table}`  \n"
+            f"**Enabled:** `{bool(raw.get('is_enabled'))}`  \n"
+            f"**Schedule:** `{raw.get('job_schedule') or '—'}`"
+        )
+    with col2:
+        st.markdown(
+            f"**Next run:** `{next_run_text}`  \n"
+            f"**Job frequency:** `{freq}`  \n"
+            f"**Partition size:** `{part}`  \n"
+            f"**{interval_label}:** `{interval}`"
+        )
+    st.markdown("**db_config_para:**")
+    st.code(db_config, language="json")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
@@ -284,6 +535,11 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
     Returns (raw values for validate_form_data, blocking_error_or_None).
     Both tabs use this so the two paths always produce the same structure.
     """
+    from_inference = (
+        prefix == CONVERT_PREFIX and st.session_state.inference_summary is not None
+    )
+
+    st.markdown('<div class="pj-section-label">A. Operation and target</div>', unsafe_allow_html=True)
     operation = st.radio(
         "Operation",
         options=OPERATIONS,
@@ -295,58 +551,44 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
         ),
     )
     is_create = operation == "CREATE"
+    if not is_create:
+        st.markdown(
+            '<div class="pj-danger">DROP operation: review the retention '
+            "interval carefully. Wrong values can remove production data.</div>",
+            unsafe_allow_html=True,
+        )
 
     col_a, col_b = st.columns(2)
     with col_a:
-        job_name = st.text_input("Job Name", key=prefix + "job_name")
-        table_schema = st.text_input("Table Schema", key=prefix + "table_schema")
+        job_name = st.text_input("Job name", key=prefix + "job_name")
+        table_schema = st.text_input("Table schema", key=prefix + "table_schema")
     with col_b:
         is_enabled = st.checkbox("Enabled", key=prefix + "is_enabled")
-        table_name = st.text_input("Table Name", key=prefix + "table_name")
+        table_name = st.text_input("Table name", key=prefix + "table_name")
 
-    db_config = st.text_area(
-        "Database Configuration (JSON object)",
-        key=prefix + "db_config",
-        height=110,
-        help=(
-            "Session settings applied while the partition operation runs. When a "
-            "pgAgent job is loaded this is read from the called routine's own "
-            "SET / set_config statements, so an empty object means the "
-            "function or procedure sets nothing. Whatever is shown here is "
-            "stored as-is; no settings are added for you."
-        ),
+    st.markdown('<div class="pj-section-label">B. Schedule</div>', unsafe_allow_html=True)
+    job_schedule = st.text_input(
+        "Job schedule (six-field cron)",
+        key=prefix + "job_schedule",
     )
+    calculated_next_run, blocking_error = _render_cron_helper(job_schedule or "")
 
-    job_schedule = st.text_input("Job Schedule (six fields)", key=prefix + "job_schedule")
-    st.caption("second minute hour day-of-month month day-of-week")
-
-    blocking_error: Optional[str] = None
-    cron_error = validate_six_field_cron(job_schedule or "")
-    calculated_next_run: Optional[datetime] = None
-    if cron_error:
-        st.error(cron_error)
-        blocking_error = cron_error
-    else:
-        calculated_next_run = calculate_next_run(job_schedule)
-        meaning = describe_schedule(job_schedule)
-        preview = f"Meaning: {meaning}. " if meaning else ""
-        if calculated_next_run:
-            st.success(f"{preview}Next run: {calculated_next_run:%Y-%m-%d %H:%M:%S}")
-        else:
-            st.warning(
-                f"{preview}The next occurrence could not be calculated from this "
-                "schedule. Set the next run manually."
-            )
-
-    st.markdown("**Job frequency** — how often this job executes.")
+    st.markdown(
+        "**Job frequency** — how often this configuration is scheduled"
+    )
     freq_col1, freq_col2 = st.columns(2)
     with freq_col1:
         frequency_amount = st.number_input(
-            "Frequency", min_value=1, step=1, key=prefix + "frequency_amount"
+            "Frequency amount",
+            min_value=1,
+            step=1,
+            key=prefix + "frequency_amount",
         )
     with freq_col2:
         frequency_unit = st.selectbox(
-            "Frequency Unit", options=FREQUENCY_UNITS, key=prefix + "frequency_unit"
+            "Frequency unit",
+            options=FREQUENCY_UNITS,
+            key=prefix + "frequency_unit",
         )
 
     auto_next_run = st.checkbox(
@@ -357,8 +599,7 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
     if auto_next_run and calculated_next_run is not None:
         next_run_time = calculated_next_run
         st.caption(
-            f"Next Run Time will be stored as {calculated_next_run:%Y-%m-%d %H:%M:%S} "
-            "(calculated from the schedule)."
+            f"Next run time will be stored as `{calculated_next_run:%Y-%m-%d %H:%M:%S}`."
         )
     else:
         if auto_next_run:
@@ -367,37 +608,52 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
             st.caption("Manual next run selected — it overrides the schedule preview.")
         date_col, time_col = st.columns(2)
         with date_col:
-            next_run_date = st.date_input("Next Run Date", key=prefix + "next_run_date")
+            next_run_date = st.date_input("Next run date", key=prefix + "next_run_date")
         with time_col:
-            next_run_value = st.time_input("Next Run Time", key=prefix + "next_run_time")
+            next_run_value = st.time_input("Next run time", key=prefix + "next_run_time")
         next_run_time = _combine_datetime(next_run_date, next_run_value)
 
-    st.markdown("**Partition size** — how much data each partition covers.")
+    st.markdown('<div class="pj-section-label">C. Partition rules</div>', unsafe_allow_html=True)
+    st.markdown("**Partition size** — how much data each partition covers")
     part_col1, part_col2 = st.columns(2)
     with part_col1:
         partition_unit = st.selectbox(
-            "Partition Unit", options=PARTITION_UNITS, key=prefix + "partition_unit"
+            "Partition unit",
+            options=PARTITION_UNITS,
+            key=prefix + "partition_unit",
         )
     with part_col2:
         partition_period = st.number_input(
-            "Partition Period", min_value=1, step=1, key=prefix + "partition_period"
+            "Partition period",
+            min_value=1,
+            step=1,
+            key=prefix + "partition_period",
         )
 
     if is_create:
-        interval_label = "Create Ahead Interval"
+        interval_heading = (
+            "**Create ahead interval** — how far into the future partitions "
+            "should exist"
+        )
+        amount_label = "Create ahead amount"
+        unit_label = "Create ahead unit"
         interval_help = (
             "How far beyond the current maximum partition boundary should future "
             "partitions be created?"
         )
     else:
-        interval_label = "Retention Interval"
+        interval_heading = (
+            "**Retention interval** — partitions older than this may be dropped"
+        )
+        amount_label = "Retention amount"
+        unit_label = "Retention unit"
         interval_help = "Partitions older than this interval may be dropped."
 
-    st.markdown(f"**{interval_label}**")
+    st.markdown(interval_heading)
     cd_col1, cd_col2 = st.columns(2)
     with cd_col1:
         create_drop_amount = st.number_input(
-            interval_label,
+            amount_label,
             min_value=1,
             step=1,
             key=prefix + "create_drop_amount",
@@ -405,8 +661,13 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
         )
     with cd_col2:
         create_drop_unit = st.selectbox(
-            "Interval Unit", options=INTERVAL_UNITS, key=prefix + "create_drop_unit"
+            unit_label,
+            options=INTERVAL_UNITS,
+            key=prefix + "create_drop_unit",
         )
+
+    st.markdown('<div class="pj-section-label">D. Database configuration</div>', unsafe_allow_html=True)
+    db_config = _render_db_config_editor(prefix, from_inference=from_inference)
 
     raw = {
         "job_name": job_name,
@@ -453,13 +714,11 @@ def submit_partition_configuration(raw: dict[str, Any]) -> list[tuple[str, str]]
     try:
         result = create_partition_job(validated)
     except DatabaseError as exc:
-        # A failed write must stay retryable: no fingerprint is recorded.
-        return [("error", exc.message)]
+        return [("error", _format_error_for_ui(exc.message))]
     except Exception:  # noqa: BLE001
         logger.exception("Unexpected error while creating partition job")
         return [("error", GENERIC_DB_ERROR)]
 
-    # Reached only after the database transaction committed successfully.
     st.session_state.last_created_fingerprint = fingerprint
 
     feedback: list[tuple[str, str]] = [
@@ -470,14 +729,14 @@ def submit_partition_configuration(raw: dict[str, Any]) -> list[tuple[str, str]]
         ),
         (
             "info",
-            "No pgAgent job was created. The two generic scanners pick this "
+            "No pgAgent job was created. The two generic scanners "
+            "(run_partition_create_jobs / run_partition_drop_jobs) pick this "
             "configuration up when its next run time is due.",
         ),
     ]
     if result is not None:
         feedback.append(("info", f"Function result: `{result}`"))
 
-    # Refresh the configuration list so the new row is visible on the next render.
     _load_into_state("partition_jobs", get_partition_jobs)
     return feedback
 
@@ -495,13 +754,21 @@ def _render_feedback(items: list[tuple[str, str]]) -> None:
 def _render_submit_button(
     prefix: str, raw: dict[str, Any], blocking_error: Optional[str], label: str
 ) -> None:
+    _render_configuration_preview(raw)
+    write_note = (
+        "This button **writes** one configuration row through the approved "
+        "database function. Loading and refresh are read-only."
+    )
+    if not raw.get("is_create"):
+        write_note += " Operation is **DROP** — double-check retention before saving."
+    st.caption(write_note)
+
     if st.button(
         label,
         type="primary",
         key=prefix + "submit",
         disabled=blocking_error is not None,
     ):
-        # Guard against re-entrant handling within one script run.
         if st.session_state.create_in_flight:
             return
         st.session_state.create_in_flight = True
@@ -518,6 +785,106 @@ def _render_submit_button(
 # ---------------------------------------------------------------------------
 
 
+def _build_inference_summary(details: dict[str, Any]) -> dict[str, Any]:
+    autofill = details.get("autofill") or {}
+    routine = details.get("called_routine") or {}
+    warnings = list(details.get("warnings") or [])
+    db_config = autofill.get("db_config", EMPTY_DB_CONFIG)
+    db_empty = _db_config_is_empty(db_config)
+
+    if "is_create" in autofill:
+        operation = "CREATE" if autofill["is_create"] else "DROP"
+    else:
+        operation = "Unresolved — review manually"
+
+    schema = autofill.get("table_schema")
+    table = autofill.get("table_name")
+    target = f"{schema}.{table}" if schema and table else "Unresolved"
+
+    invocation = routine.get("invocation")
+    kind = routine.get("kind")
+    if invocation and kind:
+        invocation_label = f"{invocation} {kind.lower()}"
+    elif invocation:
+        invocation_label = str(invocation)
+    else:
+        invocation_label = "Not resolved"
+
+    confidence = "High"
+    if warnings:
+        confidence = "Needs review"
+    if not routine.get("signature") or "is_create" not in autofill or target == "Unresolved":
+        confidence = "Low — manual review required"
+
+    return {
+        "job_id": details.get("job_id"),
+        "job_name": details.get("job_name"),
+        "routine_signature": routine.get("signature") or "Not resolved",
+        "invocation_label": invocation_label,
+        "operation": operation,
+        "target_table": target,
+        "schedule": autofill.get("job_schedule") or "Not inferred",
+        "next_run": autofill.get("next_run_time"),
+        "db_config_extracted": not db_empty,
+        "db_config": db_config,
+        "confidence": confidence,
+        "warnings": warnings,
+        "database_name": details.get("database_name"),
+    }
+
+
+def _render_inference_summary(summary: dict[str, Any]) -> None:
+    next_run = summary.get("next_run")
+    if isinstance(next_run, datetime):
+        next_run_text = next_run.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        next_run_text = str(next_run or "Not inferred")
+
+    op = str(summary.get("operation") or "")
+    op_kind = "ok" if op == "CREATE" else ("drop" if op == "DROP" else "warn")
+    conf = str(summary.get("confidence") or "")
+    conf_kind = "ok" if conf.startswith("High") else ("warn" if "review" in conf.lower() else "fail")
+    db_kind = "ok" if summary.get("db_config_extracted") else "mute"
+
+    st.markdown('<div class="pj-panel">', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="pj-panel-title">Inference summary '
+        "(read-only analysis)</div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'{_badge(op, op_kind)}{_badge(conf, conf_kind)}'
+        f'{_badge("DB config: yes" if summary.get("db_config_extracted") else "DB config: no", db_kind)}',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="pj-kv">'
+        f"<b>pgAgent job:</b> {summary.get('job_id')} — "
+        f"<code>{summary.get('job_name') or '—'}</code><br>"
+        f"<b>Routine resolved:</b> <code>{summary.get('routine_signature')}</code><br>"
+        f"<b>Invocation type:</b> {summary.get('invocation_label')}<br>"
+        f"<b>Target table:</b> <code>{summary.get('target_table')}</code><br>"
+        f"<b>Schedule:</b> <code>{summary.get('schedule')}</code><br>"
+        f"<b>Next run:</b> <code>{next_run_text}</code><br>"
+        f"<b>Source database (job step):</b> "
+        f"<code>{summary.get('database_name') or '—'}</code>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    if summary.get("db_config_extracted"):
+        st.caption("Extracted from SET / set_config statements in the routine definition.")
+        st.code(
+            _normalize_db_config_text(summary.get("db_config")),
+            language="json",
+        )
+    else:
+        st.caption("No routine-level DB configuration was detected. Field shows `{}`.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    for warning in summary.get("warnings") or []:
+        st.warning(warning)
+
+
 def _apply_autofill(details: dict[str, Any]) -> None:
     """Copy safe auto-fill values into the convert-tab widgets. Read-only step."""
     autofill = details.get("autofill") or {}
@@ -527,6 +894,8 @@ def _apply_autofill(details: dict[str, Any]) -> None:
         value = autofill[source_key]
         if source_key in _INTEGER_FIELDS:
             value = int(value)
+        if source_key == "db_config":
+            value = _normalize_db_config_text(value)
         st.session_state[CONVERT_PREFIX + suffix] = value
 
     if "is_create" in autofill:
@@ -543,21 +912,17 @@ def _apply_autofill(details: dict[str, Any]) -> None:
     elif isinstance(next_run, date):
         st.session_state[CONVERT_PREFIX + "next_run_date"] = next_run
 
-    st.session_state.load_warnings = list(details.get("warnings") or [])
+    summary = _build_inference_summary(details)
+    st.session_state.inference_summary = summary
+    st.session_state.load_warnings = list(summary.get("warnings") or [])
     st.session_state.step_choices = list(details.get("step_choices") or [])
     st.session_state.loaded_job_id = details.get("job_id")
     st.session_state.load_error = None
     job_label = details.get("job_name") or details.get("job_id")
-    routine = details.get("called_routine") or {}
-    routine_note = ""
-    if routine.get("signature"):
-        routine_note = (
-            f"Resolved {routine['invocation']} to {routine['signature']}. "
-        )
     st.session_state.load_info = (
         f"Loaded pgAgent job {details.get('job_id')}: {job_label}. "
-        f"{routine_note}"
-        "Nothing was written. Review the values, then create the configuration."
+        "Nothing was written. Review the inference summary and editable fields, "
+        "then create the configuration."
     )
 
 
@@ -565,10 +930,11 @@ def _load_job_details(job_id: int, step_id: Any = None) -> None:
     try:
         details = get_pgagent_job_details(job_id, step_id=step_id)
     except (PgAgentNotInstalledError, DatabaseError) as exc:
-        st.session_state.load_error = exc.message
+        st.session_state.load_error = _format_error_for_ui(exc.message)
         st.session_state.load_warnings = []
         st.session_state.load_info = None
         st.session_state.step_choices = []
+        st.session_state.inference_summary = None
         return
     except Exception:  # noqa: BLE001
         logger.exception("Unexpected error while loading pgAgent job details")
@@ -576,8 +942,30 @@ def _load_job_details(job_id: int, step_id: Any = None) -> None:
         st.session_state.load_warnings = []
         st.session_state.load_info = None
         st.session_state.step_choices = []
+        st.session_state.inference_summary = None
         return
     _apply_autofill(details)
+
+
+def _render_step_bar(active: int) -> None:
+    labels = [
+        "1. Enter Job ID",
+        "2. Load details",
+        "3. Review inference",
+        "4. Create configuration",
+    ]
+    chips = []
+    for index, label in enumerate(labels, start=1):
+        css = "pj-step"
+        if index < active:
+            css += " pj-step-done"
+        elif index == active:
+            css += " pj-step-active"
+        chips.append(f'<span class="{css}">{label}</span>')
+    st.markdown(
+        f'<div class="pj-step-bar">{"".join(chips)}</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def _render_pgagent_jobs() -> None:
@@ -590,14 +978,14 @@ def _render_pgagent_jobs() -> None:
         ):
             st.markdown(f"**Total pgAgent jobs:** {len(st.session_state.jobs)}")
     with col_btn:
-        if st.button("Refresh Jobs", use_container_width=True):
+        if st.button("Refresh Jobs", use_container_width=True, help="Read-only refresh"):
             _load_jobs()
 
     if st.session_state.pgagent_missing:
         st.warning(st.session_state.jobs_error)
         return
     if st.session_state.jobs_error:
-        st.error(st.session_state.jobs_error)
+        _render_db_error(st.session_state.jobs_error)
         return
     if not st.session_state.jobs:
         st.info("No pgAgent jobs were found.")
@@ -616,22 +1004,38 @@ def _render_pgagent_jobs() -> None:
 def _render_convert_tab() -> None:
     st.subheader("Convert an existing pgAgent partition job")
     st.caption(
-        "Migration path: read an old table-specific pgAgent job and turn it into "
-        "one parameterised configuration row. Loading is strictly read-only."
+        "Guided migration: read an old table-specific pgAgent job (read-only) and "
+        "store one parameterised configuration row. The original pgAgent job is "
+        "never modified."
     )
 
-    with st.expander("Existing pgAgent jobs", expanded=False):
+    if st.session_state.inference_summary is not None:
+        active_step = 3
+    elif st.session_state.load_error:
+        active_step = 2
+    else:
+        active_step = 1
+    _render_step_bar(active_step)
+
+    with st.expander("Browse existing pgAgent jobs (optional)", expanded=False):
         _render_pgagent_jobs()
 
+    st.markdown("##### Step 1 — Enter pgAgent Job ID")
     col_id, col_btn = st.columns([2, 1])
     with col_id:
         st.number_input("pgAgent Job ID", min_value=1, step=1, key="load_job_id")
     with col_btn:
         st.write("")
-        if st.button("Load Job Details", use_container_width=True):
+        if st.button(
+            "Load Job Details",
+            use_container_width=True,
+            help="Read-only: inspects pgAgent and catalog metadata only",
+        ):
             _load_job_details(int(st.session_state.load_job_id))
 
     if st.session_state.step_choices:
+        st.markdown("##### Multiple job steps found")
+        st.caption("Select the step that calls the partition routine, then apply it.")
         choice_labels = {}
         for choice in st.session_state.step_choices:
             routine_label = choice.get("routine_label") or "routine not identified"
@@ -650,22 +1054,33 @@ def _render_convert_tab() -> None:
             _load_job_details(int(job_id), step_id=st.session_state.selected_step_id)
 
     if st.session_state.load_error:
-        st.error(st.session_state.load_error)
+        _render_db_error(st.session_state.load_error)
     if st.session_state.load_info:
         st.info(st.session_state.load_info)
-    for warning in st.session_state.load_warnings:
-        st.warning(warning)
 
-    st.divider()
-    raw, blocking_error = _render_job_fields(CONVERT_PREFIX)
-    st.divider()
-    _render_submit_button(
-        CONVERT_PREFIX, raw, blocking_error, "Create Partition Job"
-    )
-    st.caption(
-        "The original pgAgent job is never modified, disabled, or deleted. "
-        "Retiring it is a separate DBA decision."
-    )
+    if st.session_state.inference_summary:
+        st.markdown("##### Step 2–3 — Review inferred values")
+        _render_inference_summary(st.session_state.inference_summary)
+        st.markdown("##### Step 4 — Edit if needed, then create configuration")
+        st.caption(
+            "Fields below are editable. Values came from pgAgent / routine analysis "
+            "where possible; leave unresolved fields blank only if you intend to "
+            "fix them yourself."
+        )
+        raw, blocking_error = _render_job_fields(CONVERT_PREFIX)
+        st.divider()
+        _render_submit_button(
+            CONVERT_PREFIX, raw, blocking_error, "Create Partition Job"
+        )
+        st.caption(
+            "The original pgAgent job is never modified, disabled, or deleted. "
+            "Retiring it is a separate DBA decision."
+        )
+    else:
+        st.info(
+            "Enter a pgAgent Job ID and click **Load Job Details** to begin. "
+            "Loading is read-only and does not write to the database."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -689,56 +1104,108 @@ def _render_new_job_tab() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _operation_label(job: dict[str, Any]) -> str:
+    return "CREATE" if bool(job.get("is_create")) else "DROP"
+
+
+def _target_table(job: dict[str, Any]) -> str:
+    schema = job.get("table_schema") or ""
+    table = job.get("table_name") or ""
+    if schema and table:
+        return f"{schema}.{table}"
+    return table or schema or "—"
+
+
 def _format_config_details(job: dict[str, Any]) -> None:
     is_create = bool(job.get("is_create"))
     operation = "CREATE" if is_create else "DROP"
-    interval_label = "Create-ahead interval" if is_create else "Retention interval"
+    interval_label = "Create ahead interval" if is_create else "Retention interval"
+    status = job.get("last_run_status") or "—"
+    status_kind = _status_badge_kind(status)
 
+    st.markdown(
+        f'{_badge(operation, "ok" if is_create else "drop")}'
+        f'{_badge("Enabled" if job.get("is_enabled") else "Disabled", "info" if job.get("is_enabled") else "mute")}'
+        f'{_badge(str(status), status_kind)}',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown('<div class="pj-section-label">Identity</div>', unsafe_allow_html=True)
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown(f"**Job ID:** {job.get('job_id')}")
-        st.markdown(f"**Job Name:** {job.get('job_name')}")
-        st.markdown(
-            f"**Target table:** {job.get('table_schema')}.{job.get('table_name')}"
-        )
-        st.markdown(f"**Operation:** {operation}")
-        st.markdown(f"**Enabled:** {bool(job.get('is_enabled'))}")
-        st.markdown(f"**Schedule:** `{job.get('job_schedule')}`")
+        st.markdown(f"**Job ID:** `{job.get('job_id')}`")
+        st.markdown(f"**Job name:** `{job.get('job_name')}`")
+        st.markdown(f"**Target table:** `{_target_table(job)}`")
     with col2:
-        st.markdown(f"**Frequency:** {job.get('frequency')}")
-        st.markdown(f"**Next run:** {job.get('next_run_time')}")
-        st.markdown(f"**Last run:** {job.get('last_run_time')}")
-        st.markdown(f"**Last status:** {job.get('last_run_status')}")
-        st.markdown(
-            f"**Partition size:** {job.get('partition_period')} "
-            f"{job.get('partition_unit')}"
-        )
-        st.markdown(f"**{interval_label}:** {job.get('create_drop_interval')}")
+        st.markdown(f"**Operation:** `{operation}`")
+        st.markdown(f"**Enabled:** `{bool(job.get('is_enabled'))}`")
+        st.markdown(f"**Last status:** `{status}`")
 
+    st.markdown('<div class="pj-section-label">Schedule</div>', unsafe_allow_html=True)
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown(f"**Schedule:** `{job.get('job_schedule')}`")
+        st.markdown(f"**Job frequency:** `{job.get('frequency')}`")
+    with col4:
+        st.markdown(f"**Next run:** `{job.get('next_run_time')}`")
+        st.markdown(f"**Last run:** `{job.get('last_run_time')}`")
     meaning = describe_schedule(str(job.get("job_schedule") or ""))
     if meaning:
         st.caption(f"Schedule meaning: {meaning}")
-    st.markdown("**Database configuration:**")
+
+    st.markdown('<div class="pj-section-label">Partition rules</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"**Partition size:** `{job.get('partition_period')} {job.get('partition_unit')}`  \n"
+        f"**{interval_label}:** `{job.get('create_drop_interval')}`"
+    )
+
+    st.markdown('<div class="pj-section-label">Database configuration</div>', unsafe_allow_html=True)
     st.code(json.dumps(job.get("db_config_para"), indent=2, default=str), language="json")
+
+
+def _manual_run_allowed() -> tuple[bool, str]:
+    readiness = st.session_state.database_readiness
+    if st.session_state.database_readiness_error:
+        return False, (
+            "Manual run is blocked until Database Readiness can be checked. "
+            "Fix the readiness error first."
+        )
+    if not readiness:
+        return False, "Manual run is blocked: readiness information is unavailable."
+    if not readiness.get("config_table_select"):
+        return False, (
+            "Manual run is blocked: configuration table SELECT is missing. "
+            "Ask a DBA to grant only what is needed — this UI never grants privileges."
+        )
+    return True, ""
 
 
 def _render_manual_run(job: dict[str, Any]) -> None:
     job_id = job.get("job_id")
     is_create = bool(job.get("is_create"))
+    allowed, reason = _manual_run_allowed()
 
     st.markdown("**Manual run**")
     st.caption(
         "Executes this configured job immediately through "
-        "run_partition_job_manual(). The automatic next run time is not changed."
+        "run_partition_job_manual(). The automatic next run time is not changed. "
+        "This is a write operation."
     )
+    if not allowed:
+        st.warning(reason)
+        return
 
     if is_create:
         if st.button("Run CREATE Job Now", key=f"manual_run_{job_id}"):
             _execute_manual_run(job_id)
     else:
+        st.markdown(
+            '<div class="pj-danger">DROP operation: this may permanently remove '
+            "old table partitions and their data.</div>",
+            unsafe_allow_html=True,
+        )
         confirmed = st.checkbox(
-            "I understand that this operation may permanently drop old table "
-            "partitions and their data.",
+            "I understand that this DROP may permanently remove partition data.",
             key=f"manual_confirm_{job_id}",
         )
         if st.button(
@@ -757,7 +1224,9 @@ def _execute_manual_run(job_id: Any) -> None:
     try:
         result = run_partition_job_manual(job_id)
     except DatabaseError as exc:
-        st.session_state.manual_run_feedback = [("error", exc.message)]
+        st.session_state.manual_run_feedback = [
+            ("error", _format_error_for_ui(exc.message))
+        ]
         return
     except Exception:  # noqa: BLE001
         logger.exception("Unexpected error during manual partition job run")
@@ -768,24 +1237,58 @@ def _execute_manual_run(job_id: Any) -> None:
     if result is not None:
         feedback.append(("info", f"Function result: `{result}`"))
     st.session_state.manual_run_feedback = feedback
-    # Execution history and job state changed — reload both.
     _load_into_state("partition_job_logs", get_partition_job_logs, 100)
     _load_into_state("partition_jobs", get_partition_jobs)
+
+
+def _filter_configured_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    op_filter = st.session_state.config_op_filter
+    enabled_filter = st.session_state.config_enabled_filter
+    status_filter = st.session_state.config_status_filter
+    search = (st.session_state.config_search or "").strip().lower()
+
+    filtered: list[dict[str, Any]] = []
+    for job in jobs:
+        operation = _operation_label(job)
+        if op_filter != "All" and operation != op_filter:
+            continue
+        if enabled_filter == "Enabled" and not job.get("is_enabled"):
+            continue
+        if enabled_filter == "Disabled" and job.get("is_enabled"):
+            continue
+        status = str(job.get("last_run_status") or "")
+        if status_filter != "All" and status != status_filter:
+            continue
+        if search:
+            haystack = " ".join(
+                str(part or "")
+                for part in (
+                    job.get("job_id"),
+                    job.get("job_name"),
+                    job.get("table_schema"),
+                    job.get("table_name"),
+                    _target_table(job),
+                )
+            ).lower()
+            if search not in haystack:
+                continue
+        filtered.append(job)
+    return filtered
 
 
 def _render_configured_jobs_tab() -> None:
     st.subheader("Configured partition jobs")
     st.caption(
         "Every row is one parameterised partition job in "
-        "mubasher_oms.partitioning_job_table. These rows replaced the old "
+        "`mubasher_oms.partitioning_job_table`. These rows replaced the old "
         "per-table pgAgent jobs."
     )
 
-    if st.button("Refresh Configured Jobs"):
+    if st.button("Refresh Configured Jobs", help="Read-only refresh"):
         _load_into_state("partition_jobs", get_partition_jobs)
 
     if st.session_state.partition_jobs_error:
-        st.error(st.session_state.partition_jobs_error)
+        _render_db_error(st.session_state.partition_jobs_error)
         st.caption(
             "SELECT permission on the configuration table is required to list "
             "configured jobs. Ask a DBA to grant only what is needed."
@@ -797,19 +1300,61 @@ def _render_configured_jobs_tab() -> None:
         st.info("No parameterised partition jobs are configured yet.")
         return
 
-    st.markdown(f"**Total configured jobs:** {len(jobs)}")
-    st.dataframe(
-        [{col: job.get(col) for col in CONFIGURED_JOB_COLUMNS} for job in jobs],
-        use_container_width=True,
-        hide_index=True,
+    f1, f2, f3, f4 = st.columns([1, 1, 1, 2])
+    with f1:
+        st.selectbox(
+            "Operation",
+            options=["All", "CREATE", "DROP"],
+            key="config_op_filter",
+        )
+    with f2:
+        st.selectbox(
+            "Enabled",
+            options=["All", "Enabled", "Disabled"],
+            key="config_enabled_filter",
+        )
+    with f3:
+        status_options = ["All"] + sorted(
+            {
+                str(job.get("last_run_status"))
+                for job in jobs
+                if job.get("last_run_status")
+            }
+        )
+        if st.session_state.config_status_filter not in status_options:
+            st.session_state.config_status_filter = "All"
+        st.selectbox("Status", options=status_options, key="config_status_filter")
+    with f4:
+        st.text_input("Search job / table", key="config_search")
+
+    filtered = _filter_configured_jobs(jobs)
+    st.markdown(
+        f"**Showing {len(filtered)} of {len(jobs)} configured job(s).**"
     )
 
-    job_ids = [job.get("job_id") for job in jobs if job.get("job_id") is not None]
+    table_rows = []
+    for job in filtered:
+        table_rows.append(
+            {
+                "job_id": job.get("job_id"),
+                "job_name": job.get("job_name"),
+                "enabled": bool(job.get("is_enabled")),
+                "operation": _operation_label(job),
+                "schema.table": _target_table(job),
+                "schedule": job.get("job_schedule"),
+                "next_run_time": job.get("next_run_time"),
+                "last_run_status": job.get("last_run_status"),
+            }
+        )
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+    job_ids = [job.get("job_id") for job in filtered if job.get("job_id") is not None]
     if not job_ids:
+        st.info("No configured jobs match the current filters.")
         return
 
     st.divider()
-    # Drop a stale selection so the widget never receives an out-of-range value.
+    st.markdown("##### Job detail")
     if (
         "selected_config_job_id" in st.session_state
         and st.session_state.selected_config_job_id not in job_ids
@@ -821,7 +1366,7 @@ def _render_configured_jobs_tab() -> None:
         key="selected_config_job_id",
         format_func=lambda jid: f"Job {jid}",
     )
-    chosen = next((job for job in jobs if job.get("job_id") == selected), None)
+    chosen = next((job for job in filtered if job.get("job_id") == selected), None)
     if chosen is None:
         return
 
@@ -835,17 +1380,37 @@ def _render_configured_jobs_tab() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _filter_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    status_filter = st.session_state.history_status_filter
+    job_id_text = (st.session_state.history_job_id_filter or "").strip()
+    filtered: list[dict[str, Any]] = []
+    for row in logs:
+        status = str(row.get("last_run_status") or "")
+        if status_filter != "All" and status != status_filter:
+            continue
+        if job_id_text:
+            try:
+                wanted = int(job_id_text)
+            except ValueError:
+                return []
+            if row.get("job_id") != wanted:
+                continue
+        filtered.append(row)
+    return filtered
+
+
 def _render_history_tab() -> None:
     st.subheader("Execution history")
     st.caption(
-        "Latest 100 executions recorded in mubasher_oms.partitioning_job_table_log."
+        "Latest 100 executions recorded in "
+        "`mubasher_oms.partitioning_job_table_log`."
     )
 
-    if st.button("Refresh History"):
+    if st.button("Refresh History", help="Read-only refresh"):
         _load_into_state("partition_job_logs", get_partition_job_logs, 100)
 
     if st.session_state.partition_job_logs_error:
-        st.error(st.session_state.partition_job_logs_error)
+        _render_db_error(st.session_state.partition_job_logs_error)
         st.caption(
             "SELECT permission on the log table is required to show execution "
             "history. Ask a DBA to grant only what is needed."
@@ -857,20 +1422,59 @@ def _render_history_tab() -> None:
         st.info("No execution history rows were found.")
         return
 
+    f1, f2 = st.columns(2)
+    with f1:
+        st.text_input("Filter by job_id", key="history_job_id_filter")
+    with f2:
+        st.selectbox(
+            "Status",
+            options=STATUS_FILTER_OPTIONS,
+            key="history_status_filter",
+        )
+
+    filtered = _filter_logs(logs)
     counts: dict[str, int] = {}
-    for row in logs:
+    for row in filtered:
         status = str(row.get("last_run_status") or "UNKNOWN")
         counts[status] = counts.get(status, 0) + 1
     if counts:
-        metric_cols = st.columns(len(counts))
+        metric_cols = st.columns(max(len(counts), 1))
         for column, (status, count) in zip(metric_cols, sorted(counts.items())):
             column.metric(status, count)
+            column.markdown(
+                _badge(status, _status_badge_kind(status)),
+                unsafe_allow_html=True,
+            )
 
-    st.dataframe(
-        [{col: row.get(col) for col in LOG_COLUMNS} for row in logs],
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.markdown(f"**Showing {len(filtered)} of {len(logs)} log row(s).**")
+    table_rows = []
+    for row in filtered:
+        error = row.get("job_error")
+        table_rows.append(
+            {
+                "job_log_id": row.get("job_log_id"),
+                "job_id": row.get("job_id"),
+                "job_name": row.get("job_name"),
+                "last_run_status": row.get("last_run_status"),
+                "job_runtime": row.get("job_runtime"),
+                "job_error": _shorten(error, 120),
+            }
+        )
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+    long_errors = [
+        row
+        for row in filtered
+        if row.get("job_error") and len(str(row.get("job_error"))) > 120
+    ]
+    if long_errors:
+        with st.expander("Expand full error messages", expanded=False):
+            for row in long_errors:
+                st.markdown(
+                    f"**Log {row.get('job_log_id')} / Job {row.get('job_id')} "
+                    f"({row.get('last_run_status')}):**"
+                )
+                st.code(str(row.get("job_error")))
 
 
 # ---------------------------------------------------------------------------
@@ -878,21 +1482,23 @@ def _render_history_tab() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _readiness_line(label: str, exists: Any, allowed: Any) -> str:
+def _readiness_badge(exists: Any, allowed: Any) -> str:
     if not exists:
-        return f"- {label}: **missing**"
-    if allowed is None:
-        return f"- {label}: unknown"
-    return f"- {label}: {'**granted**' if allowed else '**not granted**'}"
+        return _badge("Missing", "fail")
+    if allowed is True:
+        return _badge("Granted", "ok")
+    if allowed is False:
+        return _badge("Missing", "warn")
+    return _badge("Not checked", "mute")
 
 
 def _render_readiness_panel() -> None:
     with st.expander("Database readiness (read-only)", expanded=False):
-        if st.button("Re-check readiness"):
+        if st.button("Re-check readiness", help="Read-only privilege check"):
             _load_into_state("database_readiness", get_database_readiness)
 
         if st.session_state.database_readiness_error:
-            st.error(st.session_state.database_readiness_error)
+            _render_db_error(st.session_state.database_readiness_error)
             return
 
         readiness = st.session_state.database_readiness
@@ -905,56 +1511,61 @@ def _render_readiness_panel() -> None:
             f"`{readiness.get('db_name')}`. This panel only reports privileges; "
             "it never grants them."
         )
-        lines = [
-            _readiness_line(
+
+        rows = [
+            (
                 "Schema USAGE",
                 readiness.get("schema_exists"),
                 readiness.get("schema_usage"),
             ),
-            _readiness_line(
+            (
                 "Insert function EXECUTE",
                 readiness.get("insert_function_exists"),
                 readiness.get("insert_function_execute"),
             ),
-            _readiness_line(
+            (
                 "Configuration table INSERT",
                 readiness.get("config_table_exists"),
                 readiness.get("config_table_insert"),
             ),
-            _readiness_line(
-                "Configuration table SELECT",
-                readiness.get("config_table_exists"),
-                readiness.get("config_table_select"),
-            ),
-            _readiness_line(
-                "Log table SELECT",
-                readiness.get("log_table_exists"),
-                readiness.get("log_table_select"),
-            ),
-            _readiness_line(
+            (
                 "Job ID sequence USAGE",
                 readiness.get("sequence_exists"),
                 readiness.get("sequence_usage"),
             ),
+            (
+                "Configuration table SELECT",
+                readiness.get("config_table_exists"),
+                readiness.get("config_table_select"),
+            ),
+            (
+                "Log table SELECT",
+                readiness.get("log_table_exists"),
+                readiness.get("log_table_select"),
+            ),
         ]
-        st.markdown("\n".join(lines))
+        for label, exists, allowed in rows:
+            st.markdown(
+                f"**{label}** {_readiness_badge(exists, allowed)}",
+                unsafe_allow_html=True,
+            )
         st.caption(
             "Configuration table INSERT and sequence USAGE are only required when "
-            "the insert function is SECURITY INVOKER."
+            "the insert function is SECURITY INVOKER. Do not grant ALL."
         )
 
 
 def _render_scheduler_panel() -> None:
     with st.expander("Generic scheduler status (read-only)", expanded=False):
         st.caption(
-            "The new architecture needs only these two pgAgent jobs. They poll the "
-            "configuration table; they are not created per table."
+            "These are generic scanner jobs, not one job per table. They poll "
+            "`partitioning_job_table` and execute due CREATE or DROP rows."
         )
-        if st.button("Re-check schedulers"):
+        if st.button("Re-check schedulers", help="Read-only pgAgent inspection"):
             _load_into_state("generic_schedulers", get_generic_partition_schedulers)
 
         if st.session_state.generic_schedulers_error:
-            st.error(st.session_state.generic_schedulers_error)
+            _render_db_error(st.session_state.generic_schedulers_error)
             return
 
         schedulers = st.session_state.generic_schedulers
@@ -962,18 +1573,23 @@ def _render_scheduler_panel() -> None:
             st.info("Scheduler information is not available.")
             return
 
-        for key, label in (
-            ("create_scheduler", "Generic CREATE Scheduler"),
-            ("drop_scheduler", "Generic DROP Scheduler"),
+        for key, title, scanner in (
+            ("create_scheduler", "CREATE scanner", "run_partition_create_jobs"),
+            ("drop_scheduler", "DROP scanner", "run_partition_drop_jobs"),
         ):
             found = schedulers.get(key)
+            st.markdown(f"**{title}** (`{scanner}`)")
             if not found:
-                st.warning(f"{label}: Missing")
+                st.markdown(_badge("Missing", "fail"), unsafe_allow_html=True)
                 continue
+            enabled = bool(found.get("enabled"))
             st.markdown(
-                f"**{label}: Found** — pgAgent Job ID {found.get('job_id')}, "
-                f"`{found.get('job_name')}`, enabled: {found.get('enabled')}, "
-                f"schedule: `{found.get('schedule') or 'not shown'}`"
+                f'{_badge("Found", "ok")}'
+                f'{_badge("Enabled" if enabled else "Disabled", "info" if enabled else "warn")}'
+                f" Job ID `{found.get('job_id')}` — "
+                f"`{found.get('job_name')}` — "
+                f"schedule `{found.get('schedule') or 'not shown'}`",
+                unsafe_allow_html=True,
             )
 
         if not schedulers.get("create_scheduler") or not schedulers.get(
@@ -1000,8 +1616,8 @@ def main() -> None:
     _init_session_state()
 
     st.title(PAGE_TITLE)
+    st.markdown(f'<p class="pj-subtitle">{PAGE_SUBTITLE}</p>', unsafe_allow_html=True)
 
-    # One-time loads per session — no polling, no timed refresh.
     if not st.session_state.jobs_loaded:
         _load_jobs()
     if not st.session_state.database_readiness_loaded:
