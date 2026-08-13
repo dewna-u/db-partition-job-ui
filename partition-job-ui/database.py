@@ -14,16 +14,20 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from job_autofill import (
+    INVOCATION_CALL,
+    PROKIND_FUNCTION,
+    PROKIND_PROCEDURE,
+    CalledRoutine,
     PartitionOperationEvidence,
     build_db_config_json,
     calculate_next_run,
     convert_pgagent_schedule_to_cron,
-    count_top_level_call_arguments,
     extract_called_functions,
     extract_db_config_from_function,
     extract_partition_settings,
-    extract_single_called_function,
+    extract_single_called_routine,
     extract_single_target_table,
+    extract_target_table_references,
     infer_frequency,
     infer_is_create,
     infer_partition_operation_from_function,
@@ -263,16 +267,49 @@ WHERE jscjobid = %(job_id)s
 ORDER BY jscid;
 """
 
-_FUNCTION_DEF_SQL = """
+# Schemas that can never hold an application partition routine or table.
+SYSTEM_SCHEMAS = ["pg_catalog", "information_schema", "pg_toast"]
+
+# Routine discovery. Read-only and fully parameterised: the routine name and the
+# optional schema are bound values, never interpolated. A pgAgent step may call a
+# FUNCTION or a PROCEDURE, qualified or unqualified, so resolution is done
+# against the catalog rather than assumed from the step text. The definition is
+# selected here as well, so one query yields both the identity and the body.
+_ROUTINE_CANDIDATES_SQL = """
 SELECT
-    p.oid,
-    pg_get_functiondef(p.oid) AS function_definition,
-    pronargs AS argument_count
+    p.oid::bigint                            AS routine_oid,
+    n.nspname                                AS routine_schema,
+    p.proname                                AS routine_name,
+    p.prokind::text                          AS routine_kind,
+    p.pronargs                               AS input_argument_count,
+    p.pronargdefaults                        AS default_argument_count,
+    pg_get_function_identity_arguments(p.oid) AS identity_arguments,
+    pg_get_functiondef(p.oid)                AS routine_definition
 FROM pg_proc p
 JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE n.nspname = %(function_schema)s
-  AND p.proname = %(function_name)s
-ORDER BY p.oid;
+WHERE p.proname = %(routine_name)s
+  AND p.prokind::text = ANY (%(kinds)s::text[])
+  AND n.nspname <> ALL (%(system_schemas)s::text[])
+  AND (
+        %(routine_schema)s::text IS NULL
+        OR n.nspname = %(routine_schema)s::text
+      )
+ORDER BY n.nspname, p.oid;
+"""
+
+# Resolve an unqualified relation name to its real schema. Ordinary and
+# partitioned tables only; system and temporary schemas are excluded.
+_TABLE_CANDIDATES_SQL = """
+SELECT
+    n.nspname AS table_schema,
+    c.relname AS table_name
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relname = %(table_name)s
+  AND c.relkind::text = ANY (ARRAY['r', 'p'])
+  AND c.relpersistence::text <> 't'
+  AND n.nspname <> ALL (%(system_schemas)s::text[])
+ORDER BY n.nspname;
 """
 
 
@@ -720,17 +757,23 @@ def create_partition_job(data: dict) -> Any:
             raise _map_psycopg_error(exc) from None
 
 
-def _summarise_step(step: dict, include_function: Optional[tuple[str, str]] = None) -> dict:
+def _summarise_step(step: dict, routine: Optional[CalledRoutine] = None) -> dict:
     summary = {
         "step_id": step.get("step_id"),
         "step_name": step.get("step_name"),
         "enabled": bool(step.get("enabled")),
         "kind": step.get("kind"),
         "dbname": step.get("dbname"),
+        "routine_schema": None,
+        "routine_name": None,
+        "invocation": None,
+        "routine_label": None,
     }
-    if include_function:
-        summary["function_schema"] = include_function[0]
-        summary["function_name"] = include_function[1]
+    if routine is not None:
+        summary["routine_schema"] = routine.schema
+        summary["routine_name"] = routine.name
+        summary["invocation"] = routine.invocation
+        summary["routine_label"] = routine.display_name
     return summary
 
 
@@ -746,93 +789,269 @@ def _select_sql_steps(steps: list[dict]) -> list[dict]:
     return selected
 
 
-def _resolve_called_function(
+def _resolve_called_routine(
     step: dict,
-) -> tuple[Optional[tuple[str, str]], list[str]]:
+) -> tuple[Optional[CalledRoutine], list[str]]:
     warnings: list[str] = []
-    code = step.get("code") or ""
-    function_pair, warning = extract_single_called_function(code)
+    routine, warning = extract_single_called_routine(step.get("code") or "")
     if warning:
         warnings.append(warning)
-    return function_pair, warnings
+    return routine, warnings
 
 
-def _inspect_called_function(
-    function_schema: str,
-    function_name: str,
-    step_code: str,
-) -> tuple[dict[str, Any], list[str], Optional[PartitionOperationEvidence]]:
+def _routine_signature(candidate: dict) -> str:
+    kind = (
+        "PROCEDURE"
+        if candidate.get("routine_kind") == PROKIND_PROCEDURE
+        else "FUNCTION"
+    )
+    arguments = candidate.get("identity_arguments") or ""
+    return (
+        f"{kind} {candidate.get('routine_schema')}."
+        f"{candidate.get('routine_name')}({arguments})"
+    )
+
+
+def _argument_count_fits(candidate: dict, supplied: Optional[int]) -> bool:
     """
-    Read function metadata only. Never execute the function or jstcode.
+    Whether a supplied argument count is callable against this routine.
 
-    The third return value is the CREATE/DROP evidence gathered from the
-    executable function body, or None when the body could not be inspected at
-    all (function missing, unresolved overload, or a failed catalog read).
-    Callers must treat those two cases differently: an inspected-but-inconclusive
-    body means "ask the user", never "guess from the name".
+    PostgreSQL allows trailing arguments with defaults to be omitted, so the
+    callable range is (pronargs - pronargdefaults) .. pronargs.
+    """
+    if supplied is None:
+        return True
+    total = int(candidate.get("input_argument_count") or 0)
+    defaults = int(candidate.get("default_argument_count") or 0)
+    return (total - defaults) <= supplied <= total
+
+
+def _routine_candidates(
+    cur: Any, routine: CalledRoutine
+) -> tuple[list[dict], Optional[str]]:
+    """
+    Fetch catalog candidates for a parsed call, preferring the implied kind.
+
+    CALL implies a procedure and SELECT a function. When the preferred kind finds
+    nothing, both kinds are tried so a legacy routine registered as the other
+    kind is still importable — with a warning rather than in silence.
+    """
+    params: dict[str, Any] = {
+        "routine_name": routine.name,
+        "routine_schema": routine.schema,
+        "kinds": [routine.expected_prokind],
+        "system_schemas": SYSTEM_SCHEMAS,
+    }
+    cur.execute(_ROUTINE_CANDIDATES_SQL, params)
+    rows = [dict(row) for row in cur.fetchall()]
+    if rows:
+        return rows, None
+
+    params["kinds"] = [PROKIND_FUNCTION, PROKIND_PROCEDURE]
+    cur.execute(_ROUTINE_CANDIDATES_SQL, params)
+    rows = [dict(row) for row in cur.fetchall()]
+    if not rows:
+        return [], None
+
+    expected = "procedure" if routine.invocation == INVOCATION_CALL else "function"
+    return rows, (
+        f"The job step uses {routine.invocation}, which implies a {expected}, but "
+        f"{routine.display_name} is registered as the other routine kind in "
+        "PostgreSQL. It was inspected anyway."
+    )
+
+
+def _choose_routine_candidate(
+    candidates: list[dict], supplied: Optional[int]
+) -> tuple[Optional[dict], Optional[str]]:
+    """Pick one candidate by argument count, or refuse when still ambiguous."""
+    fitting = [
+        candidate
+        for candidate in candidates
+        if _argument_count_fits(candidate, supplied)
+    ]
+
+    if len(fitting) == 1:
+        return fitting[0], None
+
+    if not fitting:
+        if len(candidates) == 1:
+            return candidates[0], (
+                f"The job step supplies {supplied} argument(s), which does not match "
+                f"{_routine_signature(candidates[0])}. That routine was inspected "
+                "because it is the only one with this name. Verify the imported values."
+            )
+        signatures = "; ".join(
+            _routine_signature(candidate) for candidate in candidates
+        )
+        return None, (
+            f"No PostgreSQL routine with this name accepts {supplied} argument(s) "
+            f"({signatures}). Manual review is required and routine-derived fields "
+            "were left unchanged."
+        )
+
+    exact = [
+        candidate
+        for candidate in fitting
+        if int(candidate.get("input_argument_count") or 0) == supplied
+    ]
+    if len(exact) == 1:
+        return exact[0], None
+
+    signatures = "; ".join(_routine_signature(candidate) for candidate in fitting)
+    return None, (
+        "Multiple PostgreSQL routines match this call, so manual review is required "
+        f"({signatures}). Routine-derived fields were left unchanged."
+    )
+
+
+def _resolve_unqualified_table(
+    cur: Any, names: list[str], routine_schema: Optional[str]
+) -> tuple[Optional[tuple[str, str]], Optional[str]]:
+    """
+    Resolve an unqualified relation name from the routine body to a real schema.
+
+    The routine's own schema is used only to break a tie between identically
+    named tables — never to assume a schema that has no matching table.
+    """
+    if not names:
+        return None, None
+    if len(names) > 1:
+        return None, (
+            "The routine definition references several unqualified tables "
+            f"({', '.join(names)}), so the target table was not resolved."
+        )
+
+    name = names[0]
+    cur.execute(
+        _TABLE_CANDIDATES_SQL,
+        {"table_name": name, "system_schemas": SYSTEM_SCHEMAS},
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+
+    if not rows:
+        return None, (
+            f"The routine references the table {name}, but no table with that name "
+            "was found in the configured database. Set Table Schema and Table Name "
+            "manually."
+        )
+    if len(rows) == 1:
+        return (rows[0]["table_schema"], rows[0]["table_name"]), None
+
+    in_routine_schema = [
+        row
+        for row in rows
+        if str(row.get("table_schema") or "").lower()
+        == str(routine_schema or "").lower()
+    ]
+    if len(in_routine_schema) == 1:
+        return (
+            in_routine_schema[0]["table_schema"],
+            in_routine_schema[0]["table_name"],
+        ), None
+
+    schemas = ", ".join(str(row.get("table_schema")) for row in rows)
+    return None, (
+        f"A table named {name} exists in more than one schema ({schemas}) and the "
+        "routine does not qualify it. Set Table Schema manually."
+    )
+
+
+def _inspect_called_routine(
+    routine: CalledRoutine,
+) -> tuple[
+    dict[str, Any], list[str], Optional[PartitionOperationEvidence], Optional[dict]
+]:
+    """
+    Resolve the called routine in the catalog and derive auto-fill values from it.
+
+    Strictly read-only: the routine is never executed and neither is the job step
+    code. One catalog query yields the routine identity and its definition, and
+    every downstream analysis — operation, target table, database configuration,
+    partition settings — reads that same definition, so they can never disagree.
+
+    Returns (autofill, warnings, operation_evidence, resolved_routine). The
+    evidence is None when the definition could not be inspected at all (routine
+    missing, ambiguous overload, or a failed catalog read), which callers must
+    treat differently from an inspected-but-inconclusive body.
     """
     autofill: dict[str, Any] = {}
     warnings: list[str] = []
+    operation: Optional[PartitionOperationEvidence] = None
+    resolved: Optional[dict] = None
 
     try:
         with _connection(_main_db_kwargs()) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    _FUNCTION_DEF_SQL,
-                    {
-                        "function_schema": function_schema,
-                        "function_name": function_name,
-                    },
+                candidates, kind_warning = _routine_candidates(cur, routine)
+                if kind_warning:
+                    warnings.append(kind_warning)
+
+                if not candidates:
+                    warnings.append(
+                        f"Could not safely resolve the PostgreSQL routine called by "
+                        f"this pgAgent step ({routine.display_name}). No matching "
+                        "function or procedure was found in the configured database, "
+                        "so Table Schema, Table Name, Partition Unit, Partition "
+                        "Period, Database Configuration and Create/Drop Interval "
+                        "were left unchanged."
+                    )
+                    return autofill, warnings, None, None
+
+                chosen, choice_warning = _choose_routine_candidate(
+                    candidates, routine.argument_count
                 )
-                rows = [dict(row) for row in cur.fetchall()]
+                if choice_warning:
+                    warnings.append(choice_warning)
+                if chosen is None:
+                    return autofill, warnings, None, None
+
+                definition = chosen.get("routine_definition") or ""
+                resolved = {
+                    "schema": chosen.get("routine_schema"),
+                    "name": chosen.get("routine_name"),
+                    "kind": (
+                        "PROCEDURE"
+                        if chosen.get("routine_kind") == PROKIND_PROCEDURE
+                        else "FUNCTION"
+                    ),
+                    "identity_arguments": chosen.get("identity_arguments") or "",
+                    "invocation": routine.invocation,
+                    "supplied_argument_count": routine.argument_count,
+                    "signature": _routine_signature(chosen),
+                }
+
+                # Prefer a schema-qualified reference in the body; fall back to
+                # resolving an unqualified one through the catalog.
+                table_pair, table_warning = extract_single_target_table(definition)
+                if table_pair is None:
+                    _qualified, unqualified = extract_target_table_references(
+                        definition
+                    )
+                    table_pair, resolve_warning = _resolve_unqualified_table(
+                        cur, unqualified, chosen.get("routine_schema")
+                    )
+                    if table_pair is None:
+                        message = resolve_warning or table_warning
+                        if message:
+                            warnings.append(message)
+                if table_pair:
+                    autofill["table_schema"] = table_pair[0]
+                    autofill["table_name"] = table_pair[1]
     except DatabaseError as exc:
         warnings.append(exc.message)
-        return autofill, warnings, None
-
-    if not rows:
-        warnings.append(
-            "The function called by the job step was not found in the configured database. "
-            "Table Schema, Table Name, Partition Unit, Partition Period, "
-            "and Create/Drop Interval were left unchanged."
-        )
-        return autofill, warnings, None
-
-    chosen = rows[0]
-    if len(rows) > 1:
-        arg_count = count_top_level_call_arguments(
-            step_code, function_schema, function_name
-        )
-        matching = []
-        if arg_count is not None:
-            matching = [
-                row for row in rows if int(row.get("argument_count") or -1) == arg_count
-            ]
-        if len(matching) == 1:
-            chosen = matching[0]
-        else:
-            warnings.append(
-                "Multiple overloads exist for the called function and the correct one "
-                "could not be identified safely. Function-derived fields were left unchanged."
-            )
-            return autofill, warnings, None
-
-    definition = chosen.get("function_definition") or ""
-
-    table_pair, table_warning = extract_single_target_table(definition)
-    if table_pair:
-        autofill["table_schema"] = table_pair[0]
-        autofill["table_name"] = table_pair[1]
-    elif table_warning:
-        warnings.append(table_warning)
+        return autofill, warnings, None, None
+    except PsycopgError as exc:
+        warnings.append(_map_psycopg_error(exc).message)
+        return autofill, warnings, None, None
 
     # The executable body is the authoritative source for CREATE vs DROP.
     operation = infer_partition_operation_from_function(definition)
     if operation.is_create is not None:
         autofill["is_create"] = operation.is_create
     logger.info(
-        "Partition operation inferred for %s.%s: %s — %s",
-        function_schema,
-        function_name,
+        "Partition operation inferred for %s: %s — %s",
+        resolved["signature"],
         operation.operation,
         operation.reason,
     )
@@ -844,14 +1063,14 @@ def _inspect_called_function(
     autofill["db_config"] = build_db_config_json(db_config)
     if not db_config:
         warnings.append(
-            "The called function sets no session configuration, so Database "
+            "The called routine sets no session configuration, so Database "
             "Configuration was left empty."
         )
 
     settings, setting_warnings = extract_partition_settings(definition)
     warnings.extend(setting_warnings)
     autofill.update(settings)
-    return autofill, warnings, operation
+    return autofill, warnings, operation, resolved
 
 
 def get_pgagent_job_details(
@@ -968,20 +1187,22 @@ def get_pgagent_job_details(
     step_choices: list[dict[str, Any]] = []
     selected_step: Optional[dict] = None
 
-    parsed_steps: list[tuple[dict, Optional[tuple[str, str]], list[str]]] = []
+    parsed_steps: list[tuple[dict, Optional[CalledRoutine], list[str]]] = []
     for step in sql_steps:
-        function_pair, step_warnings = _resolve_called_function(step)
-        parsed_steps.append((step, function_pair, step_warnings))
-        step_summaries.append(_summarise_step(step, function_pair))
+        routine, step_warnings = _resolve_called_routine(step)
+        parsed_steps.append((step, routine, step_warnings))
+        step_summaries.append(_summarise_step(step, routine))
 
+    selected_routine: Optional[CalledRoutine] = None
     if step_id is not None:
         try:
             step_id_int = int(step_id)
         except (TypeError, ValueError) as exc:
             raise DatabaseError("Job step ID must be a whole number.") from exc
-        for step, function_pair, step_warnings in parsed_steps:
+        for step, routine, step_warnings in parsed_steps:
             if step.get("step_id") == step_id_int:
                 selected_step = step
+                selected_routine = routine
                 warnings.extend(step_warnings)
                 break
         if selected_step is None:
@@ -992,93 +1213,87 @@ def get_pgagent_job_details(
     elif len(parsed_steps) == 0:
         warnings.append(
             "No enabled SQL job step was found. Database name, Table Schema, "
-            "Table Name, and function-derived fields were left unchanged."
+            "Table Name, and routine-derived fields were left unchanged."
         )
     elif len(parsed_steps) == 1:
-        selected_step, _function_pair, step_warnings = parsed_steps[0]
+        selected_step, selected_routine, step_warnings = parsed_steps[0]
         warnings.extend(step_warnings)
     else:
-        function_keys = {
-            pair for _step, pair, _warn in parsed_steps if pair is not None
+        routine_keys = {
+            routine.display_name.lower()
+            for _step, routine, _warn in parsed_steps
+            if routine is not None
         }
-        if len(function_keys) == 1 and all(
-            pair is not None for _step, pair, _warn in parsed_steps
+        if len(routine_keys) == 1 and all(
+            routine is not None for _step, routine, _warn in parsed_steps
         ):
-            selected_step, _function_pair, step_warnings = parsed_steps[0]
+            selected_step, selected_routine, step_warnings = parsed_steps[0]
             warnings.extend(step_warnings)
             warnings.append(
                 "Multiple enabled SQL steps were found; they appear to call the same "
-                "function, so the first step was used."
+                "routine, so the first step was used."
             )
         else:
             warnings.append(
-                "Multiple enabled SQL steps call different functions. "
+                "Multiple enabled SQL steps call different routines. "
                 "Select a job step to continue auto-fill. "
                 "Step-derived fields were left unchanged."
             )
-            for step, function_pair, _step_warnings in parsed_steps:
-                choice = _summarise_step(step, function_pair)
-                step_choices.append(choice)
+            for step, routine, _step_warnings in parsed_steps:
+                step_choices.append(_summarise_step(step, routine))
 
     database_name = None
-    called_function_pair: Optional[tuple[str, str]] = None
     operation_evidence: Optional[PartitionOperationEvidence] = None
+    resolved_routine: Optional[dict] = None
     if selected_step is not None:
         database_name = selected_step.get("dbname")
 
-        function_pair, _already_warned = extract_single_called_function(
-            selected_step.get("code") or ""
-        )
-        if function_pair:
-            called_function_pair = function_pair
+        if selected_routine is not None:
             (
-                func_autofill,
-                func_warnings,
+                routine_autofill,
+                routine_warnings,
                 operation_evidence,
-            ) = _inspect_called_function(
-                function_pair[0],
-                function_pair[1],
-                selected_step.get("code") or "",
-            )
-            autofill.update(func_autofill)
-            warnings.extend(func_warnings)
+                resolved_routine,
+            ) = _inspect_called_routine(selected_routine)
+            autofill.update(routine_autofill)
+            warnings.extend(routine_warnings)
 
     if "is_create" not in autofill:
         if operation_evidence is not None:
             # The body was readable but inconclusive. A name must not override
             # or substitute for that, so the user decides.
             warnings.append(
-                "Could not safely determine CREATE/DROP from the partition function. "
+                "Could not safely determine CREATE/DROP from the partition routine. "
                 + operation_evidence.reason
                 + " Please review the operation manually."
             )
         else:
             fallback = None
             fallback_source = ""
-            if called_function_pair is not None:
-                fallback = infer_is_create(called_function_pair[1])
-                fallback_source = "called function name"
+            if selected_routine is not None:
+                fallback = infer_is_create(selected_routine.name)
+                fallback_source = "called routine name"
             if fallback is None:
                 fallback = name_based_is_create
                 fallback_source = "job name"
             if fallback is None:
                 warnings.append(
-                    "Could not safely determine CREATE/DROP: the partition function "
-                    "body could not be inspected and the names are not conclusive. "
-                    "Please review the operation manually."
+                    "Could not safely determine CREATE/DROP: the partition routine "
+                    "definition could not be inspected and the names are not "
+                    "conclusive. Please review the operation manually."
                 )
             else:
                 autofill["is_create"] = fallback
                 warnings.append(
-                    "The partition function body could not be inspected, so the "
+                    "The partition routine definition could not be inspected, so the "
                     f"operation was taken from the {fallback_source}. A name is only "
                     "metadata — verify CREATE/DROP before saving."
                 )
 
     public_steps = []
     for step in steps:
-        function_pair, _warn = extract_single_called_function(step.get("code") or "")
-        public_steps.append(_summarise_step(step, function_pair))
+        step_routine, _warn = extract_single_called_routine(step.get("code") or "")
+        public_steps.append(_summarise_step(step, step_routine))
 
     return {
         "job_id": job.get("job_id"),
@@ -1093,6 +1308,7 @@ def get_pgagent_job_details(
         "warnings": warnings,
         "autofill": autofill,
         "step_choices": step_choices,
+        "called_routine": resolved_routine,
     }
 
 

@@ -9,6 +9,7 @@ import re
 import unittest
 from contextlib import contextmanager
 from datetime import datetime
+from typing import Optional
 from unittest.mock import patch
 
 from psycopg import Error as PsycopgError
@@ -22,10 +23,13 @@ from job_autofill import (
     convert_pgagent_schedule_to_cron,
     describe_schedule,
     extract_called_functions,
+    extract_called_routines,
     extract_db_config_from_function,
     extract_partition_settings,
     extract_single_called_function,
+    extract_single_called_routine,
     extract_single_target_table,
+    extract_target_table_references,
     infer_frequency,
     infer_is_create,
     infer_is_create_from_definition,
@@ -484,11 +488,46 @@ class DbConfigExtractionTests(unittest.TestCase):
             self.assertNotIn("maintenance_work_mem", source, module_name)
 
 
-def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
-    """Drive get_pgagent_job_details() against a fake pgAgent job and function."""
+def _routine_row(
+    schema: str,
+    name: str,
+    definition: str,
+    kind: str = "f",
+    input_argument_count: int = 1,
+    default_argument_count: int = 0,
+    identity_arguments: str = "date",
+    oid: int = 1,
+) -> dict:
+    """One pg_proc candidate row as the catalog query returns it."""
+    return {
+        "routine_oid": oid,
+        "routine_schema": schema,
+        "routine_name": name,
+        "routine_kind": kind,
+        "input_argument_count": input_argument_count,
+        "default_argument_count": default_argument_count,
+        "identity_arguments": identity_arguments,
+        "routine_definition": definition,
+    }
 
+
+def _load_details(
+    job_name: str,
+    step_code: str,
+    routine_rows: list,
+    table_rows: Optional[list] = None,
+    schedules: Optional[list] = None,
+    job_id: int = 7,
+) -> dict:
+    """
+    Drive get_pgagent_job_details() against a fake pgAgent job and catalog.
+
+    The fake catalog filters pg_proc and pg_class rows using the same bound
+    parameters the production queries send, so kind preference, arity matching
+    and ambiguity detection are exercised rather than bypassed.
+    """
     job = {
-        "job_id": 7,
+        "job_id": job_id,
         "job_name": job_name,
         "enabled": True,
         "host_agent": None,
@@ -501,17 +540,17 @@ def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
             "step_name": "run",
             "enabled": True,
             "kind": "s",
-            "code": "SELECT mubasher_oms.partition_maintenance_m77(current_date);",
+            "code": step_code,
             "dbname": "demo_db",
         }
     ]
-    function_rows = [
-        {"oid": 1, "function_definition": function_body, "argument_count": 1}
-    ]
+    tables = table_rows or []
+    schedule_rows = schedules or []
 
     class Cursor:
         def __init__(self) -> None:
             self.sql = ""
+            self.params: dict = {}
 
         def __enter__(self) -> "Cursor":
             return self
@@ -521,6 +560,7 @@ def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
 
         def execute(self, sql, params=None) -> None:
             self.sql = sql
+            self.params = dict(params or {})
 
         def fetchone(self):
             if "to_regclass" in self.sql:
@@ -533,9 +573,26 @@ def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
             if "jstjobid" in self.sql:
                 return [dict(row) for row in steps]
             if "jscjobid" in self.sql:
-                return []
-            if "pg_get_functiondef" in self.sql:
-                return [dict(row) for row in function_rows]
+                return [dict(row) for row in schedule_rows]
+            if "FROM pg_proc" in self.sql:
+                wanted_schema = self.params.get("routine_schema")
+                kinds = self.params.get("kinds") or []
+                return [
+                    dict(row)
+                    for row in routine_rows
+                    if row["routine_name"] == self.params.get("routine_name")
+                    and row["routine_kind"] in kinds
+                    and (
+                        wanted_schema is None
+                        or row["routine_schema"] == wanted_schema
+                    )
+                ]
+            if "FROM pg_class" in self.sql:
+                return [
+                    dict(row)
+                    for row in tables
+                    if row["table_name"] == self.params.get("table_name")
+                ]
             return []
 
     class Connection:
@@ -549,7 +606,20 @@ def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
     with patch.object(database, "_connection", fake_connection), patch.object(
         database, "_pgagent_db_kwargs", return_value={}
     ), patch.object(database, "_main_db_kwargs", return_value={}):
-        return get_pgagent_job_details(7)
+        return get_pgagent_job_details(job_id)
+
+
+def _load_details_with_function_body(job_name: str, function_body: str) -> dict:
+    """Legacy shape: one schema-qualified SELECT of a single-argument function."""
+    return _load_details(
+        job_name,
+        "SELECT mubasher_oms.partition_maintenance_m77(current_date);",
+        [
+            _routine_row(
+                "mubasher_oms", "partition_maintenance_m77", function_body, kind="f"
+            )
+        ],
+    )
 
 
 class OperationOverridesJobNameTests(unittest.TestCase):
@@ -1256,15 +1326,617 @@ class BoundParameterTests(unittest.TestCase):
         self.assertIn("cur.execute(_PGAGENT_STEPS_SQL, params)", source)
         self.assertIn("cur.execute(_PGAGENT_SCHEDULES_SQL, params)", source)
 
-    def test_function_lookup_uses_bound_parameters(self) -> None:
-        self.assertIn("%(function_schema)s", database._FUNCTION_DEF_SQL)
-        self.assertIn("%(function_name)s", database._FUNCTION_DEF_SQL)
+    def test_routine_lookup_uses_bound_parameters(self) -> None:
+        sql = database._ROUTINE_CANDIDATES_SQL
+        self.assertIn("%(routine_name)s", sql)
+        self.assertIn("%(routine_schema)s", sql)
+        self.assertIn("%(kinds)s", sql)
+        # The routine identity must never be spliced into the statement text.
+        self.assertNotIn(".format(", sql)
+        self.assertNotIn("f\"", sql)
+
+    def test_table_lookup_uses_bound_parameters(self) -> None:
+        self.assertIn("%(table_name)s", database._TABLE_CANDIDATES_SQL)
+        self.assertNotIn(".format(", database._TABLE_CANDIDATES_SQL)
+
+    def test_catalog_discovery_queries_are_read_only(self) -> None:
+        for sql in (
+            database._ROUTINE_CANDIDATES_SQL,
+            database._TABLE_CANDIDATES_SQL,
+        ):
+            upper = sql.upper()
+            self.assertIn("SELECT", upper)
+            for forbidden in ("INSERT", "UPDATE", "DELETE", "CALL ", "ALTER", "SET "):
+                self.assertNotIn(forbidden, upper)
 
     def test_connstr_not_selected(self) -> None:
         self.assertNotIn("jstconnstr", database._PGAGENT_STEPS_SQL.lower())
 
     def test_database_imports_calculate_next_run(self) -> None:
         self.assertTrue(callable(database.calculate_next_run))
+
+
+S01_STEP_CODE = """
+begin
+call create_partitions_s01_holdings_summary(
+    TO_CHAR(
+        DATE_TRUNC('year', CURRENT_DATE+7),
+        'YYYY-Mon-DD'
+    )::date,
+
+    TO_CHAR(
+        DATE_TRUNC('year', CURRENT_DATE+7)
+        + INTERVAL '1 year - 1 day',
+        'YYYY-Mon-DD'
+    )::date
+);
+end;
+"""
+
+# A procedure that receives a one-year date range but subdivides it monthly.
+# The body, not the CALL arguments, must decide the partition width.
+S01_PROCEDURE_BODY = """
+CREATE OR REPLACE PROCEDURE mubasher_oms.create_partitions_s01_holdings_summary(
+    p_start date, p_end date)
+ LANGUAGE plpgsql
+AS $procedure$
+DECLARE
+    v_start date := p_start;
+    v_next  date;
+    v_name  text;
+BEGIN
+    SET datestyle = 'ISO, DMY';
+
+    WHILE v_start <= p_end LOOP
+        v_next := v_start + INTERVAL '1 month';
+        v_name := 's01_holdings_summary_' || to_char(v_start, 'YYYYMM');
+
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_inherits
+            WHERE inhparent = 's01_holdings_summary'::regclass
+              AND inhrelid = v_name::regclass
+        ) THEN
+            EXECUTE format(
+                'ALTER TABLE %I ADD PARTITION %I VALUES LESS THAN (%L)',
+                's01_holdings_summary', v_name, v_next
+            );
+        END IF;
+
+        v_start := v_start + INTERVAL '1 month';
+    END LOOP;
+END;
+$procedure$
+"""
+
+# The real pgAgent schedule arrays for JOB_PARTITION_S01_HOLDINGS_SUMMARY.
+S01_MINUTES = "{" + ",".join("t" if i == 30 else "f" for i in range(60)) + "}"
+S01_HOURS = "{" + ",".join("t" if i == 1 else "f" for i in range(24)) + "}"
+S01_WEEKDAYS = "{f,f,f,f,f,f,f}"
+S01_MONTHDAYS = "{" + ",".join("t" if i == 28 else "f" for i in range(32)) + "}"
+S01_MONTHS = "{" + ",".join("t" if i == 11 else "f" for i in range(12)) + "}"
+
+
+def _s01_schedule_row() -> dict:
+    return {
+        "schedule_id": 1,
+        "schedule_name": "yearly",
+        "enabled": True,
+        "start_time": None,
+        "end_time": None,
+        "minutes": S01_MINUTES,
+        "hours": S01_HOURS,
+        "weekdays": S01_WEEKDAYS,
+        "monthdays": S01_MONTHDAYS,
+        "months": S01_MONTHS,
+    }
+
+
+class RoutineParsingTests(unittest.TestCase):
+    """The step parser must understand every real invocation form."""
+
+    def test_qualified_select_function(self) -> None:
+        routine, warning = extract_single_called_routine(
+            "SELECT mubasher_oms.create_partitions_x(current_date);"
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(routine.schema, "mubasher_oms")
+        self.assertEqual(routine.name, "create_partitions_x")
+        self.assertEqual(routine.invocation, "SELECT")
+        self.assertEqual(routine.expected_prokind, "f")
+        self.assertEqual(routine.argument_count, 1)
+
+    def test_qualified_call_procedure(self) -> None:
+        routine, warning = extract_single_called_routine(
+            "CALL mubasher_oms.create_partitions_x(a, b);"
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(routine.schema, "mubasher_oms")
+        self.assertEqual(routine.invocation, "CALL")
+        self.assertEqual(routine.expected_prokind, "p")
+        self.assertEqual(routine.argument_count, 2)
+
+    def test_unqualified_call_keeps_schema_unset(self) -> None:
+        routine, warning = extract_single_called_routine(
+            "CALL create_partitions_s01_holdings_summary(a, b);"
+        )
+        self.assertIsNone(warning)
+        self.assertIsNone(routine.schema)
+        self.assertEqual(routine.name, "create_partitions_s01_holdings_summary")
+        self.assertEqual(routine.invocation, "CALL")
+        self.assertEqual(routine.expected_prokind, "p")
+        self.assertEqual(routine.argument_count, 2)
+
+    def test_begin_end_wrapper(self) -> None:
+        routine, warning = extract_single_called_routine(
+            "BEGIN\n  CALL create_partitions_s01_holdings_summary(a, b);\nEND;"
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(routine.name, "create_partitions_s01_holdings_summary")
+        self.assertEqual(routine.argument_count, 2)
+
+    def test_lowercase_and_multiline_layout(self) -> None:
+        routine, warning = extract_single_called_routine(
+            "begin\n\ncall\n  create_partitions_s01_holdings_summary\n  (\n a,\n b\n);\n\nend;"
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(routine.invocation, "CALL")
+        self.assertEqual(routine.argument_count, 2)
+
+    def test_real_nested_arguments_count_as_two(self) -> None:
+        routine, warning = extract_single_called_routine(S01_STEP_CODE)
+        self.assertIsNone(warning)
+        self.assertIsNone(routine.schema)
+        self.assertEqual(routine.invocation, "CALL")
+        # Commas inside TO_CHAR / DATE_TRUNC must not be counted.
+        self.assertEqual(routine.argument_count, 2)
+
+    def test_commented_out_call_is_ignored(self) -> None:
+        routine, warning = extract_single_called_routine(
+            "-- CALL mubasher_oms.old_proc(a);\nCALL mubasher_oms.new_proc(a);"
+        )
+        self.assertIsNone(warning)
+        self.assertEqual(routine.name, "new_proc")
+
+    def test_unqualified_select_is_still_ignored(self) -> None:
+        # SELECT now() must not be mistaken for a partition routine.
+        self.assertEqual(extract_called_routines("SELECT now();"), [])
+
+    def test_qualified_pairs_helper_skips_unqualified_calls(self) -> None:
+        pairs = extract_called_functions(
+            "CALL some_proc(a); SELECT mubasher_oms.run_partition_create_jobs();"
+        )
+        self.assertEqual(pairs, [("mubasher_oms", "run_partition_create_jobs")])
+
+
+class RoutineCandidateSelectionTests(unittest.TestCase):
+    """Overload and ambiguity handling in the catalog resolution step."""
+
+    def test_argument_count_selects_the_right_overload(self) -> None:
+        candidates = [
+            _routine_row("mubasher_oms", "p", "one", kind="p", input_argument_count=1),
+            _routine_row(
+                "mubasher_oms", "p", "two", kind="p", input_argument_count=2, oid=2
+            ),
+        ]
+        chosen, warning = database._choose_routine_candidate(candidates, 2)
+        self.assertIsNone(warning)
+        self.assertEqual(chosen["routine_definition"], "two")
+
+    def test_default_arguments_widen_the_callable_range(self) -> None:
+        candidate = _routine_row(
+            "mubasher_oms",
+            "p",
+            "body",
+            kind="p",
+            input_argument_count=3,
+            default_argument_count=2,
+        )
+        self.assertTrue(database._argument_count_fits(candidate, 1))
+        self.assertTrue(database._argument_count_fits(candidate, 3))
+        self.assertFalse(database._argument_count_fits(candidate, 4))
+
+    def test_two_schemas_with_the_same_signature_are_ambiguous(self) -> None:
+        candidates = [
+            _routine_row("schema_a", "p", "a", kind="p", input_argument_count=2),
+            _routine_row("schema_b", "p", "b", kind="p", input_argument_count=2, oid=2),
+        ]
+        chosen, warning = database._choose_routine_candidate(candidates, 2)
+        self.assertIsNone(chosen)
+        self.assertIn("Multiple PostgreSQL routines match", warning)
+        self.assertIn("schema_a", warning)
+        self.assertIn("schema_b", warning)
+
+    def test_ambiguous_procedure_leaves_fields_unchanged(self) -> None:
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            "BEGIN CALL create_partitions_s01_holdings_summary(a, b); END;",
+            [
+                _routine_row(
+                    "schema_a",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                ),
+                _routine_row(
+                    "schema_b",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                    oid=2,
+                ),
+            ],
+        )
+        self.assertNotIn("table_schema", details["autofill"])
+        self.assertNotIn("partition_unit", details["autofill"])
+        self.assertIsNone(details["called_routine"])
+        self.assertTrue(
+            any("manual review" in warning for warning in details["warnings"])
+        )
+
+    def test_unresolvable_routine_reports_resolution_failure(self) -> None:
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            "CALL create_partitions_s01_holdings_summary(a, b);",
+            [],
+        )
+        self.assertTrue(
+            any(
+                "Could not safely resolve the PostgreSQL routine" in warning
+                for warning in details["warnings"]
+            )
+        )
+
+    def test_call_prefers_a_procedure_over_a_same_named_function(self) -> None:
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            "CALL create_partitions_s01_holdings_summary(a, b);",
+            [
+                _routine_row(
+                    "other_schema",
+                    "create_partitions_s01_holdings_summary",
+                    "BEGIN SELECT 1; END;",
+                    kind="f",
+                    input_argument_count=2,
+                ),
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                    oid=2,
+                ),
+            ],
+            table_rows=[
+                {
+                    "table_schema": "mubasher_oms",
+                    "table_name": "s01_holdings_summary",
+                }
+            ],
+        )
+        self.assertEqual(details["called_routine"]["kind"], "PROCEDURE")
+        self.assertEqual(details["called_routine"]["schema"], "mubasher_oms")
+
+
+class UnqualifiedTableResolutionTests(unittest.TestCase):
+    def test_regclass_literal_is_reported_as_unqualified(self) -> None:
+        qualified, unqualified = extract_target_table_references(S01_PROCEDURE_BODY)
+        self.assertEqual(qualified, [])
+        self.assertEqual(unqualified, ["s01_holdings_summary"])
+
+    def test_qualified_regclass_literal_is_reported_as_qualified(self) -> None:
+        qualified, unqualified = extract_target_table_references(
+            "BEGIN PERFORM 1 FROM pg_inherits "
+            "WHERE inhparent = 'mubasher_oms.s01_holdings_summary'::regclass; END;"
+        )
+        self.assertEqual(qualified, [("mubasher_oms", "s01_holdings_summary")])
+        self.assertEqual(unqualified, [])
+
+    def test_unique_candidate_resolves_to_its_real_schema(self) -> None:
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            S01_STEP_CODE,
+            [
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                )
+            ],
+            table_rows=[
+                {
+                    "table_schema": "mubasher_oms",
+                    "table_name": "s01_holdings_summary",
+                }
+            ],
+        )
+        self.assertEqual(details["autofill"]["table_schema"], "mubasher_oms")
+        self.assertEqual(details["autofill"]["table_name"], "s01_holdings_summary")
+
+    def test_same_name_in_two_unrelated_schemas_is_not_guessed(self) -> None:
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            S01_STEP_CODE,
+            [
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                )
+            ],
+            table_rows=[
+                {"table_schema": "schema_a", "table_name": "s01_holdings_summary"},
+                {"table_schema": "schema_b", "table_name": "s01_holdings_summary"},
+            ],
+        )
+        self.assertNotIn("table_schema", details["autofill"])
+        self.assertTrue(
+            any(
+                "exists in more than one schema" in warning
+                for warning in details["warnings"]
+            )
+        )
+
+    def test_routine_schema_breaks_a_tie(self) -> None:
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            S01_STEP_CODE,
+            [
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                )
+            ],
+            table_rows=[
+                {"table_schema": "archive", "table_name": "s01_holdings_summary"},
+                {"table_schema": "mubasher_oms", "table_name": "s01_holdings_summary"},
+            ],
+        )
+        self.assertEqual(details["autofill"]["table_schema"], "mubasher_oms")
+
+    def test_table_is_not_derived_from_the_routine_name(self) -> None:
+        # Body references no relation at all, so nothing may be invented from
+        # the create_partitions_<table> naming convention.
+        details = _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            "CALL create_partitions_s01_holdings_summary(a, b);",
+            [
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_s01_holdings_summary",
+                    "CREATE OR REPLACE PROCEDURE mubasher_oms."
+                    "create_partitions_s01_holdings_summary(a date, b date) AS "
+                    "$procedure$ BEGIN PERFORM 1; END; $procedure$",
+                    kind="p",
+                    input_argument_count=2,
+                )
+            ],
+            table_rows=[
+                {
+                    "table_schema": "mubasher_oms",
+                    "table_name": "s01_holdings_summary",
+                }
+            ],
+        )
+        self.assertNotIn("table_name", details["autofill"])
+
+
+class ProcedureBodyAnalysisTests(unittest.TestCase):
+    """CREATE/DROP, DB config and partition settings read the procedure body."""
+
+    def test_procedure_add_partition_is_create(self) -> None:
+        evidence = infer_partition_operation_from_function(S01_PROCEDURE_BODY)
+        self.assertEqual(evidence.operation, "CREATE")
+        self.assertIs(evidence.is_create, True)
+
+    def test_procedure_dynamic_drop_is_drop(self) -> None:
+        body = (
+            "CREATE OR REPLACE PROCEDURE mubasher_oms.purge_x(p date) AS $procedure$ "
+            "BEGIN EXECUTE format('DROP TABLE %I', v_name); END; $procedure$"
+        )
+        evidence = infer_partition_operation_from_function(body)
+        self.assertEqual(evidence.operation, "DROP")
+        self.assertIs(evidence.is_create, False)
+
+    def test_procedure_db_config(self) -> None:
+        config, _warnings = extract_db_config_from_function(S01_PROCEDURE_BODY)
+        self.assertEqual(config, {"datestyle": "ISO, DMY"})
+
+    def test_body_beats_call_arguments_for_partition_width(self) -> None:
+        # The CALL spans a whole year, but the body advances one month at a time.
+        values, _warnings = extract_partition_settings(S01_PROCEDURE_BODY)
+        self.assertEqual(values["partition_unit"], "month")
+        self.assertEqual(values["partition_period"], 1)
+
+    def test_generate_series_step_is_the_partition_width(self) -> None:
+        body = (
+            "CREATE OR REPLACE PROCEDURE mubasher_oms.p(a date, b date) AS $procedure$ "
+            "BEGIN FOR r IN SELECT generate_series(a, b, INTERVAL '3 months') LOOP "
+            "NULL; END LOOP; END; $procedure$"
+        )
+        values, _warnings = extract_partition_settings(body)
+        self.assertEqual(values["partition_unit"], "month")
+        self.assertEqual(values["partition_period"], 3)
+
+    def test_retention_interval_is_not_taken_as_the_partition_width(self) -> None:
+        body = (
+            "CREATE OR REPLACE PROCEDURE mubasher_oms.p(a date) AS $procedure$ "
+            "BEGIN v_cutoff := a - INTERVAL '18 months'; "
+            "v_start := v_start + INTERVAL '1 day'; END; $procedure$"
+        )
+        values, _warnings = extract_partition_settings(body)
+        self.assertEqual(values["partition_unit"], "day")
+        self.assertEqual(values["partition_period"], 1)
+
+    def test_create_drop_interval_is_left_unresolved_rather_than_guessed(self) -> None:
+        values, warnings = extract_partition_settings(S01_PROCEDURE_BODY)
+        self.assertNotIn("create_drop_amount", values)
+        self.assertNotIn("create_drop_unit", values)
+        self.assertTrue(
+            any("Create/Drop Interval could not be determined" in w for w in warnings)
+        )
+
+
+class YearlyScheduleInferenceTests(unittest.TestCase):
+    def test_real_s01_arrays_convert_to_the_expected_cron(self) -> None:
+        cron, warnings = convert_pgagent_schedule_to_cron(
+            S01_MINUTES, S01_HOURS, S01_MONTHDAYS, S01_MONTHS, S01_WEEKDAYS
+        )
+        self.assertEqual(warnings, [])
+        self.assertEqual(cron, "0 30 1 29 12 *")
+
+    def test_yearly_cron_infers_one_year(self) -> None:
+        self.assertEqual(infer_frequency("0 30 1 29 12 *"), ((1, "year"), None))
+
+    def test_quarterly_months_infer_three_months(self) -> None:
+        self.assertEqual(infer_frequency("0 0 2 1 3,6,9,12 *"), ((3, "month"), None))
+
+    def test_half_yearly_months_infer_six_months(self) -> None:
+        self.assertEqual(infer_frequency("0 0 2 1 1,7 *"), ((6, "month"), None))
+
+    def test_irregular_months_are_not_guessed(self) -> None:
+        frequency, warning = infer_frequency("0 0 2 1 1,4,12 *")
+        self.assertIsNone(frequency)
+        self.assertIn("unevenly spaced", warning)
+
+    def test_month_restricted_schedule_without_a_fixed_day_is_not_guessed(self) -> None:
+        frequency, warning = infer_frequency("0 0 2 * 12 *")
+        self.assertIsNone(frequency)
+        self.assertIn("set Frequency manually", warning)
+
+    def test_yearly_schedule_is_described_for_the_preview(self) -> None:
+        self.assertEqual(
+            describe_schedule("0 30 1 29 12 *"), "01:30 on December 29 every year"
+        )
+
+    def test_year_frequency_passes_validation(self) -> None:
+        self.assertEqual(validate_frequency_unit("year"), "year")
+        self.assertEqual(to_interval_string(1, "year"), "1 year")
+
+
+class S01EndToEndAutofillTests(unittest.TestCase):
+    """The whole import path for the real CALL-based, unqualified procedure job."""
+
+    def _details(self) -> dict:
+        return _load_details(
+            "JOB_PARTITION_S01_HOLDINGS_SUMMARY",
+            S01_STEP_CODE,
+            [
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_s01_holdings_summary",
+                    S01_PROCEDURE_BODY,
+                    kind="p",
+                    input_argument_count=2,
+                    identity_arguments="date, date",
+                )
+            ],
+            table_rows=[
+                {
+                    "table_schema": "mubasher_oms",
+                    "table_name": "s01_holdings_summary",
+                }
+            ],
+            schedules=[_s01_schedule_row()],
+        )
+
+    def test_routine_is_resolved_from_the_catalog(self) -> None:
+        routine = self._details()["called_routine"]
+        self.assertEqual(routine["schema"], "mubasher_oms")
+        self.assertEqual(routine["name"], "create_partitions_s01_holdings_summary")
+        self.assertEqual(routine["kind"], "PROCEDURE")
+        self.assertEqual(routine["invocation"], "CALL")
+        self.assertEqual(routine["supplied_argument_count"], 2)
+
+    def test_all_fields_are_autofilled_from_actual_evidence(self) -> None:
+        autofill = self._details()["autofill"]
+        self.assertEqual(autofill["table_schema"], "mubasher_oms")
+        self.assertEqual(autofill["table_name"], "s01_holdings_summary")
+        self.assertIs(autofill["is_create"], True)
+        self.assertEqual(json.loads(autofill["db_config"]), {"datestyle": "ISO, DMY"})
+        self.assertEqual(autofill["partition_unit"], "month")
+        self.assertEqual(autofill["partition_period"], 1)
+        self.assertEqual(autofill["job_schedule"], "0 30 1 29 12 *")
+        self.assertEqual(autofill["frequency_amount"], 1)
+        self.assertEqual(autofill["frequency_unit"], "year")
+
+    def test_no_stale_schema_or_routine_warning_is_shown(self) -> None:
+        warnings = self._details()["warnings"]
+        for warning in warnings:
+            self.assertNotIn("No schema-qualified function call", warning)
+            self.assertNotIn("Could not safely resolve", warning)
+            self.assertNotIn("restricts specific months", warning)
+
+    def test_next_run_is_the_next_annual_occurrence(self) -> None:
+        next_run = self._details()["autofill"]["next_run_time"]
+        self.assertEqual(next_run.month, 12)
+        self.assertEqual(next_run.day, 29)
+        self.assertEqual(next_run.hour, 1)
+        self.assertEqual(next_run.minute, 30)
+
+
+class ReadOnlyImportTests(unittest.TestCase):
+    def test_loading_a_job_never_writes_or_executes_the_routine(self) -> None:
+        source = inspect.getsource(database._inspect_called_routine)
+        upper = source.upper()
+        for forbidden in ("INSERT INTO", "UPDATE ", "DELETE FROM", "COMMIT"):
+            self.assertNotIn(forbidden, upper)
+        # Only the two catalog templates may be executed while inspecting.
+        executed = re.findall(r"cur\.execute\(\s*([A-Za-z_]+)", source)
+        self.assertEqual(executed, [])
+        for helper in (database._routine_candidates, database._resolve_unqualified_table):
+            statements = re.findall(
+                r"cur\.execute\(\s*([A-Za-z_]+)", inspect.getsource(helper)
+            )
+            self.assertTrue(
+                set(statements)
+                <= {"_ROUTINE_CANDIDATES_SQL", "_TABLE_CANDIDATES_SQL"},
+                statements,
+            )
+
+
+class R19RegressionTests(unittest.TestCase):
+    """The original schema-qualified SELECT-function workflow must be untouched."""
+
+    def test_r19_select_function_job_still_autofills(self) -> None:
+        details = _load_details(
+            "JOB_CREATE_PARTITIONS_R19_CUSTOMER_SUMMARY",
+            "select mubasher_oms.create_partitions_r19_customer_summary(current_date);",
+            [
+                _routine_row(
+                    "mubasher_oms",
+                    "create_partitions_r19_customer_summary",
+                    PartitionSettingsExtractionTests.SAMPLE_CREATE_FN,
+                    kind="f",
+                    input_argument_count=1,
+                )
+            ],
+        )
+        autofill = details["autofill"]
+        self.assertEqual(details["called_routine"]["kind"], "FUNCTION")
+        self.assertEqual(details["called_routine"]["invocation"], "SELECT")
+        self.assertIs(autofill["is_create"], True)
+        self.assertEqual(autofill["table_schema"], "mubasher_oms")
+        self.assertEqual(autofill["table_name"], "r19_customer_summary")
+        self.assertEqual(autofill["partition_unit"], "month")
+        self.assertEqual(autofill["partition_period"], 1)
+        self.assertEqual(autofill["create_drop_amount"], 2)
+        self.assertEqual(autofill["create_drop_unit"], "month")
 
 
 if __name__ == "__main__":

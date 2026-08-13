@@ -310,10 +310,10 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
         height=110,
         help=(
             "Session settings applied while the partition operation runs. When a "
-            "pgAgent job is loaded this is read from the called function's own "
-            "SET / set_config statements, so an empty object means the function "
-            "sets nothing. Whatever is shown here is stored as-is; no settings "
-            "are added for you."
+            "pgAgent job is loaded this is read from the called routine's own "
+            "SET / set_config statements, so an empty object means the "
+            "function or procedure sets nothing. Whatever is shown here is "
+            "stored as-is; no settings are added for you."
         ),
     )
 
@@ -548,8 +548,15 @@ def _apply_autofill(details: dict[str, Any]) -> None:
     st.session_state.loaded_job_id = details.get("job_id")
     st.session_state.load_error = None
     job_label = details.get("job_name") or details.get("job_id")
+    routine = details.get("called_routine") or {}
+    routine_note = ""
+    if routine.get("signature"):
+        routine_note = (
+            f"Resolved {routine['invocation']} to {routine['signature']}. "
+        )
     st.session_state.load_info = (
         f"Loaded pgAgent job {details.get('job_id')}: {job_label}. "
+        f"{routine_note}"
         "Nothing was written. Review the values, then create the configuration."
     )
 
@@ -627,13 +634,11 @@ def _render_convert_tab() -> None:
     if st.session_state.step_choices:
         choice_labels = {}
         for choice in st.session_state.step_choices:
-            function_label = "function not identified"
-            if choice.get("function_schema") and choice.get("function_name"):
-                function_label = (
-                    f"{choice['function_schema']}.{choice['function_name']}"
-                )
+            routine_label = choice.get("routine_label") or "routine not identified"
+            if choice.get("invocation"):
+                routine_label = f"{choice['invocation']} {routine_label}"
             step_name = choice.get("step_name") or f"Step {choice.get('step_id')}"
-            choice_labels[choice["step_id"]] = f"{step_name} ({function_label})"
+            choice_labels[choice["step_id"]] = f"{step_name} ({routine_label})"
         st.selectbox(
             "Job step",
             options=list(choice_labels.keys()),

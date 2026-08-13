@@ -15,11 +15,26 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _SQL_COMMENT_LINE_RE = re.compile(r"--[^\n]*")
 _SQL_COMMENT_BLOCK_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
-# SELECT/CALL/PERFORM schema.function(
-_FUNC_CALL_RE = re.compile(
-    rf"\b(?:SELECT|CALL|PERFORM)\s+({_IDENT})\s*\.\s*({_IDENT})\s*\(",
+# A pgAgent step invokes a routine as either SELECT schema.function(...) or
+# CALL [schema.]procedure(...). SELECT/PERFORM require a schema qualifier,
+# because an unqualified SELECT would also match ordinary expressions such as
+# SELECT now(). CALL can only invoke a procedure, so it is accepted with or
+# without a schema and the schema is resolved from the catalog instead.
+_QUALIFIED_ROUTINE_CALL_RE = re.compile(
+    rf"\b(SELECT|PERFORM|CALL)\s+({_IDENT})\s*\.\s*({_IDENT})\s*\(",
     re.IGNORECASE,
 )
+_UNQUALIFIED_CALL_RE = re.compile(
+    rf"\b(CALL)\s+({_IDENT})\s*\(",
+    re.IGNORECASE,
+)
+
+INVOCATION_CALL = "CALL"
+INVOCATION_SELECT = "SELECT"
+
+# pg_proc.prokind
+PROKIND_FUNCTION = "f"
+PROKIND_PROCEDURE = "p"
 
 _PARTITION_OF_RE = re.compile(
     rf"\bPARTITION\s+OF\s+({_IDENT})\s*\.\s*({_IDENT})\b",
@@ -46,6 +61,39 @@ _TRUNCATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A regclass literal names a relation directly, for example
+#   inhparent = 's01_holdings_summary'::regclass
+# and may or may not carry a schema.
+_REGCLASS_LITERAL_RE = re.compile(
+    rf"'\s*({_IDENT})\s*(?:\.\s*({_IDENT})\s*)?'\s*::\s*regclass",
+    re.IGNORECASE,
+)
+
+# Unqualified relation references. The negative lookahead keeps these from
+# firing on a qualified name, which the qualified patterns above already cover.
+_ALTER_TABLE_UNQUALIFIED_RE = re.compile(
+    rf"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?({_IDENT})\b(?!\s*\.)",
+    re.IGNORECASE,
+)
+_PARTITION_OF_UNQUALIFIED_RE = re.compile(
+    rf"\bPARTITION\s+OF\s+({_IDENT})\b(?!\s*\.)",
+    re.IGNORECASE,
+)
+
+# Relation names that are never the partitioned application table.
+_NON_TARGET_TABLE_NAMES = frozenset(
+    {
+        "pg_class",
+        "pg_inherits",
+        "pg_namespace",
+        "pg_partitioned_table",
+        "pg_tables",
+        "pg_proc",
+    }
+)
+
+_SYSTEM_SCHEMAS = frozenset({"pg_catalog", "information_schema", "pg_toast"})
+
 _PARTITION_UNIT_ASSIGN_RE = re.compile(
     r"\b(?:v_|p_)?partition_unit\s*:=\s*'?(day|week|month|year)'?",
     re.IGNORECASE,
@@ -60,14 +108,31 @@ _CREATE_DROP_INTERVAL_ASSIGN_RE = re.compile(
     re.IGNORECASE,
 )
 
+_INTERVAL_UNITS = r"day|days|week|weeks|month|months|year|years"
+
 # Common pattern used by the existing partition functions, for example:
 #   next_date := cur_date + INTERVAL '1 month';
 # The increment is the strongest signal for the partition width when the
-# function does not explicitly assign partition_unit / partition_period.
+# routine does not explicitly assign partition_unit / partition_period.
 _NEXT_DATE_INCREMENT_RE = re.compile(
-    r"\bnext_date\s*:?=\s*[^;]*?\+\s*interval\s*"
-    r"'\s*(\d+)\s*(day|days|week|weeks|month|months|year|years)\s*'",
+    rf"\bnext_date\s*:?=\s*[^;]*?\+\s*interval\s*'\s*(\d+)\s*({_INTERVAL_UNITS})\s*'",
     re.IGNORECASE,
+)
+
+# A boundary variable advancing by itself, for example
+#   v_start := v_start + INTERVAL '1 month';
+# This is how a partition loop walks forward regardless of naming convention,
+# so it identifies the partition width in procedures that do not use next_date.
+_BOUNDARY_SELF_INCREMENT_RE = re.compile(
+    rf"\b({_IDENT})\s*:=\s*\1\s*\+\s*interval\s*'\s*(\d+)\s*({_INTERVAL_UNITS})\s*'",
+    re.IGNORECASE,
+)
+
+# generate_series(from, to, INTERVAL 'n unit') — the step is the partition width.
+_GENERATE_SERIES_STEP_RE = re.compile(
+    rf"\bgenerate_series\s*\([^;()]*?,[^;()]*?,\s*(?:interval\s*)?"
+    rf"'\s*(\d+)\s*({_INTERVAL_UNITS})\s*'",
+    re.IGNORECASE | re.DOTALL,
 )
 
 # Existing CREATE/DROP wrapper functions often calculate the first partition
@@ -79,7 +144,7 @@ _CUR_DATE_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _INTERVAL_LITERAL_RE = re.compile(
-    r"\binterval\s*'\s*(\d+)\s*(day|days|week|weeks|month|months|year|years)\s*'",
+    rf"\binterval\s*'\s*(\d+)\s*({_INTERVAL_UNITS})\s*'",
     re.IGNORECASE,
 )
 
@@ -244,7 +309,7 @@ def infer_partition_operation_from_function(
         return PartitionOperationEvidence(
             OPERATION_CREATE,
             True,
-            "Detected partition-creating SQL in the function body: "
+            "Detected partition-creating SQL in the routine definition: "
             + ", ".join(create_evidence)
             + ".",
             create_evidence,
@@ -254,7 +319,7 @@ def infer_partition_operation_from_function(
         return PartitionOperationEvidence(
             OPERATION_DROP,
             False,
-            "Detected partition-removing SQL in the function body: "
+            "Detected partition-removing SQL in the routine definition: "
             + ", ".join(drop_evidence)
             + ".",
             create_evidence,
@@ -264,7 +329,7 @@ def infer_partition_operation_from_function(
         return PartitionOperationEvidence(
             OPERATION_AMBIGUOUS,
             None,
-            "The function body contains both partition-creating SQL ("
+            "The routine definition contains both partition-creating SQL ("
             + ", ".join(create_evidence)
             + ") and partition-removing SQL ("
             + ", ".join(drop_evidence)
@@ -276,7 +341,7 @@ def infer_partition_operation_from_function(
         OPERATION_UNKNOWN,
         None,
         "No partition-creating or partition-removing SQL was found in the "
-        "function body.",
+        "routine definition.",
         create_evidence,
         drop_evidence,
     )
@@ -299,60 +364,130 @@ def strip_sql_comments(sql_text: str) -> str:
     return text
 
 
-def extract_called_functions(sql_text: str) -> list[tuple[str, str]]:
-    """
-    Return unique (schema, function) pairs from safe SELECT/CALL/PERFORM forms.
+class CalledRoutine(NamedTuple):
+    """A routine invocation parsed out of a pgAgent job step."""
 
-    Does not execute the SQL. Unqualified calls are ignored.
+    schema: Optional[str]
+    name: str
+    invocation: str
+    argument_count: Optional[int]
+
+    @property
+    def expected_prokind(self) -> str:
+        """CALL can only invoke a procedure; SELECT/PERFORM only a function."""
+        return (
+            PROKIND_PROCEDURE
+            if self.invocation == INVOCATION_CALL
+            else PROKIND_FUNCTION
+        )
+
+    @property
+    def display_name(self) -> str:
+        return f"{self.schema}.{self.name}" if self.schema else self.name
+
+
+def extract_called_routines(sql_text: str) -> list[CalledRoutine]:
+    """
+    Return the routines a job step invokes, in the order they appear.
+
+    Handles `SELECT schema.function(...)`, `CALL schema.procedure(...)` and
+    `CALL procedure(...)`, including calls wrapped in BEGIN ... END and spread
+    over several lines. Never executes the SQL; comments are stripped first.
+    An unqualified schema stays None so it can be resolved from the catalog
+    rather than assumed.
     """
     cleaned = strip_sql_comments(sql_text)
-    found: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for match in _FUNC_CALL_RE.finditer(cleaned):
-        pair = (match.group(1), match.group(2))
-        if pair not in seen:
-            seen.add(pair)
-            found.append(pair)
+    found: list[CalledRoutine] = []
+    seen: set = set()
+
+    for regex, qualified in (
+        (_QUALIFIED_ROUTINE_CALL_RE, True),
+        (_UNQUALIFIED_CALL_RE, False),
+    ):
+        for match in regex.finditer(cleaned):
+            keyword = match.group(1).upper()
+            invocation = (
+                INVOCATION_CALL if keyword == INVOCATION_CALL else INVOCATION_SELECT
+            )
+            if qualified:
+                schema: Optional[str] = match.group(2)
+                name = match.group(3)
+            else:
+                schema = None
+                name = match.group(2)
+            key = ((schema or "").lower(), name.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(
+                CalledRoutine(
+                    schema=schema,
+                    name=name,
+                    invocation=invocation,
+                    argument_count=_scan_top_level_arguments(cleaned, match.end()),
+                )
+            )
     return found
+
+
+def extract_single_called_routine(
+    sql_text: str,
+) -> tuple[Optional[CalledRoutine], Optional[str]]:
+    """Return (routine, warning); warning is set when zero or several are found."""
+    routines = extract_called_routines(sql_text)
+    if not routines:
+        return None, (
+            "No PostgreSQL routine call was found in the job step. A partition step "
+            "should call SELECT schema.function(...) or CALL [schema.]procedure(...). "
+            "Table Schema, Table Name, Partition Unit, Partition Period, "
+            "and Create/Drop Interval were left unchanged."
+        )
+    if len(routines) > 1:
+        names = ", ".join(routine.display_name for routine in routines)
+        return None, (
+            f"The job step calls more than one routine ({names}). The target routine "
+            "was not selected automatically."
+        )
+    return routines[0], None
+
+
+def extract_called_functions(sql_text: str) -> list[tuple[str, str]]:
+    """
+    Return unique schema-qualified (schema, name) pairs called by the SQL.
+
+    Kept for callers that need a qualified pair specifically, such as detecting
+    the two generic scanner jobs by the function they call.
+    """
+    pairs: list[tuple[str, str]] = []
+    for routine in extract_called_routines(sql_text):
+        if routine.schema:
+            pairs.append((routine.schema, routine.name))
+    return pairs
 
 
 def extract_single_called_function(
     sql_text: str,
 ) -> tuple[Optional[tuple[str, str]], Optional[str]]:
-    """
-    Return ((schema, name), warning).
-
-    warning is set when zero or multiple distinct functions are found.
-    """
-    functions = extract_called_functions(sql_text)
-    if not functions:
+    """Return ((schema, name), warning) for a schema-qualified call only."""
+    routine, warning = extract_single_called_routine(sql_text)
+    if routine is None:
+        return None, warning
+    if routine.schema is None:
         return None, (
-            "No schema-qualified function call was found in the job step. "
-            "Table Schema, Table Name, Partition Unit, Partition Period, "
-            "and Create/Drop Interval were left unchanged."
+            f"The job step calls {routine.name} without a schema, so it could not be "
+            "identified from the step text alone."
         )
-    if len(functions) > 1:
-        return None, (
-            "Multiple schema-qualified function calls were found in the job step. "
-            "The target function was not selected automatically."
-        )
-    return functions[0], None
+    return (routine.schema, routine.name), None
 
 
-def count_top_level_call_arguments(
-    sql_text: str, schema: str, function_name: str
-) -> Optional[int]:
-    """Count top-level arguments for schema.function(...), or None if uncertain."""
-    cleaned = strip_sql_comments(sql_text)
-    pattern = re.compile(
-        rf"\b(?:SELECT|CALL|PERFORM)\s+{re.escape(schema)}\s*\.\s*"
-        rf"{re.escape(function_name)}\s*\(",
-        re.IGNORECASE,
-    )
-    match = pattern.search(cleaned)
-    if not match:
-        return None
-    start = match.end()
+def _scan_top_level_arguments(cleaned: str, start: int) -> Optional[int]:
+    """
+    Count comma-separated arguments starting just after an opening parenthesis.
+
+    Nested parentheses, string literals and dollar quotes are skipped, so commas
+    inside expressions such as TO_CHAR(DATE_TRUNC('year', d), 'YYYY') are not
+    counted as additional arguments. Returns None if the call is unterminated.
+    """
     depth = 1
     args_empty = True
     arg_count = 0
@@ -437,6 +572,51 @@ def extract_target_tables(function_definition: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def extract_target_table_references(
+    routine_definition: str,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """
+    Return (qualified pairs, unqualified names) referenced as relations.
+
+    Works on function and procedure definitions alike. Unqualified names are
+    returned so the caller can resolve them against the catalog instead of
+    guessing a schema. A name that also appears qualified is not repeated in the
+    unqualified list.
+    """
+    cleaned = strip_sql_comments(routine_definition or "")
+
+    qualified: list[tuple[str, str]] = list(extract_target_tables(routine_definition))
+    seen_qualified = {(schema.lower(), table.lower()) for schema, table in qualified}
+
+    unqualified: list[str] = []
+    seen_unqualified: set = set()
+
+    def _add_unqualified(name: str) -> None:
+        key = name.lower()
+        if key in _NON_TARGET_TABLE_NAMES or key in seen_unqualified:
+            return
+        seen_unqualified.add(key)
+        unqualified.append(name)
+
+    for match in _REGCLASS_LITERAL_RE.finditer(cleaned):
+        first, second = match.group(1), match.group(2)
+        if second:
+            key = (first.lower(), second.lower())
+            if first.lower() not in _SYSTEM_SCHEMAS and key not in seen_qualified:
+                seen_qualified.add(key)
+                qualified.append((first, second))
+        else:
+            _add_unqualified(first)
+
+    for regex in (_ALTER_TABLE_UNQUALIFIED_RE, _PARTITION_OF_UNQUALIFIED_RE):
+        for match in regex.finditer(cleaned):
+            _add_unqualified(match.group(1))
+
+    qualified_names = {table.lower() for _schema, table in qualified}
+    unqualified = [name for name in unqualified if name.lower() not in qualified_names]
+    return qualified, unqualified
+
+
 def extract_single_target_table(
     function_definition: str,
 ) -> tuple[Optional[tuple[str, str]], Optional[str]]:
@@ -468,17 +648,43 @@ def extract_single_target_table(
     return tables[0], None
 
 
+def partition_boundary_increments(routine_definition: str) -> list:
+    """
+    Return the interval steps by which the routine advances partition boundaries.
+
+    Only advancement/generation idioms count: a self-incrementing boundary
+    variable, a next_date assignment, or a generate_series step. Interval
+    literals used for retention windows, look-ahead offsets or plain date
+    arithmetic are deliberately excluded, because they are not the partition
+    width even though they appear in the same routine.
+    """
+    cleaned = strip_sql_comments(routine_definition or "")
+    increments: list = []
+    for regex, amount_group, unit_group in (
+        (_NEXT_DATE_INCREMENT_RE, 1, 2),
+        (_BOUNDARY_SELF_INCREMENT_RE, 2, 3),
+        (_GENERATE_SERIES_STEP_RE, 1, 2),
+    ):
+        for match in regex.finditer(cleaned):
+            amount = int(match.group(amount_group))
+            unit = match.group(unit_group).lower().rstrip("s")
+            if amount >= 1:
+                increments.append((amount, unit))
+    return list(dict.fromkeys(increments))
+
+
 def extract_partition_settings(
-    function_definition: str,
+    routine_definition: str,
 ) -> tuple[dict[str, Any], list[str]]:
     """
     Extract partition unit / period / create-drop interval only when explicit.
 
-    Returns (values, warnings).
+    Works on function and procedure definitions alike. Returns (values, warnings).
     """
-    cleaned = strip_sql_comments(function_definition or "")
+    cleaned = strip_sql_comments(routine_definition or "")
     values: dict[str, Any] = {}
     warnings: list[str] = []
+    increments = partition_boundary_increments(routine_definition)
 
     units = [m.group(1).lower() for m in _PARTITION_UNIT_ASSIGN_RE.finditer(cleaned)]
     unique_units = list(dict.fromkeys(units))
@@ -486,23 +692,17 @@ def extract_partition_settings(
         values["partition_unit"] = unique_units[0]
     elif len(unique_units) > 1:
         warnings.append(
-            "Multiple partition unit values were found in the function definition. "
+            "Multiple partition unit values were found in the routine definition. "
             "Partition Unit was left unchanged."
         )
+    elif len(increments) == 1:
+        values["partition_unit"] = increments[0][1]
     else:
-        # Fall back to the actual boundary increment used by the partition
-        # function (for example next_date := cur_date + interval '1 month').
-        increments = [
-            (int(m.group(1)), m.group(2).lower().rstrip("s"))
-            for m in _NEXT_DATE_INCREMENT_RE.finditer(cleaned)
-        ]
-        unique_increments = list(dict.fromkeys(increments))
-        if len(unique_increments) == 1:
-            values["partition_unit"] = unique_increments[0][1]
-        else:
-            warnings.append(
-                "Partition Unit could not be determined reliably from the function definition."
-            )
+        warnings.append(
+            "Partition Unit could not be determined reliably from the routine "
+            "definition. Set the partition size to match how the routine "
+            "subdivides its date range."
+        )
 
     periods = [int(m.group(1)) for m in _PARTITION_PERIOD_ASSIGN_RE.finditer(cleaned)]
     unique_periods = list(dict.fromkeys(periods))
@@ -510,21 +710,16 @@ def extract_partition_settings(
         values["partition_period"] = unique_periods[0]
     elif len(unique_periods) > 1:
         warnings.append(
-            "Multiple partition period values were found in the function definition. "
+            "Multiple partition period values were found in the routine definition. "
             "Partition Period was left unchanged."
         )
+    elif len(increments) == 1:
+        values["partition_period"] = increments[0][0]
     else:
-        increments = [
-            (int(m.group(1)), m.group(2).lower().rstrip("s"))
-            for m in _NEXT_DATE_INCREMENT_RE.finditer(cleaned)
-        ]
-        unique_increments = list(dict.fromkeys(increments))
-        if len(unique_increments) == 1 and unique_increments[0][0] >= 1:
-            values["partition_period"] = unique_increments[0][0]
-        else:
-            warnings.append(
-                "Partition Period could not be determined reliably from the function definition."
-            )
+        warnings.append(
+            "Partition Period could not be determined reliably from the routine "
+            "definition."
+        )
 
     intervals: list[tuple[int, str]] = []
     for match in _CREATE_DROP_INTERVAL_ASSIGN_RE.finditer(cleaned):
@@ -538,7 +733,7 @@ def extract_partition_settings(
         values["create_drop_unit"] = unique_intervals[0][1]
     elif len(unique_intervals) > 1:
         warnings.append(
-            "Multiple create/drop interval values were found in the function definition. "
+            "Multiple create/drop interval values were found in the routine definition. "
             "Create/Drop Interval was left unchanged."
         )
     else:
@@ -560,8 +755,15 @@ def extract_partition_settings(
             values["create_drop_amount"] = unique_offsets[0][0]
             values["create_drop_unit"] = unique_offsets[0][1]
         else:
+            # Deliberately unresolved. A routine can contain several unrelated
+            # interval literals (look-ahead offsets, retention windows, date
+            # normalisation), and picking one would produce a plausible but wrong
+            # configuration, so the user is asked instead.
             warnings.append(
-                "Create/Drop Interval could not be determined reliably from the function definition."
+                "Create/Drop Interval could not be determined reliably from the "
+                "routine definition, because no single look-ahead or retention "
+                "interval could be identified. Enter how far ahead partitions "
+                "should be created, or how long they should be retained."
             )
 
     return values, warnings
@@ -683,6 +885,66 @@ def _single_cron_number(field: str) -> bool:
     return bool(re.fullmatch(r"\d+", field or ""))
 
 
+def _cyclic_month_gap(months: list) -> Optional[int]:
+    """
+    Return the constant gap between selected months, or None if it is uneven.
+
+    Months are cyclic, so the wrap from the last selection back to the first
+    counts as a gap too: [3, 6, 9, 12] gives 3, while [1, 4, 12] gives None.
+    """
+    ordered = sorted(set(months))
+    if not ordered:
+        return None
+    if len(ordered) == 1:
+        return 12
+    gaps = [
+        second - first for first, second in zip(ordered, ordered[1:])
+    ]
+    gaps.append(ordered[0] + 12 - ordered[-1])
+    first_gap = gaps[0]
+    if any(gap != first_gap for gap in gaps):
+        return None
+    return first_gap
+
+
+def _infer_month_restricted_frequency(
+    minute: str, hour: str, day: str, month: str, weekday: str
+) -> tuple[Optional[tuple[int, str]], Optional[str]]:
+    """
+    Infer the cadence of a schedule that only runs in specific months.
+
+    A single selected month is an annual job; an evenly spaced set of months is
+    a fixed month interval. Anything uneven stays calendar-driven, because
+    forcing a frequency onto it would misrepresent the schedule.
+    """
+    if not (
+        _single_cron_number(minute)
+        and _single_cron_number(hour)
+        and _single_cron_number(day)
+        and _is_cron_wildcard(weekday)
+    ):
+        return None, (
+            "Frequency was not inferred because the schedule restricts specific "
+            "months without a single fixed time and day-of-month. The Job Schedule "
+            "still drives execution; set Frequency manually."
+        )
+
+    months = _parse_cron_field(month, 1, 12, _MONTH_NAME_VALUES)
+    if not months:
+        return None, "Frequency could not be inferred from the schedule."
+
+    gap = _cyclic_month_gap(list(months))
+    if gap is None:
+        return None, (
+            "Frequency was not inferred because the selected months are unevenly "
+            "spaced, so no single repeating interval describes them. The Job "
+            "Schedule still drives execution; set Frequency manually."
+        )
+    if gap == 12:
+        return (1, "year"), None
+    return (gap, "month"), None
+
+
 def infer_frequency(
     schedule: str,
 ) -> tuple[Optional[tuple[int, str]], Optional[str]]:
@@ -700,11 +962,8 @@ def infer_frequency(
     else:
         return None, "Frequency could not be inferred from the schedule."
 
-    if month != "*":
-        return None, (
-            "Frequency was not inferred because the schedule restricts specific months "
-            "and is not a simple repeating minute/hour/day/week/month pattern."
-        )
+    if not _is_cron_wildcard(month):
+        return _infer_month_restricted_frequency(minute, hour, day, month, weekday)
 
     # Every minute: every minute of every hour/day.
     if minute == "*" and hour == "*" and day == "*" and weekday == "*":
@@ -888,6 +1147,21 @@ def normalize_cron_expression(schedule: str) -> Optional[str]:
         normalised.append(value)
     return " ".join(normalised)
 
+_MONTH_LABELS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
 _WEEKDAY_NAMES = (
     "Sunday",
     "Monday",
@@ -953,8 +1227,19 @@ def describe_schedule(schedule: str) -> Optional[str]:
         return None
 
     at_time = f"{int(hour):02d}:{int(minute):02d}"
-    if month != "*":
-        return None
+    if not _is_cron_wildcard(month):
+        months = _parse_cron_field(month, 1, 12, _MONTH_NAME_VALUES)
+        if not months or not _single_cron_number(day) or not _is_cron_wildcard(weekday):
+            return None
+        ordered = sorted(months)
+        if len(ordered) == 1:
+            label = _MONTH_LABELS[ordered[0] - 1]
+            return f"{at_time} on {label} {int(day)} every year"
+        gap = _cyclic_month_gap(ordered)
+        if gap is None:
+            labels = ", ".join(_MONTH_LABELS[value - 1] for value in ordered)
+            return f"{at_time} on day {int(day)} of {labels}"
+        return f"{at_time} on day {int(day)}, every {gap} months"
     if day == "*" and weekday == "*":
         return f"Every day at {at_time}"
     if day == "*" and _single_cron_number(weekday):

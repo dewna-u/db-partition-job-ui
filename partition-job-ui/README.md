@@ -175,7 +175,9 @@ GRANT SELECT ON TABLE pgagent.pga_jobstep TO partition_job_ui;
 GRANT SELECT ON TABLE pgagent.pga_schedule TO partition_job_ui;
 ```
 
-Job-detail auto-fill inspects the called partition function in the **main** database using `pg_get_functiondef`. That typically requires `EXECUTE` on the inspected function (not ownership). The UI never executes `jstcode` or the discovered function.
+Job-detail auto-fill inspects the routine the pgAgent step calls, in the **main** database. The step may use `SELECT schema.function(...)` or `CALL [schema.]procedure(...)`, so the routine is resolved against `pg_proc` / `pg_namespace` by name, kind (`prokind`) and argument count, and its definition is read with `pg_get_functiondef`. An unqualified name is resolved only when exactly one non-system routine matches; otherwise the UI reports ambiguity instead of guessing. Reading the catalog needs `SELECT` on it, which `PUBLIC` already has. The UI never executes `jstcode` or the discovered routine.
+
+An unqualified table referenced by the routine body is resolved the same way, through `pg_class` / `pg_namespace`, and the routine's own schema is used only to break a tie between identically named tables.
 
 If the partition function and pgAgent live in the **same** database, leave the optional `PGAGENT_DB_*` variables blank in `.env` — the app reuses the main database settings.
 
@@ -305,7 +307,7 @@ Also configure AWS/Azure security groups (or equivalent) so all other sources ar
 1. Open the URL from an administrator workstation.
 2. Review **Existing pgAgent Jobs** (Job ID is the first column).
 3. Optionally enter a **pgAgent Job ID** and click **Load Job Details** to auto-fill the form. Review warnings and edit any field before submitting. Loading never creates or updates records.
-4. If multiple SQL steps call different functions, select a step and click **Apply Selected Step**.
+4. If multiple SQL steps call different routines, select a step and click **Apply Selected Step**.
 5. Fill or adjust **Create Partition Job**.
 6. Click **Create Partition Job**.
 7. Read the success/error message. On success the job list refreshes once.
