@@ -312,8 +312,8 @@ def _render_job_fields(prefix: str) -> tuple[dict[str, Any], Optional[str]]:
             "Session settings applied while the partition operation runs. When a "
             "pgAgent job is loaded this is read from the called function's own "
             "SET / set_config statements, so an empty object means the function "
-            "sets nothing. A database trigger adds a default lock_timeout when "
-            "it is missing."
+            "sets nothing. Whatever is shown here is stored as-is; no settings "
+            "are added for you."
         ),
     )
 

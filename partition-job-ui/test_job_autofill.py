@@ -851,6 +851,82 @@ class CreatePartitionJobCallTests(unittest.TestCase):
         self.assertFalse(conn.committed)
 
 
+def _sent_db_config(db_config) -> dict:
+    """Return the db_config value create_partition_job() actually bound."""
+    connection = FakeConnection(row=(1,))
+    payload = dict(VALID_PAYLOAD)
+    payload["db_config"] = db_config
+
+    @contextmanager
+    def fake_connection(_kwargs):
+        yield connection
+
+    with patch.object(database, "_connection", fake_connection), patch.object(
+        database, "_main_db_kwargs", return_value={}
+    ):
+        create_partition_job(payload)
+
+    _sql, params = connection.executed[0]
+    return params["db_config"]
+
+
+class DbConfigPassThroughTests(unittest.TestCase):
+    """
+    The application sends db_config_para verbatim.
+
+    Injecting or stripping keys here would hide what is actually stored, so the
+    default lock_timeout problem is fixed in the database trigger instead. These
+    tests pin the Python side of that contract.
+    """
+
+    def test_empty_config_is_sent_as_empty_object(self) -> None:
+        sent = _sent_db_config({})
+        self.assertIsInstance(sent, Jsonb)
+        self.assertEqual(sent.obj, {})
+
+    def test_extracted_settings_are_sent_unchanged(self) -> None:
+        sent = _sent_db_config({"datestyle": "ISO, DMY"})
+        self.assertEqual(sent.obj, {"datestyle": "ISO, DMY"})
+
+    def test_explicit_lock_timeout_is_preserved(self) -> None:
+        sent = _sent_db_config({"lock_timeout": "10s"})
+        self.assertEqual(sent.obj, {"lock_timeout": "10s"})
+
+    def test_empty_config_is_not_converted_to_null(self) -> None:
+        # Sending NULL to dodge the trigger would lose the distinction between
+        # "no configuration" and "not supplied".
+        self.assertIsNotNone(_sent_db_config({}))
+
+    def test_application_never_injects_a_default_lock_timeout(self) -> None:
+        source_dir = os.path.dirname(os.path.abspath(__file__))
+        for module_name in ("job_autofill.py", "database.py", "app.py"):
+            path = os.path.join(source_dir, module_name)
+            with open(path, encoding="utf-8") as handle:
+                source = handle.read()
+            self.assertNotIn("30s", source, module_name)
+
+    def test_validator_accepts_an_empty_json_object(self) -> None:
+        validated = validate_form_data(
+            {
+                "job_name": "JOB_X",
+                "is_enabled": True,
+                "table_schema": "mubasher_oms",
+                "table_name": "some_table",
+                "db_config": "{}",
+                "job_schedule": "0 0 2 26 * *",
+                "frequency_amount": 1,
+                "frequency_unit": "month",
+                "next_run_time": datetime(2026, 8, 26, 2, 0, 0),
+                "partition_unit": "month",
+                "partition_period": 1,
+                "is_create": True,
+                "create_drop_amount": 2,
+                "create_drop_unit": "month",
+            }
+        )
+        self.assertEqual(validated["db_config"], {})
+
+
 class ErrorClassificationTests(unittest.TestCase):
     def test_insufficient_privilege_maps_to_permission_error(self) -> None:
         exc = FakePgError(
