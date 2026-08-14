@@ -1021,7 +1021,7 @@ def _render_pgagent_jobs() -> None:
         elif not st.session_state.jobs_loaded:
             st.caption("Optional browse list — click Refresh to load (read-only).")
     with col_btn:
-        if st.button("Refresh Jobs", use_container_width=True, help="Read-only refresh"):
+        if st.button("Refresh Jobs", width="stretch", help="Read-only refresh"):
             _load_jobs()
 
     if not st.session_state.jobs_loaded:
@@ -1041,7 +1041,7 @@ def _render_pgagent_jobs() -> None:
             {JOB_COLUMN_LABELS[col]: job.get(col) for col in JOB_COLUMNS}
             for job in st.session_state.jobs
         ],
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1073,7 +1073,7 @@ def _render_convert_tab() -> None:
         st.write("")
         if st.button(
             "Load Job Details",
-            use_container_width=True,
+            width="stretch",
             help="Read-only: inspects pgAgent and catalog metadata only",
         ):
             _load_job_details(int(st.session_state.load_job_id))
@@ -1410,7 +1410,7 @@ def _render_configured_jobs_tab() -> None:
                 "last_run_status": job.get("last_run_status"),
             }
         )
-    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    st.dataframe(table_rows, width="stretch", hide_index=True)
 
     job_ids = [job.get("job_id") for job in filtered if job.get("job_id") is not None]
     if not job_ids:
@@ -1536,7 +1536,7 @@ def _render_history_tab() -> None:
                 "job_error": _shorten(error, 120),
             }
         )
-    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    st.dataframe(table_rows, width="stretch", hide_index=True)
 
     long_errors = [
         row
