@@ -14,7 +14,6 @@ from database import (
     PgAgentNotInstalledError,
     create_partition_job,
     get_database_readiness,
-    get_generic_partition_schedulers,
     get_partition_job_logs,
     get_partition_jobs,
     get_pgagent_job_details,
@@ -310,7 +309,6 @@ def _init_session_state() -> None:
         "partition_jobs",
         "partition_job_logs",
         "database_readiness",
-        "generic_schedulers",
     ):
         for suffix, default in (("", None), ("_error", None), ("_loaded", False)):
             if state_key + suffix not in st.session_state:
@@ -1636,58 +1634,45 @@ def _render_readiness_panel() -> None:
 
 
 def _render_scheduler_panel() -> None:
-    st.markdown("#### Generic schedulers")
+    """Describe the externally managed Linux cron scanners (informational only)."""
+    st.markdown("#### Linux cron scanners")
     st.caption(
-        "These are generic scanner jobs, not one job per table."
+        "Externally managed generic scanners — not one job per table, and not "
+        "pgAgent jobs."
     )
-    if st.button("Re-check schedulers", help="Read-only pgAgent inspection"):
-        _load_into_state(
-            "generic_schedulers",
-            get_generic_partition_schedulers,
-            spinner_text="Checking generic schedulers...",
-        )
 
-    if st.session_state.generic_schedulers_error:
-        _render_db_error(st.session_state.generic_schedulers_error)
-        return
+    st.markdown("**CREATE scanner**")
+    st.markdown(
+        f'{_badge("External scheduler", "info")}',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "Function: `run_partition_create_jobs()`  \n"
+        "Scheduler: Linux cron  \n"
+        "Schedule: Every 6 minutes  \n"
+        "`0,6,12,18,24,30,36,42,48,54 * * * *`"
+    )
 
-    schedulers = st.session_state.generic_schedulers
-    if schedulers is None:
-        st.info("Scheduler information is not available.")
-        return
+    st.markdown("**DROP scanner**")
+    st.markdown(
+        f'{_badge("External scheduler", "info")}',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "Function: `run_partition_drop_jobs()`  \n"
+        "Scheduler: Linux cron  \n"
+        "Schedule: Every 6 minutes (+3 minute offset)  \n"
+        "`3,9,15,21,27,33,39,45,51,57 * * * *`"
+    )
 
-    for key, title, scanner in (
-        ("create_scheduler", "CREATE scanner", "run_partition_create_jobs"),
-        ("drop_scheduler", "DROP scanner", "run_partition_drop_jobs"),
-    ):
-        found = schedulers.get(key)
-        st.markdown(f"**{title}**")
-        st.caption(f"`{scanner}`")
-        if not found:
-            st.markdown(_badge("Missing", "fail"), unsafe_allow_html=True)
-            continue
-        enabled = bool(found.get("enabled"))
-        st.markdown(
-            f'{_badge("Found", "ok")}'
-            f'{_badge("Enabled" if enabled else "Disabled", "info" if enabled else "warn")}'
-            f" Job ID `{found.get('job_id')}`",
-            unsafe_allow_html=True,
-        )
-        st.caption(
-            f"`{found.get('job_name')}` · schedule "
-            f"`{found.get('schedule') or 'not shown'}`"
-        )
-
-    if not schedulers.get("create_scheduler") or not schedulers.get("drop_scheduler"):
-        st.info(
-            "A generic scheduler is missing. Deploy it through the approved "
-            "pgAgent/DBA process. This application never writes to pgAgent."
-        )
+    st.info(
+        "The generic scanners are executed by Linux cron outside this "
+        "application. This UI manages partition-job configuration only."
+    )
 
 
 def _header_status_badges() -> None:
     readiness = st.session_state.database_readiness
-    schedulers = st.session_state.generic_schedulers
 
     if st.session_state.database_readiness_error:
         db_badge = _badge("Database error", "fail")
@@ -1700,21 +1685,9 @@ def _header_status_badges() -> None:
     else:
         db_badge = _badge("Database unknown", "mute")
 
-    if st.session_state.generic_schedulers_error:
-        sch_badge = _badge("Scheduler error", "fail")
-    elif not st.session_state.generic_schedulers_loaded:
-        sch_badge = _badge("Scheduler not checked", "mute")
-    elif schedulers and schedulers.get("create_scheduler") and schedulers.get(
-        "drop_scheduler"
-    ):
-        sch_badge = _badge("Schedulers found", "ok")
-    elif schedulers:
-        sch_badge = _badge("Scheduler incomplete", "warn")
-    else:
-        sch_badge = _badge("Scheduler unknown", "mute")
-
     st.markdown(
-        f'<div class="pj-header-meta">{db_badge}{sch_badge}'
+        f'<div class="pj-header-meta">{db_badge}'
+        f'{_badge("Cron scanners", "info")}'
         f'{_badge("Theme: dark", "info")}</div>',
         unsafe_allow_html=True,
     )
@@ -1742,12 +1715,6 @@ def main() -> None:
             "database_readiness",
             get_database_readiness,
             spinner_text="Checking database readiness...",
-        )
-    if not st.session_state.generic_schedulers_loaded:
-        _load_into_state(
-            "generic_schedulers",
-            get_generic_partition_schedulers,
-            spinner_text="Checking generic schedulers...",
         )
 
     _render_header()
