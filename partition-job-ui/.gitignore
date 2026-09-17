@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.realtime.example
 .streamlit/secrets.toml
 
 # Python

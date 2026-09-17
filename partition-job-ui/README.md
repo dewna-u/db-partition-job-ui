@@ -64,8 +64,27 @@ partition-job-ui/
 ├── app.py
 ├── database.py
 ├── validators.py
+├── job_autofill.py
+├── scheduler_client.py
+├── scheduler_backend/
+│   ├── main.py
+│   ├── scheduler.py
+│   ├── queue_manager.py
+│   ├── scheduler_database.py
+│   └── models.py
+├── sql/
+│   ├── preflight_realtime_database.sql
+│   ├── bootstrap_partition_job_framework.sql
+│   ├── capture_reference_framework_functions.sql
+│   ├── realtime_scheduler_v1.sql
+│   └── integration_test_disposable.sql
+├── systemd/
+│   └── partition-job-scheduler.service
+├── scripts/
+│   └── check_migration_gate.py
 ├── requirements.txt
 ├── .env.example
+├── .env.realtime.example
 ├── .gitignore
 ├── README.md
 ├── partition-job-ui.service
@@ -404,3 +423,148 @@ cp .env.example .env
 # Edit .env
 .venv/bin/streamlit run app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true
 ```
+
+---
+
+## 21. Realtime scheduler architecture (first major redesign)
+
+### Old model (polling scanner)
+
+```text
+external cron ~every few minutes
+        ↓
+run_partition_create_jobs() / run_partition_drop_jobs()
+        ↓
+SELECT jobs where next_run_time <= now()
+        ↓
+execute already-due/overdue jobs
+```
+
+Jobs could run late because execution waited for the next scan.
+
+### New model (schedule-driven near-real-time)
+
+```text
+Streamlit UI (config only)          Scheduler backend (persistent process)
+        |                                      |
+        | short DB open/work/close             | short DB open → upcoming jobs → close
+        |                                      | in-memory heapq timers (no DB held)
+        | POST /internal/scheduler/refresh  →  | wake + reconcile
+        |                                      | at due time: NEW short DB connection
+        └──────────────┬───────────────────────┘
+                       ▼
+                  PostgreSQL (source of truth)
+                       ▼
+         get_upcoming_partition_jobs(lookahead)
+         run_partition_job_scheduled(job_id, expected_run_time)
+                       ▼
+         create_any_table_partition / drop_any_table_partition
+                       ▼
+         status / history / next_run_time (DB cron helpers)
+```
+
+Important properties:
+
+* PostgreSQL is authoritative; memory is temporary.
+* Streamlit is **not** the scheduler.
+* No Redis, Celery, Kafka, RabbitMQ, LISTEN/NOTIFY, or connection pools.
+* DB connections are open → one logical operation → close immediately.
+* Idle timer waits hold **zero** database sessions.
+* UI refresh HTTP is a wake-up signal only; the backend always rereads PostgreSQL.
+* Periodic reconciliation (`PARTITION_SCHEDULER_RECONCILE_SECONDS`) catches direct SQL edits.
+* Lookahead window: `PARTITION_SCHEDULER_LOOKAHEAD_SECONDS` (default 120).
+* Overdue jobs remain discoverable after downtime (`delay_seconds <= 0` → run immediately after revalidation).
+* Same-time jobs execute sequentially ordered by `next_run_time`, then `job_id`.
+* OS singleton lock prevents two backends; DB uses `FOR UPDATE` + `pg_try_advisory_xact_lock`.
+
+### New database configuration (production-copy / sensitive)
+
+The NEW database is a **backup/copy of production**. It already contains application
+data, but it does **not** currently contain this partition-job framework.
+
+Do **not** overwrite production `.env`. Use:
+
+* `.env.realtime.example` → copy to `.env.realtime` (git-ignored)
+* Set `DB_*` to the NEW database
+* Set `REALTIME_DB_EXPECTED_NAME` to the same database name (fail-closed check)
+* Never auto-onboard existing business tables into `partitioning_job_table`
+
+### SQL layers (NEW DB only — apply only after explicit approval)
+
+| Order | File | Purpose |
+|---|---|---|
+| 0 | `sql/preflight_realtime_database.sql` | READ-ONLY preflight |
+| 1 | `sql/bootstrap_partition_job_framework.sql` | Tables/sequences/type/trigger only |
+| 1b | `sql/capture_reference_framework_functions.sql` | READ-ONLY capture from REFERENCE DB |
+| 1c | *(imported reviewed defs)* | Workers/cron/insert/runners — **not invented** |
+| 2 | `sql/realtime_scheduler_v1.sql` | Upcoming + scheduled executor |
+| later | `sql/integration_test_disposable.sql` | Disposable test schema only |
+
+Migration session gate (after approval):
+
+```sql
+CREATE TEMP TABLE _partition_realtime_migration_approved AS
+SELECT now() AS approved_at, current_database() AS approved_database;
+```
+
+Optional tooling gate (does not run SQL by itself):
+
+```bash
+# Requires PARTITION_REALTIME_ALLOW_MIGRATION=true and REALTIME_DB_EXPECTED_NAME
+python scripts/check_migration_gate.py
+```
+
+### Exact future deployment order (manual)
+
+1. Configure `.env.realtime` for the NEW DB (`REALTIME_DB_EXPECTED_NAME` + `DB_*`).
+2. Confirm expected name equals `current_database()`.
+3. Run READ-ONLY `sql/preflight_realtime_database.sql`.
+4. Review preflight; stop on unexpected conflicts.
+5. Optional DBA restore point for the NEW DB.
+6. Create approval TEMP TABLE; apply `bootstrap_partition_job_framework.sql`.
+7. Verify baseline tables exist and are **empty**.
+8. Capture missing functions from the REFERENCE DB; review; import to NEW DB.
+9. Apply `realtime_scheduler_v1.sql`.
+10. Verify realtime functions; apply least-privilege grants.
+11. Confirm no legacy cron/pgAgent/service calls `run_partition_create_jobs` /
+    `run_partition_drop_jobs` against the NEW DB (read-only inspection).
+12. Only after a **second** explicit approval: create disposable
+    `partition_scheduler_test` objects and test CREATE/DROP there only.
+13. Start scheduler backend manually against NEW DB when ready.
+14. Clean up only disposable test objects after approval.
+15. Install/enable systemd manually; onboard real tables **one by one**.
+
+### Disable / absence of old scanners on the NEW database
+
+Because the NEW DB currently lacks the framework, legacy scanners should not
+already target it — **verify**, do not assume. Before enabling the realtime
+backend, confirm no competing polling of the legacy runners against the NEW DB.
+
+### Run the scheduler backend locally
+
+```bash
+# From partition-job-ui/ with .env.realtime configured
+# Do NOT start against NEW DB until migrations are approved and applied.
+python -m scheduler_backend --log-level INFO
+```
+
+Control API (localhost by default):
+
+* `GET /health`
+* `GET /internal/scheduler/status`
+* `POST /internal/scheduler/refresh`
+
+### systemd (prepare only — do not auto-install from Cursor)
+
+Unit file: `systemd/partition-job-scheduler.service`
+
+### Troubleshooting (scheduler)
+
+| Symptom | What to check |
+|---|---|
+| Jobs late after UI edit | Backend up? refresh URL? reconcile interval |
+| Duplicate CREATE/DROP | Legacy polling still enabled on NEW DB |
+| Second backend exits | Lock file already held |
+| Refresh warning in UI | Backend down — config still saved; reconcile will catch up |
+| `REALTIME_DB_EXPECTED_NAME` error | `.env.realtime` name ≠ `current_database()` |
+| SKIPPED_RESCHEDULED | Expected: memory timer stale after DB reschedule |

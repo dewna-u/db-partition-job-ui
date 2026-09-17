@@ -21,6 +21,7 @@ from database import (
     run_partition_job_manual,
 )
 from job_autofill import calculate_next_run, describe_schedule, validate_six_field_cron
+from scheduler_client import fetch_scheduler_status, notify_scheduler_refresh
 from validators import ValidationError, validate_form_data
 
 logging.basicConfig(
@@ -750,6 +751,8 @@ def submit_partition_configuration(raw: dict[str, Any]) -> list[tuple[str, str]]
 
     try:
         with st.spinner("Creating partition configuration..."):
+            # DB open → insert → commit → close happens entirely inside
+            # create_partition_job(). Refresh is signaled only after that returns.
             result = create_partition_job(validated)
     except DatabaseError as exc:
         return [("error", _format_error_for_ui(exc.message))]
@@ -767,13 +770,21 @@ def submit_partition_configuration(raw: dict[str, Any]) -> list[tuple[str, str]]
         ),
         (
             "info",
-            "No pgAgent job was created. The generic scanners "
-            "(run_partition_create_jobs / run_partition_drop_jobs) pick this "
-            "configuration up when its next run time is due.",
+            "No pgAgent job was created. The dedicated scheduler backend "
+            "preloads upcoming jobs and triggers them at their scheduled "
+            "next_run_time (schedule-driven near-real-time under normal "
+            "operating conditions).",
         ),
     ]
     if result is not None:
         feedback.append(("info", f"Function result: `{result}`"))
+
+    # DB connection is already closed. Signal is wake-up only — not authoritative.
+    refresh_ok, refresh_message = notify_scheduler_refresh()
+    if refresh_ok:
+        feedback.append(("info", refresh_message))
+    else:
+        feedback.append(("info", refresh_message))
 
     _load_into_state("partition_jobs", get_partition_jobs)
     return feedback
@@ -1135,7 +1146,7 @@ def _render_new_job_tab() -> None:
     st.subheader("Create a new parameterised partition job")
     st.caption(
         "No pgAgent job is needed. This stores one configuration row that the "
-        "generic scanners execute when it becomes due."
+        "dedicated scheduler backend triggers at the scheduled next_run_time."
     )
     raw, blocking_error = _render_job_fields(NEW_PREFIX)
     st.divider()
@@ -1634,40 +1645,46 @@ def _render_readiness_panel() -> None:
 
 
 def _render_scheduler_panel() -> None:
-    """Describe the externally managed Linux cron scanners (informational only)."""
-    st.markdown("#### Linux cron scanners")
+    """Describe the realtime scheduler backend (management UI is not the scheduler)."""
+    st.markdown("#### Realtime scheduler backend")
     st.caption(
-        "Externally managed generic scanners — not one job per table, and not "
-        "pgAgent jobs."
+        "A dedicated long-running process preloads upcoming jobs from PostgreSQL, "
+        "holds temporary timers in memory, and triggers each job at its "
+        "next_run_time. Streamlit is configuration-only."
     )
 
-    st.markdown("**CREATE scanner**")
-    st.markdown(
-        f'{_badge("External scheduler", "info")}',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "Function: `run_partition_create_jobs()`  \n"
-        "Scheduler: Linux cron  \n"
-        "Schedule: Every 6 minutes  \n"
-        "`0,6,12,18,24,30,36,42,48,54 * * * *`"
-    )
-
-    st.markdown("**DROP scanner**")
-    st.markdown(
-        f'{_badge("External scheduler", "info")}',
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "Function: `run_partition_drop_jobs()`  \n"
-        "Scheduler: Linux cron  \n"
-        "Schedule: Every 6 minutes (+3 minute offset)  \n"
-        "`3,9,15,21,27,33,39,45,51,57 * * * *`"
-    )
+    ok, status, message = fetch_scheduler_status()
+    if ok and status:
+        active = bool(status.get("scheduler_active"))
+        st.markdown(
+            f'{_badge("Backend active" if active else "Backend idle", "ok" if active else "warn")}',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "Upcoming jobs: `{count}`  \n"
+            "Next job: `{job}` @ `{when}`  \n"
+            "Last refresh: `{refresh}`  \n"
+            "Last execution: job `{last_job}` → `{last_result}`".format(
+                count=status.get("upcoming_job_count"),
+                job=status.get("next_job_id"),
+                when=status.get("next_expected_run_time"),
+                refresh=status.get("last_refresh_result"),
+                last_job=status.get("last_execution_job_id"),
+                last_result=status.get("last_execution_result"),
+            )
+        )
+    else:
+        st.markdown(
+            f'{_badge("Backend unreachable", "warn")}',
+            unsafe_allow_html=True,
+        )
+        st.caption(message)
 
     st.info(
-        "The generic scanners are executed by Linux cron outside this "
-        "application. This UI manages partition-job configuration only."
+        "Legacy polling runners (`run_partition_create_jobs` / "
+        "`run_partition_drop_jobs`) remain in the database for rollback only. "
+        "On the NEW realtime database they must stay disabled while this "
+        "backend is enabled."
     )
 
 
@@ -1687,7 +1704,7 @@ def _header_status_badges() -> None:
 
     st.markdown(
         f'<div class="pj-header-meta">{db_badge}'
-        f'{_badge("Cron scanners", "info")}'
+        f'{_badge("Realtime scheduler", "info")}'
         f'{_badge("Theme: dark", "info")}</div>',
         unsafe_allow_html=True,
     )

@@ -1,0 +1,29 @@
+[Unit]
+Description=Partition Job Realtime Scheduler Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=enterprisedb
+Group=enterprisedb
+WorkingDirectory=/opt/partition-job-ui
+EnvironmentFile=/opt/partition-job-ui/.env.realtime
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/partition-job-ui/.venv/bin/python -m scheduler_backend.main --log-level INFO
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+# Control API is expected to bind to 127.0.0.1 only.
+
+[Install]
+WantedBy=multi-user.target
