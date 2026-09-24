@@ -1,0 +1,64 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --pj-bg: #f3f0e9;
+  --pj-card: #fbfaf7;
+  --pj-line: #ddd9d0;
+  --pj-ink: #1c2730;
+  --pj-muted: #718078;
+  --pj-primary: #165dff;
+  --pj-lime: #e5ff5c;
+  --pj-sidebar: #202c34;
+  --background: var(--pj-bg);
+  --foreground: var(--pj-ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  color: var(--foreground);
+  background:
+    radial-gradient(circle at 74% 0%, #dbe8ff 0, transparent 27rem),
+    linear-gradient(135deg, #f3f0e9 0%, #eeece5 100%);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+::selection {
+  background: #cfe0ff;
+  color: #1c2730;
+}
+
+:focus-visible {
+  outline: 3px solid #165dff;
+  outline-offset: 2px;
+}
+
+.font-mono,
+code,
+pre {
+  font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+@keyframes pj-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.pj-enter {
+  animation: pj-fade-up 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
