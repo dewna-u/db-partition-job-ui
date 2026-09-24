@@ -115,6 +115,10 @@ class PartitionScheduler:
     async def run(self) -> None:
         self.status.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
         self.status.scheduler_active = True
+        # Read-only status metadata for the UI (does not affect scheduling).
+        self.status.extra["lookahead_seconds"] = float(self.config.lookahead_seconds)
+        self.status.extra["reconcile_seconds"] = float(self.config.reconcile_seconds)
+        self.status.extra["bind"] = f"{self.config.bind_host}:{self.config.bind_port}"
         await self.refresh_queue("startup")
 
         next_reconcile = time.monotonic() + float(self.config.reconcile_seconds)
