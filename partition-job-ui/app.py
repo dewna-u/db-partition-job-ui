@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 PAGE_TITLE = "Partition Job Management"
 PAGE_SUBTITLE = (
-    "Centralized management of parameterized PostgreSQL/EDB partition operations"
+    "Configure, monitor, and safely migrate PostgreSQL partition jobs."
 )
 
 NAV_CONVERT = "Convert Existing Job"
@@ -40,6 +40,12 @@ NAV_CREATE = "Create New Job"
 NAV_CONFIGURED = "Configured Jobs"
 NAV_HISTORY = "Execution History"
 NAV_OPTIONS = [NAV_CONVERT, NAV_CREATE, NAV_CONFIGURED, NAV_HISTORY]
+NAV_SIDEBAR_LABELS = {
+    NAV_CONVERT: "Convert job",
+    NAV_CREATE: "Create new",
+    NAV_CONFIGURED: "Configured jobs",
+    NAV_HISTORY: "Execution history",
+}
 
 # Never seed example settings here: Database Configuration is either extracted
 # from the called partition routine or entered deliberately by the user.
@@ -99,132 +105,645 @@ _INTEGER_FIELDS = {"frequency_amount", "partition_period", "create_drop_amount"}
 
 
 def _inject_css() -> None:
-    """Compact corporate dark-theme polish on top of Streamlit's theme config."""
+    """Apply partition.ops visual system on top of Streamlit theme config."""
     st.markdown(
         """
 <style>
     :root {
-        --pj-bg: #0E1117;
-        --pj-panel: #161B22;
-        --pj-input: #1F2937;
-        --pj-border: #30363D;
-        --pj-text: #F0F3F6;
-        --pj-muted: #9CA3AF;
-        --pj-accent: #3B82F6;
-        --pj-success-bg: #052E1C;
-        --pj-success: #3FB950;
-        --pj-warn-bg: #3D2E00;
-        --pj-warn: #D29922;
-        --pj-danger-bg: #3D1214;
-        --pj-danger: #F85149;
-        --pj-info-bg: #0D2140;
-        --pj-info: #58A6FF;
+        --pj-bg: #f3f0e9;
+        --pj-bg-soft: #eeece5;
+        --pj-card: #fbfaf7;
+        --pj-panel: #fbfaf7;
+        --pj-input: #ffffff;
+        --pj-border: #d9d5cc;
+        --pj-line: #ddd9d0;
+        --pj-text: #1c2730;
+        --pj-ink: #1c2730;
+        --pj-muted: #718078;
+        --pj-faint: #8a958e;
+        --pj-accent: #165dff;
+        --pj-accent-soft: #e7edff;
+        --pj-lime: #e5ff5c;
+        --pj-sidebar: #202c34;
+        --pj-sidebar-2: #293840;
+        --pj-sidebar-border: #45535a;
+        --pj-sidebar-text: #f3f1e9;
+        --pj-sidebar-muted: #aab5b1;
+        --pj-green: #1f8a64;
+        --pj-green-bg: #e4f3ea;
+        --pj-amber: #c76b2d;
+        --pj-amber-bg: #fff0e5;
+        --pj-success-bg: #e4f3ea;
+        --pj-success: #1f8a64;
+        --pj-warn-bg: #fff0e5;
+        --pj-warn: #b8672d;
+        --pj-danger-bg: #ffebe2;
+        --pj-danger: #c76b2d;
+        --pj-info-bg: #e7edff;
+        --pj-info: #165dff;
+        --pj-radius: 13px;
+        --pj-radius-sm: 9px;
     }
+
+    html, body, .stApp {
+        background:
+            radial-gradient(circle at 74% 0%, #dbe8ff 0, transparent 27rem),
+            linear-gradient(135deg, #f3f0e9 0%, #eeece5 100%) !important;
+        color: var(--pj-text);
+        font-family: Arial, Helvetica, sans-serif;
+    }
+    .stApp > header { background: transparent !important; }
+    [data-testid="stHeader"] { background: transparent !important; }
+    [data-testid="stToolbar"] { display: none !important; }
+
     .block-container {
-        max-width: 1280px;
-        padding-top: 1rem;
-        padding-bottom: 2rem;
+        max-width: 1500px !important;
+        padding-top: 1.1rem !important;
+        padding-bottom: 2rem !important;
+        padding-left: 2rem !important;
+        padding-right: 2rem !important;
+    }
+
+    /* ---- Sidebar (dark charcoal like template) ---- */
+    section[data-testid="stSidebar"] {
+        background: var(--pj-sidebar) !important;
+        border-right: 1px solid #cfcac0 !important;
+        min-width: 246px !important;
+    }
+    section[data-testid="stSidebar"] > div {
+        background: var(--pj-sidebar) !important;
+        padding-top: 1.1rem !important;
+    }
+    section[data-testid="stSidebar"] * {
+        color: var(--pj-sidebar-text);
+    }
+    section[data-testid="stSidebar"] .stMarkdown p,
+    section[data-testid="stSidebar"] .stCaption,
+    section[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] span {
+        color: var(--pj-sidebar-muted) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label {
+        color: #b0bbb8 !important;
+        font-size: 0.78rem !important;
+        font-weight: 600 !important;
+        padding: 0.55rem 0.65rem !important;
+        border-radius: 9px !important;
+        border: 1px solid transparent !important;
+        background: transparent !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
+        color: #fff !important;
+        background: #2e3d45 !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-checked="true"],
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+        color: #202c34 !important;
+        background: var(--pj-lime) !important;
+        border-color: var(--pj-lime) !important;
+    }
+    section[data-testid="stSidebar"] hr {
+        border-color: var(--pj-sidebar-border) !important;
+        margin: 0.85rem 0 !important;
+    }
+    section[data-testid="stSidebar"] .stButton > button {
+        background: #293840 !important;
+        color: #f3f1e9 !important;
+        border: 1px solid #526067 !important;
+        border-radius: 9px !important;
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+    }
+    section[data-testid="stSidebar"] .stButton > button:hover {
+        border-color: var(--pj-lime) !important;
+        color: var(--pj-lime) !important;
+    }
+    section[data-testid="stSidebar"] .stAlert {
+        background: #293840 !important;
+        border: 1px solid #526067 !important;
+        color: #d5ddd9 !important;
+    }
+
+    /* ---- Typography ---- */
+    h1 {
+        font-size: 2.05rem !important;
+        letter-spacing: -0.06em !important;
+        line-height: 1.05 !important;
+        font-weight: 800 !important;
+        color: var(--pj-ink) !important;
+        margin-bottom: 0.15rem !important;
+    }
+    h2, h3 {
+        letter-spacing: -0.035em !important;
+        color: var(--pj-ink) !important;
     }
     div[data-testid="stCaptionContainer"] {
-        margin-top: -0.25rem;
-        margin-bottom: 0.5rem;
-        color: var(--pj-muted);
-        font-size: 0.88rem;
+        color: var(--pj-muted) !important;
+        font-size: 0.82rem !important;
     }
-    h1 { font-size: 1.65rem !important; margin-bottom: 0.1rem !important; }
-    h2, h3 { margin-top: 0.25rem !important; }
+
+    /* ---- Inputs / controls ---- */
+    .stTextInput input, .stNumberInput input, .stTextArea textarea,
+    .stSelectbox [data-baseweb="select"] > div,
+    .stDateInput input, .stTimeInput input {
+        background: #fff !important;
+        border: 1px solid #d1cdc4 !important;
+        border-radius: 8px !important;
+        color: var(--pj-ink) !important;
+        font-size: 0.88rem !important;
+    }
+    .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
+        border-color: var(--pj-accent) !important;
+        box-shadow: 0 0 0 3px #165dff33 !important;
+    }
+    div[data-baseweb="radio"] label {
+        font-weight: 700 !important;
+        font-size: 0.85rem !important;
+    }
+
+    /* ---- Buttons ---- */
+    .stButton > button {
+        border-radius: 9px !important;
+        border: 1px solid #c9c6bd !important;
+        background: #fbfaf7 !important;
+        color: #3f4e4a !important;
+        font-size: 0.78rem !important;
+        font-weight: 700 !important;
+        padding: 0.55rem 0.95rem !important;
+        transition: border-color 0.18s ease, background 0.18s ease !important;
+    }
+    .stButton > button:hover {
+        border-color: #7f8d87 !important;
+        background: #fff !important;
+        color: var(--pj-ink) !important;
+    }
+    .stButton > button[kind="primary"],
+    .stButton > button[data-testid="baseButton-primary"] {
+        background: var(--pj-accent) !important;
+        border-color: var(--pj-accent) !important;
+        color: #fff !important;
+        box-shadow: 0 8px 20px #165dff2b !important;
+    }
+    .stButton > button[kind="primary"]:hover,
+    .stButton > button[data-testid="baseButton-primary"]:hover {
+        background: #0f4fd6 !important;
+        border-color: #0f4fd6 !important;
+        color: #fff !important;
+    }
+
+    /* ---- Metrics as template metric cards ---- */
+    [data-testid="stMetric"] {
+        background: var(--pj-card);
+        border: 1px solid var(--pj-line);
+        border-radius: 12px;
+        padding: 1rem 1.05rem 0.9rem;
+        box-shadow: 0 4px 15px #4c554c08;
+    }
+    [data-testid="stMetricLabel"] {
+        color: #7e8982 !important;
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+    }
+    [data-testid="stMetricValue"] {
+        font-size: 1.55rem !important;
+        letter-spacing: -0.06em !important;
+        color: var(--pj-ink) !important;
+    }
+
+    /* ---- Dataframes / tables ---- */
+    [data-testid="stDataFrame"],
+    [data-testid="stDataFrameResizable"] {
+        border: 1px solid var(--pj-line) !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+        background: var(--pj-card) !important;
+        box-shadow: 0 7px 22px #4c554c09;
+    }
+
+    /* ---- Expanders / alerts ---- */
+    [data-testid="stExpander"] {
+        border: 1px solid var(--pj-line) !important;
+        border-radius: 12px !important;
+        background: var(--pj-card) !important;
+    }
+    .stAlert {
+        border-radius: 12px !important;
+        border: 1px solid #c9d4c6 !important;
+    }
+    div[data-testid="stNotificationContentSuccess"],
+    .stSuccess {
+        background: #e8f1e5 !important;
+        border-color: #c9d4c6 !important;
+    }
+
+    /* ---- Custom chrome ---- */
+    .pj-brand {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+        padding: 0 0.35rem 1.1rem;
+        border-bottom: 1px solid var(--pj-sidebar-border);
+        margin-bottom: 0.85rem;
+    }
+    .pj-brand-icon {
+        display: grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: var(--pj-lime);
+        color: #202c34;
+        font-weight: 900;
+        font-size: 0.85rem;
+        transform: rotate(-6deg);
+        flex-shrink: 0;
+    }
+    .pj-brand strong {
+        display: block;
+        font-size: 1rem;
+        letter-spacing: -0.045em;
+        color: #f3f1e9 !important;
+        font-weight: 800;
+    }
+    .pj-brand strong span { color: var(--pj-lime); }
+    .pj-brand small {
+        display: block;
+        margin-top: 0.2rem;
+        color: #aab5b1 !important;
+        font-size: 0.62rem;
+        letter-spacing: 0.02em;
+    }
+    .pj-workspace {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        margin: 0.2rem 0 1rem;
+        padding: 0.65rem 0.7rem;
+        border: 1px solid #526067;
+        border-radius: 11px;
+        background: #293840;
+    }
+    .pj-workspace-avatar {
+        display: grid;
+        place-items: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        background: var(--pj-lime);
+        color: #202c34;
+        font-weight: 800;
+        font-size: 0.58rem;
+        flex-shrink: 0;
+    }
+    .pj-workspace span {
+        display: block;
+        font-size: 0.62rem;
+        color: #a5b0ad !important;
+    }
+    .pj-workspace strong {
+        display: block;
+        margin-top: 0.1rem;
+        font-size: 0.75rem;
+        color: #fff !important;
+    }
+    .pj-nav-kicker {
+        padding: 0 0.4rem;
+        margin: 0.15rem 0 0.45rem;
+        font-size: 0.62rem;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+        color: #8e9b98 !important;
+        font-weight: 700;
+    }
+    .pj-connection {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.85rem 0.35rem;
+        margin-top: 0.5rem;
+        border-top: 1px solid var(--pj-sidebar-border);
+        border-bottom: 1px solid var(--pj-sidebar-border);
+    }
+    .pj-live-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #7de0ad;
+        box-shadow: 0 0 0 4px #7de0ad22;
+        flex-shrink: 0;
+    }
+    .pj-connection strong {
+        display: block;
+        font-size: 0.7rem;
+        color: #f3f1e9 !important;
+    }
+    .pj-connection span {
+        display: block;
+        margin-top: 0.15rem;
+        font-size: 0.62rem;
+        color: #a0aca8 !important;
+    }
+
+    .pj-eyebrow {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        margin-bottom: 0.55rem;
+        color: #718078;
+        font-size: 0.62rem;
+        letter-spacing: 0.15em;
+        font-weight: 800;
+        text-transform: uppercase;
+    }
+    .pj-eyebrow-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 2px;
+        background: var(--pj-accent);
+        transform: rotate(45deg);
+    }
     .pj-subtitle {
         color: var(--pj-muted);
-        font-size: 0.95rem;
-        margin: 0 0 0.75rem 0;
+        font-size: 0.88rem;
+        margin: 0.35rem 0 0.85rem 0;
+        max-width: 62ch;
     }
     .pj-header-meta {
         display: flex;
         flex-wrap: wrap;
         gap: 0.4rem;
-        margin: 0 0 0.85rem 0;
+        margin: 0 0 1rem 0;
     }
+    .pj-breadcrumb {
+        display: flex;
+        gap: 0.55rem;
+        align-items: center;
+        font-size: 0.72rem;
+        color: #86908a;
+        margin: 0 0 1.1rem 0;
+    }
+    .pj-breadcrumb strong {
+        color: var(--pj-ink);
+        font-weight: 700;
+    }
+
+    .pj-status-strip {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+        padding: 0.85rem 1.05rem;
+        margin: 0 0 1.05rem 0;
+        border: 1px solid #c9d4c6;
+        border-radius: 12px;
+        background: #e8f1e5;
+    }
+    .pj-status-strip.warn {
+        border-color: #e5d2b8;
+        background: #fff6ea;
+    }
+    .pj-status-strip.fail {
+        border-color: #e5c4bc;
+        background: #fff0ee;
+    }
+    .pj-status-message {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+    }
+    .pj-status-icon {
+        display: grid;
+        place-items: center;
+        width: 25px;
+        height: 25px;
+        border-radius: 50%;
+        background: var(--pj-green);
+        color: #fff;
+        font-size: 0.75rem;
+        font-weight: 800;
+        flex-shrink: 0;
+    }
+    .pj-status-strip.warn .pj-status-icon { background: var(--pj-amber); }
+    .pj-status-strip.fail .pj-status-icon { background: #c4473a; }
+    .pj-status-message strong {
+        display: block;
+        font-size: 0.78rem;
+        color: #22543f;
+    }
+    .pj-status-strip.warn .pj-status-message strong { color: #8a4b16; }
+    .pj-status-strip.fail .pj-status-message strong { color: #8a2e26; }
+    .pj-status-message span {
+        display: block;
+        margin-top: 0.15rem;
+        font-size: 0.72rem;
+        color: #5f7567;
+    }
+    .pj-strip-meta {
+        display: flex;
+        align-items: center;
+        gap: 0.9rem;
+        flex-wrap: wrap;
+        color: #5c7266;
+        font-size: 0.68rem;
+    }
+    .pj-mini-dot {
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        margin-right: 0.35rem;
+        vertical-align: middle;
+    }
+    .pj-mini-dot.blue { background: var(--pj-accent); }
+    .pj-mini-dot.green { background: var(--pj-green); }
+    .pj-mini-dot.amber { background: var(--pj-amber); }
+
+    .pj-card {
+        border: 1px solid var(--pj-line);
+        border-radius: var(--pj-radius);
+        background: var(--pj-card);
+        box-shadow: 0 7px 22px #4c554c09;
+        padding: 1.15rem 1.2rem;
+        margin: 0 0 1rem 0;
+    }
+    .pj-card-eyebrow {
+        color: #86928a;
+        font-size: 0.58rem;
+        letter-spacing: 0.15em;
+        font-weight: 800;
+        text-transform: uppercase;
+        margin: 0 0 0.25rem 0;
+    }
+    .pj-card h2, .pj-card-title {
+        margin: 0;
+        font-size: 1.05rem;
+        letter-spacing: -0.035em;
+        font-weight: 800;
+        color: var(--pj-ink);
+    }
+
     .pj-step-bar {
         display: flex;
         flex-wrap: wrap;
         gap: 0.4rem;
-        margin: 0.25rem 0 0.85rem 0;
+        margin: 0.25rem 0 0.95rem 0;
     }
     .pj-step {
-        background: var(--pj-input);
+        background: #fff;
         color: var(--pj-muted);
-        border: 1px solid var(--pj-border);
+        border: 1px solid #d1cdc4;
         border-radius: 999px;
-        padding: 0.22rem 0.7rem;
-        font-size: 0.8rem;
-        font-weight: 600;
+        padding: 0.28rem 0.75rem;
+        font-size: 0.72rem;
+        font-weight: 700;
     }
     .pj-step-active {
-        background: var(--pj-info-bg);
-        color: var(--pj-info);
-        border-color: #1F4B7A;
+        background: var(--pj-accent-soft);
+        color: var(--pj-accent);
+        border-color: #b7c9f5;
     }
     .pj-step-done {
-        background: var(--pj-success-bg);
-        color: var(--pj-success);
-        border-color: #1A4D32;
+        background: var(--pj-green-bg);
+        color: var(--pj-green);
+        border-color: #b7d9c7;
     }
+
     .pj-badge {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
         border-radius: 999px;
-        padding: 0.12rem 0.5rem;
-        font-size: 0.75rem;
-        font-weight: 700;
-        margin-right: 0.2rem;
-        border: 1px solid transparent;
+        padding: 0.28rem 0.55rem;
+        font-size: 0.65rem;
+        font-weight: 800;
+        margin-right: 0.25rem;
+        white-space: nowrap;
     }
-    .pj-badge-ok { background: var(--pj-success-bg); color: var(--pj-success); border-color: #1A4D32; }
-    .pj-badge-warn { background: var(--pj-warn-bg); color: var(--pj-warn); border-color: #5C4510; }
-    .pj-badge-fail { background: var(--pj-danger-bg); color: var(--pj-danger); border-color: #6E2226; }
-    .pj-badge-info { background: var(--pj-info-bg); color: var(--pj-info); border-color: #1F4B7A; }
-    .pj-badge-mute { background: var(--pj-input); color: var(--pj-muted); border-color: var(--pj-border); }
-    .pj-badge-drop { background: var(--pj-danger-bg); color: var(--pj-danger); border-color: #6E2226; }
+    .pj-badge::before {
+        content: "";
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: currentColor;
+    }
+    .pj-badge-ok { background: var(--pj-success-bg); color: var(--pj-success); }
+    .pj-badge-warn { background: var(--pj-warn-bg); color: var(--pj-warn); }
+    .pj-badge-fail { background: #ffe8e5; color: #c4473a; }
+    .pj-badge-info { background: var(--pj-info-bg); color: var(--pj-info); }
+    .pj-badge-mute { background: #efece4; color: #6d7973; }
+    .pj-badge-drop { background: var(--pj-amber-bg); color: var(--pj-amber); }
+
     .pj-panel, .pj-preview {
-        border: 1px solid var(--pj-border);
-        background: var(--pj-panel);
-        border-radius: 8px;
-        padding: 0.75rem 0.9rem;
-        margin: 0.45rem 0 0.85rem 0;
+        border: 1px solid var(--pj-line);
+        background: var(--pj-card);
+        border-radius: 12px;
+        padding: 0.95rem 1.05rem;
+        margin: 0.55rem 0 0.95rem 0;
+        box-shadow: 0 4px 15px #4c554c08;
     }
-    .pj-preview { border-left: 3px solid var(--pj-accent); }
+    .pj-preview {
+        border-color: #cbd7ef;
+        background: #eef3ff;
+    }
     .pj-panel-title {
-        font-weight: 700;
-        color: var(--pj-text);
-        margin-bottom: 0.4rem;
+        font-weight: 800;
+        color: var(--pj-ink);
+        margin-bottom: 0.45rem;
+        letter-spacing: -0.02em;
     }
     .pj-kv {
-        font-size: 0.9rem;
-        line-height: 1.5;
+        font-size: 0.86rem;
+        line-height: 1.55;
         color: var(--pj-text);
     }
     .pj-kv code {
-        background: var(--pj-input);
-        border: 1px solid var(--pj-border);
+        background: #fff;
+        border: 1px solid #d1cdc4;
         padding: 0.05rem 0.3rem;
         border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.78rem;
     }
     .pj-section-label {
-        font-size: 0.75rem;
-        font-weight: 700;
+        font-size: 0.62rem;
+        font-weight: 800;
         text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: var(--pj-muted);
-        margin: 0.7rem 0 0.3rem 0;
+        letter-spacing: 0.13em;
+        color: #86928a;
+        margin: 0.85rem 0 0.4rem 0;
     }
     .pj-danger {
-        border: 1px solid #6E2226;
-        background: var(--pj-danger-bg);
-        color: #FFB4B0;
-        border-radius: 8px;
-        padding: 0.55rem 0.75rem;
-        margin: 0.4rem 0 0.7rem 0;
-        font-weight: 600;
-        font-size: 0.9rem;
+        border: 1px solid #e5c4a8;
+        background: var(--pj-amber-bg);
+        color: #8a4b16;
+        border-radius: 10px;
+        padding: 0.65rem 0.85rem;
+        margin: 0.45rem 0 0.75rem 0;
+        font-weight: 700;
+        font-size: 0.84rem;
+    }
+    .pj-insight {
+        position: relative;
+        overflow: hidden;
+        border-radius: 13px;
+        border: 1px solid #202c34;
+        background: #202c34;
+        color: #f5f3ea;
+        padding: 1.25rem 1.2rem;
+        margin: 0.75rem 0 1rem 0;
+    }
+    .pj-insight::after {
+        content: "";
+        position: absolute;
+        right: -40px;
+        top: -55px;
+        width: 160px;
+        height: 160px;
+        border-radius: 50%;
+        background: var(--pj-lime);
+        opacity: 0.85;
+    }
+    .pj-insight > * { position: relative; z-index: 1; }
+    .pj-insight .pj-card-eyebrow { color: #aebbb4; margin-top: 0.35rem; }
+    .pj-insight h3 {
+        margin: 0.35rem 0 0.45rem;
+        font-size: 1.05rem;
+        letter-spacing: -0.04em;
+        color: #f5f3ea !important;
+        max-width: 28ch;
+    }
+    .pj-insight p {
+        margin: 0;
+        color: #b5c0bb;
+        font-size: 0.78rem;
+        line-height: 1.55;
+        max-width: 46ch;
+    }
+    .pj-footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        flex-wrap: wrap;
+        padding: 1.1rem 0 0;
+        color: #8b958f;
+        font-size: 0.68rem;
+    }
+    .pj-footer strong { color: #5e6d66; font-weight: 800; }
+
+    @media (max-width: 900px) {
+        .block-container {
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+        }
+    }
+    @media (prefers-reduced-motion: reduce) {
+        * { transition: none !important; animation: none !important; }
+    }
+    :focus-visible {
+        outline: 3px solid #165dff !important;
+        outline-offset: 2px !important;
     }
 </style>
 """,
@@ -1056,7 +1575,11 @@ def _render_pgagent_jobs() -> None:
 
 
 def _render_convert_tab() -> None:
-    st.subheader("Convert an existing pgAgent partition job")
+    st.markdown(
+        '<div class="pj-card"><div class="pj-card-eyebrow">Workflow</div>'
+        '<div class="pj-card-title">Convert an existing pgAgent partition job</div></div>',
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Guided migration: read an old table-specific pgAgent job (read-only) and "
         "store one parameterised configuration row. The original pgAgent job is "
@@ -1143,7 +1666,11 @@ def _render_convert_tab() -> None:
 
 
 def _render_new_job_tab() -> None:
-    st.subheader("Create a new parameterised partition job")
+    st.markdown(
+        '<div class="pj-card"><div class="pj-card-eyebrow">New configuration</div>'
+        '<div class="pj-card-title">Create a new parameterised partition job</div></div>',
+        unsafe_allow_html=True,
+    )
     st.caption(
         "No pgAgent job is needed. This stores one configuration row that the "
         "dedicated scheduler backend triggers at the scheduled next_run_time."
@@ -1331,7 +1858,11 @@ def _filter_configured_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _render_configured_jobs_tab() -> None:
-    st.subheader("Configured partition jobs")
+    st.markdown(
+        '<div class="pj-card"><div class="pj-card-eyebrow">Live queue</div>'
+        '<div class="pj-card-title">Configured partition jobs</div></div>',
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Every row is one parameterised partition job in "
         "`mubasher_oms.partitioning_job_table`. These rows replaced the old "
@@ -1427,7 +1958,6 @@ def _render_configured_jobs_tab() -> None:
         return
 
     st.divider()
-    st.markdown("##### Job detail")
     if (
         "selected_config_job_id" in st.session_state
         and st.session_state.selected_config_job_id not in job_ids
@@ -1443,9 +1973,20 @@ def _render_configured_jobs_tab() -> None:
     if chosen is None:
         return
 
-    _format_config_details(chosen)
-    st.divider()
-    _render_manual_run(chosen)
+    detail_col, run_col = st.columns([1.35, 0.9])
+    with detail_col:
+        st.markdown(
+            '<div class="pj-card-eyebrow">Selected job</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("##### Job detail")
+        _format_config_details(chosen)
+    with run_col:
+        st.markdown(
+            '<div class="pj-card-eyebrow">Actions</div>',
+            unsafe_allow_html=True,
+        )
+        _render_manual_run(chosen)
 
 
 # ---------------------------------------------------------------------------
@@ -1473,7 +2014,11 @@ def _filter_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _render_history_tab() -> None:
-    st.subheader("Execution history")
+    st.markdown(
+        '<div class="pj-card"><div class="pj-card-eyebrow">Recent activity</div>'
+        '<div class="pj-card-title">Execution history</div></div>',
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Latest 100 executions recorded in "
         "`mubasher_oms.partitioning_job_table_log`."
@@ -1567,6 +2112,15 @@ def _render_history_tab() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _probe_scheduler() -> tuple[bool, Any, str]:
+    """Fetch scheduler status once per script run for all UI chrome."""
+    bundle = st.session_state.get("_scheduler_status_bundle")
+    if bundle is None:
+        bundle = fetch_scheduler_status()
+        st.session_state["_scheduler_status_bundle"] = bundle
+    return bundle
+
+
 def _readiness_badge(exists: Any, allowed: Any) -> str:
     if not exists:
         return _badge("Missing", "fail")
@@ -1653,7 +2207,7 @@ def _render_scheduler_panel() -> None:
         "next_run_time. Streamlit is configuration-only."
     )
 
-    ok, status, message = fetch_scheduler_status()
+    ok, status, message = _probe_scheduler()
     if ok and status:
         active = bool(status.get("scheduler_active"))
         st.markdown(
@@ -1693,27 +2247,139 @@ def _header_status_badges() -> None:
 
     if st.session_state.database_readiness_error:
         db_badge = _badge("Database error", "fail")
+        strip_class = "fail"
+        strip_title = "Database readiness check failed"
+        strip_detail = "Fix the readiness error before relying on write actions."
+        strip_icon = "!"
     elif not st.session_state.database_readiness_loaded:
         db_badge = _badge("Database not checked", "mute")
+        strip_class = "warn"
+        strip_title = "Database readiness has not been checked yet"
+        strip_detail = "The UI will check privileges on startup."
+        strip_icon = "·"
     elif readiness and readiness.get("insert_function_execute"):
         db_badge = _badge("Database ready", "ok")
+        strip_class = ""
+        strip_title = "Everything is running smoothly"
+        strip_detail = (
+            "Configuration writes are available and the realtime scheduler "
+            "panel is visible in the sidebar."
+        )
+        strip_icon = "✓"
     elif readiness:
         db_badge = _badge("Database limited", "warn")
+        strip_class = "warn"
+        strip_title = "Database access is limited"
+        strip_detail = "Some privileges are missing. Review Database readiness in the sidebar."
+        strip_icon = "!"
     else:
         db_badge = _badge("Database unknown", "mute")
+        strip_class = "warn"
+        strip_title = "Database status is unknown"
+        strip_detail = "Readiness information is not available."
+        strip_icon = "·"
 
     st.markdown(
         f'<div class="pj-header-meta">{db_badge}'
         f'{_badge("Realtime scheduler", "info")}'
-        f'{_badge("Theme: dark", "info")}</div>',
+        f'{_badge("Theme: light", "info")}</div>',
+        unsafe_allow_html=True,
+    )
+
+    ok, status, _message = _probe_scheduler()
+    meta_bits: list[str] = []
+    if ok and status:
+        active = bool(status.get("scheduler_active"))
+        meta_bits.append(
+            f'<span><span class="pj-mini-dot {"green" if active else "amber"}"></span>'
+            f'{"Scheduler online" if active else "Scheduler idle"}</span>'
+        )
+        upcoming = status.get("upcoming_job_count")
+        if upcoming is not None:
+            meta_bits.append(
+                f'<span><span class="pj-mini-dot blue"></span>{upcoming} upcoming</span>'
+            )
+        refresh = status.get("last_refresh_result")
+        if refresh:
+            meta_bits.append(f"<span class=\"mono\">{refresh}</span>")
+    else:
+        meta_bits.append(
+            '<span><span class="pj-mini-dot amber"></span>Scheduler unreachable</span>'
+        )
+
+    strip_cls = f'pj-status-strip {strip_class}'.strip()
+    st.markdown(
+        f'<div class="{strip_cls}">'
+        f'<div class="pj-status-message">'
+        f'<div class="pj-status-icon">{strip_icon}</div>'
+        f"<div><strong>{strip_title}</strong>"
+        f"<span>{strip_detail}</span></div></div>"
+        f'<div class="pj-strip-meta">{"".join(meta_bits)}</div>'
+        f"</div>",
         unsafe_allow_html=True,
     )
 
 
-def _render_header() -> None:
+def _render_header(active_view: str) -> None:
+    st.markdown(
+        f'<div class="pj-breadcrumb"><span>Workspace</span><span>/</span>'
+        f"<strong>{NAV_SIDEBAR_LABELS.get(active_view, active_view)}</strong></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="pj-eyebrow"><span class="pj-eyebrow-dot"></span>'
+        "Operations console</div>",
+        unsafe_allow_html=True,
+    )
     st.title(PAGE_TITLE)
     st.markdown(f'<p class="pj-subtitle">{PAGE_SUBTITLE}</p>', unsafe_allow_html=True)
     _header_status_badges()
+
+
+def _render_sidebar_brand() -> None:
+    st.markdown(
+        '<div class="pj-brand">'
+        '<div class="pj-brand-icon">P</div>'
+        "<div><strong>partition<span>.ops</span></strong>"
+        "<small>PostgreSQL control plane</small></div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="pj-workspace">'
+        '<div class="pj-workspace-avatar">MO</div>'
+        "<div><span>Workspace</span><strong>mubasher_oms</strong></div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="pj-nav-kicker">Manage</div>', unsafe_allow_html=True)
+
+
+def _render_sidebar_scheduler_chip() -> None:
+    ok, status, message = _probe_scheduler()
+    if ok and status and bool(status.get("scheduler_active")):
+        title = "Scheduler online"
+        detail = str(status.get("last_refresh_result") or "Heartbeat ok")
+    elif ok and status:
+        title = "Scheduler idle"
+        detail = str(status.get("last_refresh_result") or "Backend reachable")
+    else:
+        title = "Scheduler unreachable"
+        detail = _shorten(message, 48)
+    st.markdown(
+        f'<div class="pj-connection"><div class="pj-live-dot"></div>'
+        f"<div><strong>{title}</strong><span>{detail}</span></div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_page_footer() -> None:
+    st.markdown(
+        '<div class="pj-footer">'
+        "<strong>partition.ops</strong>"
+        "<span>Streamlit configuration UI · schedule-driven backend</span>"
+        "<span>All systems operational</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def main() -> None:
@@ -1725,6 +2391,8 @@ def main() -> None:
     )
     _inject_css()
     _init_session_state()
+    # Fresh probe each run; shared by header strip, sidebar chip, and panel.
+    st.session_state["_scheduler_status_bundle"] = fetch_scheduler_status()
 
     # Lightweight status only — heavy job/log lists load when their view opens.
     if not st.session_state.database_readiness_loaded:
@@ -1734,29 +2402,25 @@ def main() -> None:
             spinner_text="Checking database readiness...",
         )
 
-    _render_header()
-
     with st.sidebar:
-        st.caption(
-            "Status panels are read-only. Default appearance is dark "
-            "(.streamlit/config.toml). Use the Streamlit menu ▸ Settings to "
-            "switch Light/Dark when available."
+        _render_sidebar_brand()
+        view = st.radio(
+            "Section",
+            options=NAV_OPTIONS,
+            key="main_nav",
+            label_visibility="collapsed",
+            format_func=lambda item: NAV_SIDEBAR_LABELS.get(item, item),
         )
-        st.divider()
-        _render_readiness_panel()
-        st.divider()
-        _render_scheduler_panel()
+        st.markdown('<div class="pj-nav-kicker second">System</div>', unsafe_allow_html=True)
+        _render_sidebar_scheduler_chip()
+        with st.expander("Database readiness", expanded=False):
+            _render_readiness_panel()
+        with st.expander("Realtime scheduler", expanded=False):
+            _render_scheduler_panel()
+
+    _render_header(view)
 
     # Single-view navigation: only the active section renders widgets/queries.
-    view = st.radio(
-        "Section",
-        options=NAV_OPTIONS,
-        horizontal=True,
-        key="main_nav",
-        label_visibility="collapsed",
-    )
-    st.divider()
-
     if view == NAV_CONVERT:
         _render_convert_tab()
     elif view == NAV_CREATE:
@@ -1765,6 +2429,8 @@ def main() -> None:
         _render_configured_jobs_tab()
     else:
         _render_history_tab()
+
+    _render_page_footer()
 
 
 if __name__ == "__main__":

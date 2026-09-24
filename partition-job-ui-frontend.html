@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Partition Job Management</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    html { background: #0b0f14; color: #e8eef5; color-scheme: dark; }
+    :root {
+      --bg: #0b0f14;
+      --bg-elevated: #12181f;
+      --panel: #161c24;
+      --panel-2: #1a222c;
+      --input: #1e2733;
+      --border: #2a3441;
+      --border-strong: #3a4656;
+      --text: #e8eef5;
+      --muted: #a8b4c4;
+      --faint: #8b97a8;
+      --accent: #2563eb;
+      --accent-soft: #1a2f52;
+      --accent-text: #8fbcff;
+      --ok: #3fb950;
+      --ok-bg: #0d2818;
+      --ok-border: #1f4d32;
+      --warn: #d29922;
+      --warn-bg: #2a2108;
+      --warn-border: #5c4510;
+      --danger: #f85149;
+      --danger-bg: #2c1214;
+      --danger-border: #6e2226;
+      --info: #58a6ff;
+      --info-bg: #0d2140;
+      --info-border: #1f4b7a;
+      --radius: 10px;
+      --radius-sm: 6px;
+      --font: "Public Sans", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --sidebar-w: 280px;
+      --focus: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    ::selection { background: rgba(59, 130, 246, 0.35); color: var(--text); }
+    :focus-visible { outline: none; box-shadow: var(--focus); }
+
+    .app {
+      display: grid;
+      grid-template-columns: var(--sidebar-w) 1fr;
+      min-height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      background: linear-gradient(180deg, #10161e 0%, #0c1118 100%);
+      border-right: 1px solid var(--border);
+      padding: 1.25rem 1rem 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+    }
+    .brand {
+      padding: 0.35rem 0.5rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand-mark {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.55rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      font-size: 0.95rem;
+    }
+    .brand-mark svg {
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+    }
+    .brand p {
+      margin: 0.45rem 0 0;
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.4;
+    }
+
+    .nav {
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+    .nav-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--faint);
+      padding: 0.35rem 0.65rem;
+      font-weight: 600;
+    }
+    .nav button {
+      appearance: none;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      padding: 0.65rem 0.75rem;
+      border-radius: var(--radius-sm);
+      font: inherit;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+    }
+    .nav button:hover {
+      background: var(--panel-2);
+      color: var(--text);
+    }
+    .nav button[aria-current="page"] {
+      background: var(--accent-soft);
+      border-color: #27497a;
+      color: var(--accent-text);
+    }
+
+    .side-card {
+      margin-top: auto;
+      background: transparent;
+      border-top: 1px solid var(--border);
+      border-radius: 0;
+      padding: 1rem 0.5rem 0.25rem;
+    }
+    .side-card h2 {
+      margin: 0 0 0.35rem;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+    .side-card p {
+      margin: 0 0 0.75rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+    }
+    .kv {
+      display: grid;
+      gap: 0.4rem;
+      font-size: 0.75rem;
+    }
+    .kv div {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.35rem 0;
+      border-bottom: 1px solid rgba(42, 52, 65, 0.7);
+    }
+    .kv div:last-child { border-bottom: 0; }
+    .kv span { color: var(--muted); }
+    .kv code {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--text);
+    }
+
+    /* Main */
+    .main {
+      padding: 1.5rem 1.75rem 2.5rem;
+      max-width: 1240px;
+    }
+    .page-header {
+      margin-bottom: 1.35rem;
+      animation: rise 420ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .page-header h1 {
+      margin: 0;
+      font-size: 1.75rem;
+      letter-spacing: -0.03em;
+      font-weight: 700;
+    }
+    .page-header .lede {
+      margin: 0.45rem 0 0.85rem;
+      color: var(--muted);
+      max-width: 62ch;
+      font-size: 0.95rem;
+    }
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--input);
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    .badge::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.85;
+    }
+    .badge-ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok-border); }
+    .badge-warn { background: var(--warn-bg); color: var(--warn); border-color: var(--warn-border); }
+    .badge-info { background: var(--info-bg); color: var(--info); border-color: var(--info-border); }
+    .badge-fail { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-border); }
+    .badge-drop { background: var(--danger-bg); color: var(--danger); border-color: var(--danger-border); }
+
+    .view { display: none; animation: rise 380ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+    .view.active { display: block; }
+
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: none; }
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.1rem 1.2rem;
+      margin-bottom: 1rem;
+    }
+    .panel h2 {
+      margin: 0 0 0.25rem;
+      font-size: 1.1rem;
+      letter-spacing: -0.02em;
+    }
+    .panel .hint {
+      margin: 0 0 1rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .section-label {
+      margin: 1.15rem 0 0.55rem;
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+      color: var(--faint);
+    }
+    .section-label:first-child { margin-top: 0; }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.85rem;
+    }
+    .grid-4 {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.75rem;
+    }
+    .field { display: flex; flex-direction: column; gap: 0.35rem; }
+    .field label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .field .help {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .field input,
+    .field select,
+    .field textarea {
+      width: 100%;
+      background: var(--input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      color-scheme: dark;
+      font: inherit;
+      font-size: 0.9rem;
+      padding: 0.55rem 0.7rem;
+      transition: border-color 150ms ease, background 150ms ease;
+    }
+    .field input:read-only {
+      background: #18212c;
+      color: var(--text);
+    }
+    .field input:-webkit-autofill,
+    .field input:-webkit-autofill:hover,
+    .field input:-webkit-autofill:focus,
+    .field textarea:-webkit-autofill {
+      -webkit-text-fill-color: var(--text);
+      caret-color: var(--text);
+      box-shadow: 0 0 0 1000px var(--input) inset;
+      transition: background-color 99999s ease-out;
+    }
+    .field input:hover,
+    .field select:hover,
+    .field textarea:hover { border-color: var(--border-strong); }
+    .field textarea {
+      min-height: 96px;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      resize: vertical;
+    }
+    .field input[type="checkbox"] {
+      width: auto;
+      accent-color: var(--accent);
+    }
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.35rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .seg {
+      display: inline-flex;
+      background: var(--input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.2rem;
+      gap: 0.15rem;
+    }
+    .seg button {
+      appearance: none;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 0.82rem;
+      font-weight: 600;
+      padding: 0.4rem 0.85rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .seg button[aria-pressed="true"] {
+      background: var(--accent);
+      color: #f8fafc;
+    }
+    .seg button.drop[aria-pressed="true"] {
+      background: var(--danger);
+    }
+
+    .alert {
+      border-radius: var(--radius-sm);
+      padding: 0.7rem 0.85rem;
+      font-size: 0.85rem;
+      margin: 0.75rem 0;
+      border: 1px solid;
+    }
+    .alert-danger {
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+      color: #ffb4af;
+    }
+    .alert-info {
+      background: var(--info-bg);
+      border-color: var(--info-border);
+      color: #a8d0ff;
+    }
+    .alert-ok {
+      background: var(--ok-bg);
+      border-color: var(--ok-border);
+      color: #8be09a;
+    }
+
+    .preview {
+      background: transparent;
+      border: 0;
+      border-top: 1px solid var(--border);
+      border-radius: 0;
+      padding: 0.9rem 0 0.15rem;
+      margin: 1rem 0 0;
+    }
+    .preview h3 {
+      margin: 0 0 0.55rem;
+      font-size: 0.9rem;
+    }
+    .preview dl {
+      margin: 0;
+      display: grid;
+      grid-template-columns: 160px 1fr;
+      gap: 0.35rem 0.75rem;
+      font-size: 0.82rem;
+    }
+    .preview dt { color: var(--muted); }
+    .preview dd { margin: 0; font-family: var(--mono); font-size: 0.78rem; }
+    .preview pre {
+      margin: 0.65rem 0 0;
+      background: var(--input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 0.65rem 0.75rem;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      overflow: auto;
+    }
+    .detail-list {
+      margin: 0.75rem 0 0;
+      display: grid;
+      grid-template-columns: 140px 1fr;
+      gap: 0.45rem 0.85rem;
+      font-size: 0.82rem;
+    }
+    .detail-list dt { color: var(--muted); }
+    .detail-list dd { margin: 0; font-family: var(--mono); font-size: 0.78rem; }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.55rem;
+      margin-top: 1rem;
+      align-items: center;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid var(--border);
+      background: var(--input);
+      color: var(--text);
+      font: inherit;
+      font-size: 0.88rem;
+      font-weight: 600;
+      padding: 0.55rem 0.95rem;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: background 150ms ease, border-color 150ms ease, transform 120ms ease;
+    }
+    .btn:hover { border-color: var(--border-strong); background: #243041; }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary {
+      background: var(--accent);
+      border-color: #1d4ed8;
+      color: #f8fafc;
+    }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-danger {
+      background: var(--danger-bg);
+      border-color: var(--danger-border);
+      color: var(--danger);
+    }
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .metric {
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      padding: 0.35rem 0;
+    }
+    .metric .n {
+      font-family: var(--mono);
+      font-size: 1.35rem;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.02em;
+    }
+    .metric .l {
+      color: var(--muted);
+      font-size: 0.75rem;
+      margin-top: 0.15rem;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr 1.4fr auto;
+      gap: 0.65rem;
+      align-items: end;
+      margin: 0.9rem 0 0.75rem;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      margin: 0 -0.15rem;
+      padding: 0.15rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+      min-width: 760px;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.7rem 0.85rem;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    th {
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 700;
+      position: sticky;
+      top: 0;
+    }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr {
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    tbody tr:hover { background: rgba(59, 130, 246, 0.06); }
+    tbody tr[aria-selected="true"] { background: rgba(59, 130, 246, 0.12); }
+    .mono { font-family: var(--mono); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
+
+    .steps {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin-bottom: 1rem;
+    }
+    .step {
+      background: var(--input);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 0.35rem 0.65rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .step.active {
+      background: var(--info-bg);
+      border-color: var(--info-border);
+      color: var(--info);
+    }
+    .step.done {
+      background: var(--ok-bg);
+      border-color: var(--ok-border);
+      color: var(--ok);
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 1rem;
+    }
+    .note {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin: 0.35rem 0 0;
+    }
+
+    .footer-note {
+      margin-top: 1.5rem;
+      color: var(--faint);
+      font-size: 0.75rem;
+    }
+
+    @media (max-width: 980px) {
+      .app { grid-template-columns: 1fr; }
+      .sidebar {
+        position: relative;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .grid-2, .grid-4, .detail-grid, .toolbar {
+        grid-template-columns: 1fr;
+      }
+      .main { padding: 1.1rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="Primary">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 28 28" fill="none" aria-hidden="true">
+            <rect x="2" y="2" width="24" height="24" rx="6" fill="#1a2f52" stroke="#2563eb"/>
+            <path d="M7 18V10h3.2c1.7 0 2.7.9 2.7 2.2 0 .9-.5 1.6-1.3 1.9L14.2 18h-2.1l-2.2-3.5H9.2V18H7zm2.2-5.2h1c.7 0 1.1-.3 1.1-.9s-.4-.9-1.1-.9h-1v1.8zM15.4 18l2.6-8h2.3l2.6 8h-2.1l-.4-1.4h-2.5L17.5 18h-2.1zm3.2-3h1.7l-.8-2.7h-.1l-.8 2.7z" fill="#8fbcff"/>
+          </svg>
+          Partition Job UI
+        </div>
+        <p>Configure parameterized CREATE/DROP partition jobs. Scheduling runs in a separate backend.</p>
+      </div>
+
+      <nav class="nav" aria-label="Views">
+        <div class="nav-label">Workflow</div>
+        <button type="button" data-view="convert" aria-current="page">Convert Existing Job</button>
+        <button type="button" data-view="create">Create New Job</button>
+        <button type="button" data-view="configured">Configured Jobs</button>
+        <button type="button" data-view="history">Execution History</button>
+      </nav>
+
+      <section class="side-card" aria-label="Scheduler status">
+        <h2>Realtime scheduler</h2>
+        <p>Backend preloads upcoming jobs and fires at <span class="mono">next_run_time</span>.</p>
+        <div class="badge-row" style="margin-bottom:0.65rem">
+          <span class="badge badge-ok">Backend active</span>
+        </div>
+        <div class="kv">
+          <div><span>Upcoming</span><code>4</code></div>
+          <div><span>Next job</span><code>31 @ 16:01:20</code></div>
+          <div><span>Last refresh</span><code>ok:reconcile:4</code></div>
+          <div><span>Last result</span><code>31 → EXECUTED</code></div>
+        </div>
+      </section>
+    </aside>
+
+    <main class="main">
+      <header class="page-header">
+        <h1>Partition Job Management</h1>
+        <p class="lede">
+          Create and manage parameterized partition-job configurations in PostgreSQL.
+          The Streamlit UI is configuration-only; execution is schedule-driven by the dedicated backend.
+        </p>
+        <div class="badge-row">
+          <span class="badge badge-ok">Database ready</span>
+          <span class="badge badge-info">Realtime scheduler</span>
+          <span class="badge badge-info">Theme: dark</span>
+        </div>
+      </header>
+
+      <!-- CONVERT -->
+      <section class="view active" id="view-convert" aria-labelledby="convert-title">
+        <div class="panel">
+          <h2 id="convert-title">Convert an existing pgAgent partition job</h2>
+          <p class="hint">Load a pgAgent job ID, review inferred values, then write one configuration row through the approved insert function.</p>
+
+          <div class="steps" aria-label="Conversion steps">
+            <span class="step done">1. Load Job ID</span>
+            <span class="step active">2. Review inference</span>
+            <span class="step">4. Submit</span>
+          </div>
+
+          <div class="grid-2">
+            <div class="field">
+              <label for="pg-job-id">pgAgent Job ID</label>
+              <input id="pg-job-id" type="text" value="1042" readonly />
+              <span class="help">Placeholder: example loaded job.</span>
+            </div>
+            <div class="field">
+              <label for="pg-job-name">Detected job name</label>
+              <input id="pg-job-name" type="text" value="create_partitions_s01_holdings_summary" readonly />
+            </div>
+          </div>
+
+          <div class="alert alert-info" style="margin-top:1rem">
+            Inference confidence: <strong>High</strong>. CREATE operation detected from routine body
+            (<span class="mono">ALTER TABLE … ADD PARTITION</span>).
+          </div>
+
+          <div class="section-label">Basic information</div>
+          <div class="field" style="margin-bottom:0.75rem">
+            <label>Operation</label>
+            <div class="seg" role="group" aria-label="Operation">
+              <button type="button" aria-pressed="true">CREATE</button>
+              <button type="button" class="drop" aria-pressed="false">DROP</button>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="c-job-name">Job name</label>
+              <input id="c-job-name" value="s01_holdings_summary_create" />
+            </div>
+            <div class="field">
+              <label>Enabled</label>
+              <label class="check-row"><input type="checkbox" checked /> Job is enabled</label>
+            </div>
+            <div class="field">
+              <label for="c-schema">Table schema</label>
+              <input id="c-schema" value="mubasher_oms" />
+            </div>
+            <div class="field">
+              <label for="c-table">Table name</label>
+              <input id="c-table" value="s01_holdings_summary" />
+            </div>
+          </div>
+
+          <div class="section-label">Schedule</div>
+          <div class="field">
+            <label for="c-cron">Job schedule (six-field cron)</label>
+            <input id="c-cron" class="mono" value="0 30 1 29 12 *" />
+            <span class="help">Fields: second minute hour day-of-month month day-of-week</span>
+          </div>
+          <p class="note">Next run preview: <code class="mono">2026-12-29 01:30:00</code></p>
+
+          <div class="preview">
+            <h3>Configuration preview</h3>
+            <dl>
+              <dt>Target</dt><dd>mubasher_oms.s01_holdings_summary</dd>
+              <dt>Operation</dt><dd>CREATE</dd>
+              <dt>Frequency</dt><dd>1 year</dd>
+              <dt>Partition size</dt><dd>1 month</dd>
+              <dt>Create ahead</dt><dd>2 months</dd>
+            </dl>
+            <pre>{ "lock_timeout": "30s", "datestyle": "ISO, DMY" }</pre>
+          </div>
+
+          <div class="actions">
+            <button class="btn" type="button">Reload Job Details</button>
+            <button class="btn btn-primary" type="button">Create Partition Job</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- CREATE -->
+      <section class="view" id="view-create" aria-labelledby="create-title">
+        <div class="panel">
+          <h2 id="create-title">Create a new parameterised partition job</h2>
+          <p class="hint">No pgAgent job is needed. Stores one configuration row that the dedicated scheduler backend triggers at the scheduled next_run_time.</p>
+
+          <div class="section-label">Basic information</div>
+          <div class="field" style="margin-bottom:0.75rem">
+            <label>Operation</label>
+            <div class="seg" role="group" aria-label="Operation create">
+              <button type="button" aria-pressed="true">CREATE</button>
+              <button type="button" class="drop" aria-pressed="false">DROP</button>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="n-job-name">Job name</label>
+              <input id="n-job-name" value="orders_daily_create" />
+            </div>
+            <div class="field">
+              <label>Enabled</label>
+              <label class="check-row"><input type="checkbox" checked /> Job is enabled</label>
+            </div>
+            <div class="field">
+              <label for="n-schema">Table schema</label>
+              <input id="n-schema" value="trading" />
+            </div>
+            <div class="field">
+              <label for="n-table">Table name</label>
+              <input id="n-table" value="orders" />
+            </div>
+          </div>
+
+          <div class="section-label">Schedule</div>
+          <div class="field">
+            <label for="n-cron">Job schedule (six-field cron)</label>
+            <input id="n-cron" class="mono" value="0 0 2 * * *" />
+          </div>
+          <div class="grid-2" style="margin-top:0.75rem">
+            <div class="field">
+              <label for="n-freq-amt">Frequency amount</label>
+              <input id="n-freq-amt" type="number" value="1" />
+            </div>
+            <div class="field">
+              <label for="n-freq-unit">Frequency unit</label>
+              <select id="n-freq-unit">
+                <option>day</option>
+                <option selected>month</option>
+                <option>year</option>
+              </select>
+            </div>
+          </div>
+          <label class="check-row"><input type="checkbox" checked /> Use the next run calculated from the schedule</label>
+          <p class="note">Next run time will be stored as <code class="mono">2026-09-24 02:00:00</code>.</p>
+
+          <div class="section-label">Partition configuration</div>
+          <div class="grid-2">
+            <div class="field">
+              <label for="n-part-unit">Partition unit</label>
+              <select id="n-part-unit">
+                <option selected>day</option>
+                <option>week</option>
+                <option>month</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="n-part-period">Partition period</label>
+              <input id="n-part-period" type="number" value="1" />
+            </div>
+            <div class="field">
+              <label for="n-ahead-amt">Create ahead amount</label>
+              <input id="n-ahead-amt" type="number" value="7" />
+            </div>
+            <div class="field">
+              <label for="n-ahead-unit">Create ahead unit</label>
+              <select id="n-ahead-unit">
+                <option selected>day</option>
+                <option>week</option>
+                <option>month</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="section-label">Database configuration</div>
+          <div class="field">
+            <label for="n-db-config">db_config_para (JSON)</label>
+            <textarea id="n-db-config">{
+  "lock_timeout": "30s"
+}</textarea>
+            <span class="help">JSON looks valid.</span>
+          </div>
+
+          <div class="preview">
+            <h3>Configuration preview</h3>
+            <dl>
+              <dt>Target</dt><dd>trading.orders</dd>
+              <dt>Operation</dt><dd>CREATE</dd>
+              <dt>Schedule</dt><dd>0 0 2 * * *</dd>
+              <dt>Frequency</dt><dd>1 month</dd>
+              <dt>Partition size</dt><dd>1 day</dd>
+              <dt>Create ahead</dt><dd>7 days</dd>
+            </dl>
+          </div>
+
+          <p class="note">This button writes one configuration row through the approved database function.</p>
+          <div class="actions">
+            <button class="btn btn-primary" type="button">Create Partition Job</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- CONFIGURED -->
+      <section class="view" id="view-configured" aria-labelledby="configured-title">
+        <div class="panel">
+          <h2 id="configured-title">Configured partition jobs</h2>
+          <p class="hint">Every row is one parameterized partition job in <span class="mono">mubasher_oms.partitioning_job_table</span>.</p>
+
+          <div class="grid-4">
+            <div class="metric"><div class="n">12</div><div class="l">Total</div></div>
+            <div class="metric"><div class="n">9</div><div class="l">Enabled</div></div>
+            <div class="metric"><div class="n">7</div><div class="l">CREATE</div></div>
+            <div class="metric"><div class="n">5</div><div class="l">DROP</div></div>
+          </div>
+
+          <div class="toolbar">
+            <div class="field">
+              <label for="f-op">Operation</label>
+              <select id="f-op"><option>All</option><option>CREATE</option><option>DROP</option></select>
+            </div>
+            <div class="field">
+              <label for="f-en">Enabled</label>
+              <select id="f-en"><option>All</option><option>Enabled</option><option>Disabled</option></select>
+            </div>
+            <div class="field">
+              <label for="f-st">Status</label>
+              <select id="f-st"><option>All</option><option>SUCCESS</option><option>FAIL</option></select>
+            </div>
+            <div class="field">
+              <label for="f-q">Search job / table</label>
+              <input id="f-q" placeholder="e.g. holdings or trading.orders" value="holdings" />
+            </div>
+            <button class="btn" type="button">Refresh</button>
+          </div>
+
+          <p class="note" style="margin-bottom:0.55rem"><strong>Showing 3 of 12</strong> configured job(s).</p>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Job ID</th>
+                  <th>Job name</th>
+                  <th>Enabled</th>
+                  <th>Op</th>
+                  <th>Schema.table</th>
+                  <th>Schedule</th>
+                  <th>Next run</th>
+                  <th>Last status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr aria-selected="true">
+                  <td class="mono">31</td>
+                  <td>s01_holdings_summary_create</td>
+                  <td><span class="badge badge-ok">Yes</span></td>
+                  <td><span class="badge badge-info">CREATE</span></td>
+                  <td class="mono">mubasher_oms.s01_holdings_summary</td>
+                  <td class="mono">0 30 1 29 12 *</td>
+                  <td class="mono">2026-12-29 01:30:00</td>
+                  <td><span class="badge badge-ok">SUCCESS</span></td>
+                </tr>
+                <tr>
+                  <td class="mono">44</td>
+                  <td>s01_holdings_summary_drop</td>
+                  <td><span class="badge badge-ok">Yes</span></td>
+                  <td><span class="badge badge-drop">DROP</span></td>
+                  <td class="mono">mubasher_oms.s01_holdings_summary</td>
+                  <td class="mono">0 0 3 1 * *</td>
+                  <td class="mono">2026-10-01 03:00:00</td>
+                  <td><span class="badge badge-ok">SUCCESS</span></td>
+                </tr>
+                <tr>
+                  <td class="mono">52</td>
+                  <td>holdings_archive_create</td>
+                  <td><span class="badge badge-warn">No</span></td>
+                  <td><span class="badge badge-info">CREATE</span></td>
+                  <td class="mono">archive.holdings_hist</td>
+                  <td class="mono">0 0 2 * * *</td>
+                  <td class="mono">2026-09-24 02:00:00</td>
+                  <td><span class="badge">n/a</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="detail-grid" style="margin-top:1.25rem">
+            <div>
+              <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Job detail: 31</h2>
+              <dl class="detail-list">
+                <dt>Frequency</dt>
+                <dd>1 year</dd>
+                <dt>Partition</dt>
+                <dd>1 month</dd>
+                <dt>Create ahead</dt>
+                <dd>2 months</dd>
+                <dt>Last run</dt>
+                <dd>2025-12-29 01:30:12</dd>
+              </dl>
+            </div>
+            <div>
+              <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Manual run</h2>
+              <p class="hint" style="margin-bottom:0.75rem">Calls <span class="mono">run_partition_job_manual()</span>. Automatic next run time is not changed.</p>
+              <div class="alert alert-danger">DROP jobs remove partitions. Confirm retention before running.</div>
+              <div class="actions">
+                <button class="btn btn-primary" type="button">Run now</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- HISTORY -->
+      <section class="view" id="view-history" aria-labelledby="history-title">
+        <div class="panel">
+          <h2 id="history-title">Execution history</h2>
+          <p class="hint">Rows from <span class="mono">mubasher_oms.partitioning_job_table_log</span> (placeholder sample).</p>
+
+          <div class="toolbar" style="grid-template-columns:1fr 1fr auto">
+            <div class="field">
+              <label for="h-status">Status</label>
+              <select id="h-status"><option>All</option><option>SUCCESS</option><option>FAIL</option></select>
+            </div>
+            <div class="field">
+              <label for="h-search">Search</label>
+              <input id="h-search" value="s01_holdings" />
+            </div>
+            <button class="btn" type="button">Refresh</button>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Log ID</th>
+                  <th>Job ID</th>
+                  <th>Job name</th>
+                  <th>Status</th>
+                  <th>Runtime</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="mono">8912</td>
+                  <td class="mono">31</td>
+                  <td>s01_holdings_summary_create</td>
+                  <td><span class="badge badge-ok">SUCCESS</span></td>
+                  <td class="mono">2025-12-29 01:30:12</td>
+                  <td class="mono">n/a</td>
+                </tr>
+                <tr>
+                  <td class="mono">8911</td>
+                  <td class="mono">44</td>
+                  <td>s01_holdings_summary_drop</td>
+                  <td><span class="badge badge-ok">SUCCESS</span></td>
+                  <td class="mono">2025-12-01 03:00:08</td>
+                  <td class="mono">n/a</td>
+                </tr>
+                <tr>
+                  <td class="mono">8908</td>
+                  <td class="mono">31</td>
+                  <td>s01_holdings_summary_create</td>
+                  <td><span class="badge badge-fail">FAIL</span></td>
+                  <td class="mono">2024-12-29 01:30:05</td>
+                  <td class="mono">could not obtain lock</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <p class="footer-note">
+        Static HTML mockup with placeholder values. Not connected to PostgreSQL or the scheduler backend.
+        Open this file in a browser to review layout and navigation.
+      </p>
+    </main>
+  </div>
+
+  <script>
+    const buttons = document.querySelectorAll(".nav button[data-view]");
+    const views = document.querySelectorAll(".view");
+
+    function showView(name) {
+      views.forEach((v) => v.classList.toggle("active", v.id === "view-" + name));
+      buttons.forEach((b) => {
+        const on = b.dataset.view === name;
+        b.setAttribute("aria-current", on ? "page" : "false");
+      });
+    }
+
+    buttons.forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
+
+    document.querySelectorAll(".seg").forEach((group) => {
+      group.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          group.querySelectorAll("button").forEach((x) => x.setAttribute("aria-pressed", "false"));
+          btn.setAttribute("aria-pressed", "true");
+        });
+      });
+    });
+
+    document.querySelectorAll("tbody tr").forEach((row) => {
+      row.addEventListener("click", () => {
+        row.parentElement.querySelectorAll("tr").forEach((r) => r.setAttribute("aria-selected", "false"));
+        row.setAttribute("aria-selected", "true");
+      });
+    });
+  </script>
+</body>
+</html>
