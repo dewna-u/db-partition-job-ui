@@ -170,42 +170,64 @@ def _inject_css() -> None:
         border-right: 1px solid #cfcac0 !important;
         min-width: 246px !important;
     }
-    section[data-testid="stSidebar"] > div {
+    section[data-testid="stSidebar"] > div:first-child {
         background: var(--pj-sidebar) !important;
-        padding-top: 1.1rem !important;
+        padding: 1.4rem 0.85rem 1rem !important;
     }
-    section[data-testid="stSidebar"] * {
-        color: var(--pj-sidebar-text);
-    }
-    section[data-testid="stSidebar"] .stMarkdown p,
-    section[data-testid="stSidebar"] .stCaption,
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
     section[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
-    section[data-testid="stSidebar"] label,
-    section[data-testid="stSidebar"] span {
+    section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] p {
         color: var(--pj-sidebar-muted) !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] {
+        gap: 0.25rem !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] > label {
+        display: none !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] [role="radiogroup"] {
+        gap: 0.25rem !important;
+        display: flex !important;
+        flex-direction: column !important;
     }
     section[data-testid="stSidebar"] [data-testid="stRadio"] label {
         color: #b0bbb8 !important;
-        font-size: 0.78rem !important;
+        font-size: 0.75rem !important;
         font-weight: 600 !important;
-        padding: 0.55rem 0.65rem !important;
+        padding: 0.7rem 0.65rem !important;
         border-radius: 9px !important;
         border: 1px solid transparent !important;
         background: transparent !important;
+        margin: 0 !important;
     }
     section[data-testid="stSidebar"] [data-testid="stRadio"] label:hover {
         color: #fff !important;
         background: #2e3d45 !important;
     }
-    section[data-testid="stSidebar"] [data-testid="stRadio"] label[data-checked="true"],
     section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
         color: #202c34 !important;
         background: var(--pj-lime) !important;
         border-color: var(--pj-lime) !important;
     }
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) p,
+    section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) span {
+        color: #202c34 !important;
+    }
     section[data-testid="stSidebar"] hr {
         border-color: var(--pj-sidebar-border) !important;
         margin: 0.85rem 0 !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] {
+        background: #293840 !important;
+        border: 1px solid #526067 !important;
+        border-radius: 11px !important;
+        color: #d5ddd9 !important;
+    }
+    section[data-testid="stSidebar"] [data-testid="stExpander"] summary,
+    section[data-testid="stSidebar"] [data-testid="stExpander"] p,
+    section[data-testid="stSidebar"] [data-testid="stExpander"] span,
+    section[data-testid="stSidebar"] [data-testid="stExpander"] label {
+        color: #c5ceca !important;
     }
     section[data-testid="stSidebar"] .stButton > button {
         background: #293840 !important;
@@ -214,15 +236,24 @@ def _inject_css() -> None:
         border-radius: 9px !important;
         font-size: 0.72rem !important;
         font-weight: 700 !important;
+        box-shadow: none !important;
     }
     section[data-testid="stSidebar"] .stButton > button:hover {
         border-color: var(--pj-lime) !important;
         color: var(--pj-lime) !important;
+        background: #2e3d45 !important;
     }
     section[data-testid="stSidebar"] .stAlert {
         background: #293840 !important;
         border: 1px solid #526067 !important;
         color: #d5ddd9 !important;
+    }
+    section[data-testid="stSidebar"] .stButton > button[kind="primary"],
+    section[data-testid="stSidebar"] .stButton > button[data-testid="baseButton-primary"] {
+        background: var(--pj-lime) !important;
+        border-color: var(--pj-lime) !important;
+        color: #202c34 !important;
+        box-shadow: none !important;
     }
 
     /* ---- Typography ---- */
@@ -244,6 +275,12 @@ def _inject_css() -> None:
     }
 
     /* ---- Inputs / controls ---- */
+    label[data-testid="stWidgetLabel"] p,
+    .stMarkdown label {
+        font-size: 0.72rem !important;
+        font-weight: 700 !important;
+        color: #5f6d68 !important;
+    }
     .stTextInput input, .stNumberInput input, .stTextArea textarea,
     .stSelectbox [data-baseweb="select"] > div,
     .stDateInput input, .stTimeInput input {
@@ -251,32 +288,64 @@ def _inject_css() -> None:
         border: 1px solid #d1cdc4 !important;
         border-radius: 8px !important;
         color: var(--pj-ink) !important;
-        font-size: 0.88rem !important;
+        font-size: 0.72rem !important;
+        min-height: 34px !important;
+        box-shadow: none !important;
+    }
+    .stTextArea textarea {
+        min-height: 90px !important;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace !important;
+        font-size: 0.72rem !important;
     }
     .stTextInput input:focus, .stNumberInput input:focus, .stTextArea textarea:focus {
         border-color: var(--pj-accent) !important;
         box-shadow: 0 0 0 3px #165dff33 !important;
     }
+    div[data-baseweb="radio"] > div {
+        gap: 0.35rem !important;
+        background: #fff !important;
+        border: 1px solid #d1cdc4 !important;
+        border-radius: 8px !important;
+        padding: 0.2rem !important;
+    }
     div[data-baseweb="radio"] label {
         font-weight: 700 !important;
-        font-size: 0.85rem !important;
+        font-size: 0.72rem !important;
+        border-radius: 6px !important;
+        padding: 0.35rem 0.75rem !important;
+    }
+    .stCheckbox label p {
+        font-size: 0.78rem !important;
+        color: #5f6d68 !important;
     }
 
-    /* ---- Buttons ---- */
+    /* ---- Buttons (secondary / primary / run / danger) ---- */
     .stButton > button {
         border-radius: 9px !important;
         border: 1px solid #c9c6bd !important;
         background: #fbfaf7 !important;
         color: #3f4e4a !important;
-        font-size: 0.78rem !important;
+        font-size: 0.72rem !important;
         font-weight: 700 !important;
-        padding: 0.55rem 0.95rem !important;
-        transition: border-color 0.18s ease, background 0.18s ease !important;
+        padding: 0.62rem 0.95rem !important;
+        min-height: 34px !important;
+        line-height: 1.1 !important;
+        transition: border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease !important;
+        box-shadow: none !important;
     }
     .stButton > button:hover {
         border-color: #7f8d87 !important;
         background: #fff !important;
         color: var(--pj-ink) !important;
+    }
+    .stButton > button:disabled,
+    .stButton > button[disabled] {
+        opacity: 0.45 !important;
+        cursor: not-allowed !important;
+        background: #efece4 !important;
+        color: #8a958e !important;
+        border-color: #d9d5cc !important;
+        box-shadow: none !important;
     }
     .stButton > button[kind="primary"],
     .stButton > button[data-testid="baseButton-primary"] {
@@ -291,24 +360,63 @@ def _inject_css() -> None:
         border-color: #0f4fd6 !important;
         color: #fff !important;
     }
+    .stButton > button[kind="primary"]:disabled,
+    .stButton > button[data-testid="baseButton-primary"]:disabled {
+        background: #9db6f0 !important;
+        border-color: #9db6f0 !important;
+        color: #fff !important;
+        box-shadow: none !important;
+        opacity: 0.7 !important;
+    }
+    /* Green Run now (template .button.run) */
+    div[data-testid="element-container"]:has(.pj-btn-run) + div[data-testid="element-container"] button,
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(.pj-btn-run) button,
+    .pj-run-zone button {
+        background: #1f8a64 !important;
+        border-color: #1f8a64 !important;
+        color: #fff !important;
+        box-shadow: 0 8px 20px #1f8a642b !important;
+    }
+    div[data-testid="element-container"]:has(.pj-btn-run) + div[data-testid="element-container"] button:hover,
+    .pj-run-zone button:hover {
+        background: #187553 !important;
+        border-color: #187553 !important;
+        color: #fff !important;
+    }
+    /* Amber DROP run */
+    div[data-testid="element-container"]:has(.pj-btn-danger) + div[data-testid="element-container"] button,
+    .pj-danger-zone button {
+        background: #c76b2d !important;
+        border-color: #c76b2d !important;
+        color: #fff !important;
+        box-shadow: 0 8px 20px #c76b2d2b !important;
+    }
+    div[data-testid="element-container"]:has(.pj-btn-danger) + div[data-testid="element-container"] button:hover,
+    .pj-danger-zone button:hover {
+        background: #a85720 !important;
+        border-color: #a85720 !important;
+        color: #fff !important;
+    }
+    .pj-btn-marker { display: none !important; }
 
     /* ---- Metrics as template metric cards ---- */
     [data-testid="stMetric"] {
         background: var(--pj-card);
         border: 1px solid var(--pj-line);
         border-radius: 12px;
-        padding: 1rem 1.05rem 0.9rem;
+        padding: 1.05rem 1.1rem 0.95rem;
         box-shadow: 0 4px 15px #4c554c08;
     }
     [data-testid="stMetricLabel"] {
         color: #7e8982 !important;
-        font-size: 0.72rem !important;
+        font-size: 0.68rem !important;
         font-weight: 700 !important;
     }
     [data-testid="stMetricValue"] {
-        font-size: 1.55rem !important;
+        font-size: 1.65rem !important;
         letter-spacing: -0.06em !important;
         color: var(--pj-ink) !important;
+        font-weight: 800 !important;
     }
 
     /* ---- Dataframes / tables ---- */
@@ -320,21 +428,126 @@ def _inject_css() -> None:
         background: var(--pj-card) !important;
         box-shadow: 0 7px 22px #4c554c09;
     }
+    [data-testid="stDataFrame"] thead tr th,
+    [data-testid="stDataFrameResizable"] thead tr th {
+        background: #f7f5f0 !important;
+        color: #98a19b !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.1em !important;
+        font-size: 0.58rem !important;
+        font-weight: 800 !important;
+        border-bottom: 1px solid var(--pj-line) !important;
+    }
+    [data-testid="stDataFrame"] tbody tr:hover td,
+    [data-testid="stDataFrameResizable"] tbody tr:hover td {
+        background: #f0f3f6 !important;
+    }
 
     /* ---- Expanders / alerts ---- */
     [data-testid="stExpander"] {
         border: 1px solid var(--pj-line) !important;
         border-radius: 12px !important;
         background: var(--pj-card) !important;
+        box-shadow: 0 4px 15px #4c554c08;
     }
-    .stAlert {
+    div[data-testid="stAlert"] {
         border-radius: 12px !important;
-        border: 1px solid #c9d4c6 !important;
+        padding: 0.75rem 0.95rem !important;
     }
-    div[data-testid="stNotificationContentSuccess"],
-    .stSuccess {
+    div[data-testid="stAlert"][kind="success"],
+    .stSuccess, div:has(> [data-testid="stNotificationContentSuccess"]) {
         background: #e8f1e5 !important;
-        border-color: #c9d4c6 !important;
+        border: 1px solid #c9d4c6 !important;
+        color: #22543f !important;
+    }
+    div[data-testid="stAlert"][kind="info"] {
+        background: #eef3ff !important;
+        border: 1px solid #cbd7ef !important;
+        color: #40526f !important;
+    }
+    div[data-testid="stAlert"][kind="warning"] {
+        background: #fff0e5 !important;
+        border: 1px solid #e5d2b8 !important;
+        color: #8a4b16 !important;
+    }
+    div[data-testid="stAlert"][kind="error"] {
+        background: #fff0ee !important;
+        border: 1px solid #e5c4bc !important;
+        color: #8a2e26 !important;
+    }
+
+    .pj-topbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.35rem 0 0.85rem;
+        margin: 0 0 0.35rem;
+        border-bottom: 1px solid var(--pj-line);
+    }
+    .pj-heading-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        gap: 1.2rem;
+        margin-bottom: 0.35rem;
+    }
+    .pj-heading-copy { flex: 1; min-width: 0; }
+    .pj-detail-hero {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+        margin: 0.35rem 0 0.75rem;
+        padding: 0.8rem 0.85rem;
+        border: 1px solid #d9e1f5;
+        border-radius: 10px;
+        background: #f1f5ff;
+    }
+    .pj-detail-icon {
+        display: grid;
+        place-items: center;
+        width: 35px;
+        height: 35px;
+        border-radius: 9px;
+        background: #165dff;
+        color: #fff;
+        font-weight: 800;
+        font-size: 0.75rem;
+        flex-shrink: 0;
+    }
+    .pj-detail-hero strong {
+        display: block;
+        font-size: 0.8rem;
+        color: var(--pj-ink);
+    }
+    .pj-detail-hero span {
+        display: block;
+        margin-top: 0.2rem;
+        color: #718078;
+        font-size: 0.65rem;
+    }
+    .pj-op-pill {
+        display: inline-block;
+        padding: 0.25rem 0.45rem;
+        border-radius: 5px;
+        font-size: 0.58rem;
+        font-weight: 800;
+    }
+    .pj-op-pill.create { color: #165dff; background: #e7edff; }
+    .pj-op-pill.drop { color: #c76b2d; background: #ffebe2; }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        border: 1px solid var(--pj-line) !important;
+        border-radius: 13px !important;
+        background: var(--pj-card) !important;
+        box-shadow: 0 7px 22px #4c554c09 !important;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"] > div {
+        background: transparent !important;
+    }
+    .pj-toolbar-note {
+        color: #63716b;
+        font-size: 0.68rem;
+        margin: 0.15rem 0 0.55rem;
     }
 
     /* ---- Custom chrome ---- */
@@ -753,6 +966,14 @@ def _inject_css() -> None:
 
 def _badge(text: str, kind: str = "mute") -> str:
     return f'<span class="pj-badge pj-badge-{kind}">{text}</span>'
+
+
+def _btn_marker(kind: str) -> None:
+    """Invisible marker so CSS can style the next Streamlit button (run/danger)."""
+    st.markdown(
+        f'<span class="pj-btn-marker pj-btn-{kind}"></span>',
+        unsafe_allow_html=True,
+    )
 
 
 def _status_badge_kind(status: Any) -> str:
@@ -1575,89 +1796,90 @@ def _render_pgagent_jobs() -> None:
 
 
 def _render_convert_tab() -> None:
-    st.markdown(
-        '<div class="pj-card"><div class="pj-card-eyebrow">Workflow</div>'
-        '<div class="pj-card-title">Convert an existing pgAgent partition job</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Guided migration: read an old table-specific pgAgent job (read-only) and "
-        "store one parameterised configuration row. The original pgAgent job is "
-        "never modified."
-    )
-
-    if st.session_state.inference_summary is not None:
-        active_step = 3
-    elif st.session_state.load_error:
-        active_step = 2
-    else:
-        active_step = 1
-    _render_step_bar(active_step)
-
-    with st.expander("Browse existing pgAgent jobs (optional)", expanded=False):
-        _render_pgagent_jobs()
-
-    st.markdown("##### Step 1 — Enter pgAgent Job ID")
-    col_id, col_btn = st.columns([1.4, 1])
-    with col_id:
-        st.number_input("pgAgent Job ID", min_value=1, step=1, key="load_job_id")
-    with col_btn:
-        st.write("")
-        if st.button(
-            "Load Job Details",
-            width="stretch",
-            help="Read-only: inspects pgAgent and catalog metadata only",
-        ):
-            _load_job_details(int(st.session_state.load_job_id))
-
-    if st.session_state.step_choices:
-        st.markdown("##### Multiple job steps found")
-        st.caption("Select the step that calls the partition routine, then apply it.")
-        choice_labels = {}
-        for choice in st.session_state.step_choices:
-            routine_label = choice.get("routine_label") or "routine not identified"
-            if choice.get("invocation"):
-                routine_label = f"{choice['invocation']} {routine_label}"
-            step_name = choice.get("step_name") or f"Step {choice.get('step_id')}"
-            choice_labels[choice["step_id"]] = f"{step_name} ({routine_label})"
-        st.selectbox(
-            "Job step",
-            options=list(choice_labels.keys()),
-            format_func=lambda step_id: choice_labels.get(step_id, str(step_id)),
-            key="selected_step_id",
-        )
-        if st.button("Apply Selected Step"):
-            job_id = st.session_state.loaded_job_id or st.session_state.load_job_id
-            _load_job_details(int(job_id), step_id=st.session_state.selected_step_id)
-
-    if st.session_state.load_error:
-        _render_db_error(st.session_state.load_error)
-    if st.session_state.load_info:
-        st.info(st.session_state.load_info)
-
-    if st.session_state.inference_summary:
-        st.markdown("##### Step 2–3 — Review inferred values")
-        _render_inference_summary(st.session_state.inference_summary)
-        st.markdown("##### Step 4 — Edit if needed, then create configuration")
-        st.caption(
-            "Fields below are editable. Values came from pgAgent / routine analysis "
-            "where possible; leave unresolved fields blank only if you intend to "
-            "fix them yourself."
-        )
-        raw, blocking_error = _render_job_fields(CONVERT_PREFIX)
-        st.divider()
-        _render_submit_button(
-            CONVERT_PREFIX, raw, blocking_error, "Create Partition Job"
+    with st.container(border=True):
+        st.markdown(
+            '<div class="pj-card-eyebrow">Workflow</div>'
+            '<div class="pj-card-title">Convert an existing pgAgent partition job</div>',
+            unsafe_allow_html=True,
         )
         st.caption(
-            "The original pgAgent job is never modified, disabled, or deleted. "
-            "Retiring it is a separate DBA decision."
+            "Guided migration: read an old table-specific pgAgent job (read-only) and "
+            "store one parameterised configuration row. The original pgAgent job is "
+            "never modified."
         )
-    else:
-        st.info(
-            "Enter a pgAgent Job ID and click **Load Job Details** to begin. "
-            "Loading is read-only and does not write to the database."
-        )
+
+        if st.session_state.inference_summary is not None:
+            active_step = 3
+        elif st.session_state.load_error:
+            active_step = 2
+        else:
+            active_step = 1
+        _render_step_bar(active_step)
+
+        with st.expander("Browse existing pgAgent jobs (optional)", expanded=False):
+            _render_pgagent_jobs()
+
+        st.markdown("##### Step 1 — Enter pgAgent Job ID")
+        col_id, col_btn = st.columns([1.4, 1])
+        with col_id:
+            st.number_input("pgAgent Job ID", min_value=1, step=1, key="load_job_id")
+        with col_btn:
+            st.write("")
+            if st.button(
+                "Load Job Details",
+                width="stretch",
+                help="Read-only: inspects pgAgent and catalog metadata only",
+            ):
+                _load_job_details(int(st.session_state.load_job_id))
+
+        if st.session_state.step_choices:
+            st.markdown("##### Multiple job steps found")
+            st.caption("Select the step that calls the partition routine, then apply it.")
+            choice_labels = {}
+            for choice in st.session_state.step_choices:
+                routine_label = choice.get("routine_label") or "routine not identified"
+                if choice.get("invocation"):
+                    routine_label = f"{choice['invocation']} {routine_label}"
+                step_name = choice.get("step_name") or f"Step {choice.get('step_id')}"
+                choice_labels[choice["step_id"]] = f"{step_name} ({routine_label})"
+            st.selectbox(
+                "Job step",
+                options=list(choice_labels.keys()),
+                format_func=lambda step_id: choice_labels.get(step_id, str(step_id)),
+                key="selected_step_id",
+            )
+            if st.button("Apply Selected Step"):
+                job_id = st.session_state.loaded_job_id or st.session_state.load_job_id
+                _load_job_details(int(job_id), step_id=st.session_state.selected_step_id)
+
+        if st.session_state.load_error:
+            _render_db_error(st.session_state.load_error)
+        if st.session_state.load_info:
+            st.info(st.session_state.load_info)
+
+        if st.session_state.inference_summary:
+            st.markdown("##### Step 2–3 — Review inferred values")
+            _render_inference_summary(st.session_state.inference_summary)
+            st.markdown("##### Step 4 — Edit if needed, then create configuration")
+            st.caption(
+                "Fields below are editable. Values came from pgAgent / routine analysis "
+                "where possible; leave unresolved fields blank only if you intend to "
+                "fill them yourself."
+            )
+            raw, blocking_error = _render_job_fields(CONVERT_PREFIX)
+            st.divider()
+            _render_submit_button(
+                CONVERT_PREFIX, raw, blocking_error, "Create Partition Job"
+            )
+            st.caption(
+                "The original pgAgent job is never modified, disabled, or deleted. "
+                "Retiring it is a separate DBA decision."
+            )
+        else:
+            st.info(
+                "Enter a pgAgent Job ID and click **Load Job Details** to begin. "
+                "Loading is read-only and does not write to the database."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1666,18 +1888,19 @@ def _render_convert_tab() -> None:
 
 
 def _render_new_job_tab() -> None:
-    st.markdown(
-        '<div class="pj-card"><div class="pj-card-eyebrow">New configuration</div>'
-        '<div class="pj-card-title">Create a new parameterised partition job</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "No pgAgent job is needed. This stores one configuration row that the "
-        "dedicated scheduler backend triggers at the scheduled next_run_time."
-    )
-    raw, blocking_error = _render_job_fields(NEW_PREFIX)
-    st.divider()
-    _render_submit_button(NEW_PREFIX, raw, blocking_error, "Create Partition Job")
+    with st.container(border=True):
+        st.markdown(
+            '<div class="pj-card-eyebrow">New configuration</div>'
+            '<div class="pj-card-title">Create a new parameterised partition job</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "No pgAgent job is needed. This stores one configuration row that the "
+            "dedicated scheduler backend triggers at the scheduled next_run_time."
+        )
+        raw, blocking_error = _render_job_fields(NEW_PREFIX)
+        st.divider()
+        _render_submit_button(NEW_PREFIX, raw, blocking_error, "Create Partition Job")
 
 
 # ---------------------------------------------------------------------------
@@ -1703,11 +1926,21 @@ def _format_config_details(job: dict[str, Any]) -> None:
     interval_label = "Create ahead interval" if is_create else "Retention interval"
     status = job.get("last_run_status") or "—"
     status_kind = _status_badge_kind(status)
+    op_class = "create" if is_create else "drop"
+    job_name = job.get("job_name") or f"Job {job.get('job_id')}"
 
     st.markdown(
-        f'{_badge(operation, "ok" if is_create else "drop")}'
+        f'<div class="pj-detail-hero">'
+        f'<div class="pj-detail-icon">SQL</div>'
+        f"<div><strong>{job_name}</strong>"
+        f"<span>Parameterized partition routine · #{job.get('job_id')}</span>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'{_badge(str(status), status_kind)}'
         f'{_badge("Enabled" if job.get("is_enabled") else "Disabled", "info" if job.get("is_enabled") else "mute")}'
-        f'{_badge(str(status), status_kind)}',
+        f'<span class="pj-op-pill {op_class}">{operation}</span>',
         unsafe_allow_html=True,
     )
 
@@ -1766,7 +1999,11 @@ def _render_manual_run(job: dict[str, Any]) -> None:
     is_create = bool(job.get("is_create"))
     allowed, reason = _manual_run_allowed()
 
-    st.markdown("**Manual run**")
+    st.markdown(
+        '<div class="pj-card-eyebrow">Actions</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown("##### Manual run")
     st.caption(
         "Executes this configured job immediately through "
         "run_partition_job_manual(). The automatic next run time is not changed. "
@@ -1777,7 +2014,8 @@ def _render_manual_run(job: dict[str, Any]) -> None:
         return
 
     if is_create:
-        if st.button("Run CREATE Job Now", key=f"manual_run_{job_id}"):
+        _btn_marker("run")
+        if st.button("▶ Run now", key=f"manual_run_{job_id}", width="stretch"):
             _execute_manual_run(job_id)
     else:
         st.markdown(
@@ -1789,10 +2027,12 @@ def _render_manual_run(job: dict[str, Any]) -> None:
             "I understand that this DROP may permanently remove partition data.",
             key=f"manual_confirm_{job_id}",
         )
+        _btn_marker("danger")
         if st.button(
-            "Run DROP Job Now",
+            "▶ Run DROP now",
             key=f"manual_run_{job_id}",
             disabled=not confirmed,
+            width="stretch",
         ):
             _execute_manual_run(job_id)
 
@@ -1858,135 +2098,145 @@ def _filter_configured_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _render_configured_jobs_tab() -> None:
-    st.markdown(
-        '<div class="pj-card"><div class="pj-card-eyebrow">Live queue</div>'
-        '<div class="pj-card-title">Configured partition jobs</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Every row is one parameterised partition job in "
-        "`mubasher_oms.partitioning_job_table`. These rows replaced the old "
-        "per-table pgAgent jobs."
-    )
+    with st.container(border=True):
+        st.markdown(
+            '<div class="pj-card-eyebrow">Live queue</div>'
+            '<div class="pj-card-title">Configured partition jobs</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Every row is one parameterised partition job in "
+            "`mubasher_oms.partitioning_job_table`. These rows replaced the old "
+            "per-table pgAgent jobs."
+        )
 
-    _ensure_loaded(
-        "partition_jobs",
-        get_partition_jobs,
-        spinner_text="Loading configured jobs...",
-    )
-
-    if st.button("Refresh Configured Jobs", help="Read-only refresh"):
-        _load_into_state(
+        _ensure_loaded(
             "partition_jobs",
             get_partition_jobs,
-            spinner_text="Refreshing configured jobs...",
+            spinner_text="Loading configured jobs...",
         )
 
-    if st.session_state.partition_jobs_error:
-        _render_db_error(st.session_state.partition_jobs_error)
-        st.caption(
-            "SELECT permission on the configuration table is required to list "
-            "configured jobs. Ask a DBA to grant only what is needed."
-        )
-        return
+        refresh_col, _spacer = st.columns([1, 3])
+        with refresh_col:
+            if st.button(
+                "↻ Refresh",
+                key="refresh_configured_jobs",
+                width="stretch",
+                help="Read-only refresh",
+            ):
+                _load_into_state(
+                    "partition_jobs",
+                    get_partition_jobs,
+                    spinner_text="Refreshing configured jobs...",
+                )
 
-    jobs = st.session_state.partition_jobs or []
-    if not jobs:
-        st.info("No parameterised partition jobs are configured yet.")
-        return
+        if st.session_state.partition_jobs_error:
+            _render_db_error(st.session_state.partition_jobs_error)
+            st.caption(
+                "SELECT permission on the configuration table is required to list "
+                "configured jobs. Ask a DBA to grant only what is needed."
+            )
+            return
 
-    enabled_count = sum(1 for job in jobs if job.get("is_enabled"))
-    create_count = sum(1 for job in jobs if job.get("is_create"))
-    drop_count = len(jobs) - create_count
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total", len(jobs))
-    m2.metric("Enabled", enabled_count)
-    m3.metric("CREATE", create_count)
-    m4.metric("DROP", drop_count)
+        jobs = st.session_state.partition_jobs or []
+        if not jobs:
+            st.info("No parameterised partition jobs are configured yet.")
+            return
 
-    f1, f2, f3, f4 = st.columns([1, 1, 1, 2])
-    with f1:
-        st.selectbox(
-            "Operation",
-            options=["All", "CREATE", "DROP"],
-            key="config_op_filter",
-        )
-    with f2:
-        st.selectbox(
-            "Enabled",
-            options=["All", "Enabled", "Disabled"],
-            key="config_enabled_filter",
-        )
-    with f3:
-        status_options = ["All"] + sorted(
-            {
-                str(job.get("last_run_status"))
-                for job in jobs
-                if job.get("last_run_status")
-            }
-        )
-        if st.session_state.config_status_filter not in status_options:
-            st.session_state.config_status_filter = "All"
-        st.selectbox("Status", options=status_options, key="config_status_filter")
-    with f4:
-        st.text_input("Search job / table", key="config_search")
+        enabled_count = sum(1 for job in jobs if job.get("is_enabled"))
+        create_count = sum(1 for job in jobs if job.get("is_create"))
+        drop_count = len(jobs) - create_count
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total", len(jobs))
+        m2.metric("Enabled", enabled_count)
+        m3.metric("CREATE", create_count)
+        m4.metric("DROP", drop_count)
 
-    filtered = _filter_configured_jobs(jobs)
-    st.markdown(
-        f"**Showing {len(filtered)} of {len(jobs)} configured job(s).**"
-    )
-
-    table_rows = []
-    for job in filtered:
-        table_rows.append(
-            {
-                "job_id": job.get("job_id"),
-                "job_name": job.get("job_name"),
-                "enabled": bool(job.get("is_enabled")),
-                "operation": _operation_label(job),
-                "schema.table": _target_table(job),
-                "schedule": job.get("job_schedule"),
-                "next_run_time": job.get("next_run_time"),
-                "last_run_status": job.get("last_run_status"),
-            }
-        )
-    st.dataframe(table_rows, width="stretch", hide_index=True)
-
-    job_ids = [job.get("job_id") for job in filtered if job.get("job_id") is not None]
-    if not job_ids:
-        st.info("No configured jobs match the current filters.")
-        return
-
-    st.divider()
-    if (
-        "selected_config_job_id" in st.session_state
-        and st.session_state.selected_config_job_id not in job_ids
-    ):
-        del st.session_state["selected_config_job_id"]
-    selected = st.selectbox(
-        "Select a configured job",
-        options=job_ids,
-        key="selected_config_job_id",
-        format_func=lambda jid: f"Job {jid}",
-    )
-    chosen = next((job for job in filtered if job.get("job_id") == selected), None)
-    if chosen is None:
-        return
-
-    detail_col, run_col = st.columns([1.35, 0.9])
-    with detail_col:
         st.markdown(
-            '<div class="pj-card-eyebrow">Selected job</div>',
+            '<p class="pj-toolbar-note">Filter the live queue</p>',
             unsafe_allow_html=True,
         )
-        st.markdown("##### Job detail")
-        _format_config_details(chosen)
-    with run_col:
+        f1, f2, f3, f4 = st.columns([1, 1, 1, 2])
+        with f1:
+            st.selectbox(
+                "Operation",
+                options=["All", "CREATE", "DROP"],
+                key="config_op_filter",
+            )
+        with f2:
+            st.selectbox(
+                "Enabled",
+                options=["All", "Enabled", "Disabled"],
+                key="config_enabled_filter",
+            )
+        with f3:
+            status_options = ["All"] + sorted(
+                {
+                    str(job.get("last_run_status"))
+                    for job in jobs
+                    if job.get("last_run_status")
+                }
+            )
+            if st.session_state.config_status_filter not in status_options:
+                st.session_state.config_status_filter = "All"
+            st.selectbox("Status", options=status_options, key="config_status_filter")
+        with f4:
+            st.text_input("Search job / table", key="config_search")
+
+        filtered = _filter_configured_jobs(jobs)
         st.markdown(
-            '<div class="pj-card-eyebrow">Actions</div>',
-            unsafe_allow_html=True,
+            f"**Showing {len(filtered)} of {len(jobs)} configured job(s).**"
         )
-        _render_manual_run(chosen)
+
+        table_rows = []
+        for job in filtered:
+            table_rows.append(
+                {
+                    "job_id": job.get("job_id"),
+                    "job_name": job.get("job_name"),
+                    "enabled": bool(job.get("is_enabled")),
+                    "operation": _operation_label(job),
+                    "schema.table": _target_table(job),
+                    "schedule": job.get("job_schedule"),
+                    "next_run_time": job.get("next_run_time"),
+                    "last_run_status": job.get("last_run_status"),
+                }
+            )
+        st.dataframe(table_rows, width="stretch", hide_index=True)
+
+        job_ids = [job.get("job_id") for job in filtered if job.get("job_id") is not None]
+        if not job_ids:
+            st.info("No configured jobs match the current filters.")
+            return
+
+        st.divider()
+        if (
+            "selected_config_job_id" in st.session_state
+            and st.session_state.selected_config_job_id not in job_ids
+        ):
+            del st.session_state["selected_config_job_id"]
+        selected = st.selectbox(
+            "Select a configured job",
+            options=job_ids,
+            key="selected_config_job_id",
+            format_func=lambda jid: f"Job {jid}",
+        )
+        chosen = next((job for job in filtered if job.get("job_id") == selected), None)
+        if chosen is None:
+            return
+
+        detail_col, run_col = st.columns([1.35, 0.9])
+        with detail_col:
+            with st.container(border=True):
+                st.markdown(
+                    f'<div class="pj-card-eyebrow">Selected job · #{chosen.get("job_id")}</div>'
+                    '<div class="pj-card-title">Job details</div>',
+                    unsafe_allow_html=True,
+                )
+                _format_config_details(chosen)
+        with run_col:
+            with st.container(border=True):
+                _render_manual_run(chosen)
 
 
 # ---------------------------------------------------------------------------
@@ -2014,97 +2264,105 @@ def _filter_logs(logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _render_history_tab() -> None:
-    st.markdown(
-        '<div class="pj-card"><div class="pj-card-eyebrow">Recent activity</div>'
-        '<div class="pj-card-title">Execution history</div></div>',
-        unsafe_allow_html=True,
-    )
-    st.caption(
-        "Latest 100 executions recorded in "
-        "`mubasher_oms.partitioning_job_table_log`."
-    )
+    with st.container(border=True):
+        st.markdown(
+            '<div class="pj-card-eyebrow">Recent activity</div>'
+            '<div class="pj-card-title">Execution history</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Latest 100 executions recorded in "
+            "`mubasher_oms.partitioning_job_table_log`."
+        )
 
-    _ensure_loaded(
-        "partition_job_logs",
-        get_partition_job_logs,
-        100,
-        spinner_text="Loading execution history...",
-    )
-
-    if st.button("Refresh History", help="Read-only refresh"):
-        _load_into_state(
+        _ensure_loaded(
             "partition_job_logs",
             get_partition_job_logs,
             100,
-            spinner_text="Refreshing execution history...",
+            spinner_text="Loading execution history...",
         )
 
-    if st.session_state.partition_job_logs_error:
-        _render_db_error(st.session_state.partition_job_logs_error)
-        st.caption(
-            "SELECT permission on the log table is required to show execution "
-            "history. Ask a DBA to grant only what is needed."
-        )
-        return
+        refresh_col, _spacer = st.columns([1, 3])
+        with refresh_col:
+            if st.button(
+                "↻ Refresh",
+                key="refresh_history",
+                width="stretch",
+                help="Read-only refresh",
+            ):
+                _load_into_state(
+                    "partition_job_logs",
+                    get_partition_job_logs,
+                    100,
+                    spinner_text="Refreshing execution history...",
+                )
 
-    logs = st.session_state.partition_job_logs or []
-    if not logs:
-        st.info("No execution history rows were found.")
-        return
+        if st.session_state.partition_job_logs_error:
+            _render_db_error(st.session_state.partition_job_logs_error)
+            st.caption(
+                "SELECT permission on the log table is required to show execution "
+                "history. Ask a DBA to grant only what is needed."
+            )
+            return
 
-    f1, f2 = st.columns(2)
-    with f1:
-        st.text_input("Filter by job_id", key="history_job_id_filter")
-    with f2:
-        st.selectbox(
-            "Status",
-            options=STATUS_FILTER_OPTIONS,
-            key="history_status_filter",
-        )
+        logs = st.session_state.partition_job_logs or []
+        if not logs:
+            st.info("No execution history rows were found.")
+            return
 
-    filtered = _filter_logs(logs)
-    counts: dict[str, int] = {}
-    for row in filtered:
-        status = str(row.get("last_run_status") or "UNKNOWN")
-        counts[status] = counts.get(status, 0) + 1
-    if counts:
-        metric_cols = st.columns(max(len(counts), 1))
-        for column, (status, count) in zip(metric_cols, sorted(counts.items())):
-            column.metric(status, count)
-            column.markdown(
-                _badge(status, _status_badge_kind(status)),
-                unsafe_allow_html=True,
+        f1, f2 = st.columns(2)
+        with f1:
+            st.text_input("Filter by job_id", key="history_job_id_filter")
+        with f2:
+            st.selectbox(
+                "Status",
+                options=STATUS_FILTER_OPTIONS,
+                key="history_status_filter",
             )
 
-    st.markdown(f"**Showing {len(filtered)} of {len(logs)} log row(s).**")
-    table_rows = []
-    for row in filtered:
-        error = row.get("job_error")
-        table_rows.append(
-            {
-                "job_log_id": row.get("job_log_id"),
-                "job_id": row.get("job_id"),
-                "job_name": row.get("job_name"),
-                "last_run_status": row.get("last_run_status"),
-                "job_runtime": row.get("job_runtime"),
-                "job_error": _shorten(error, 120),
-            }
-        )
-    st.dataframe(table_rows, width="stretch", hide_index=True)
-
-    long_errors = [
-        row
-        for row in filtered
-        if row.get("job_error") and len(str(row.get("job_error"))) > 120
-    ]
-    if long_errors:
-        with st.expander("Expand full error messages", expanded=False):
-            for row in long_errors:
-                st.markdown(
-                    f"**Log {row.get('job_log_id')} / Job {row.get('job_id')} "
-                    f"({row.get('last_run_status')}):**"
+        filtered = _filter_logs(logs)
+        counts: dict[str, int] = {}
+        for row in filtered:
+            status = str(row.get("last_run_status") or "UNKNOWN")
+            counts[status] = counts.get(status, 0) + 1
+        if counts:
+            metric_cols = st.columns(max(len(counts), 1))
+            for column, (status, count) in zip(metric_cols, sorted(counts.items())):
+                column.metric(status, count)
+                column.markdown(
+                    _badge(status, _status_badge_kind(status)),
+                    unsafe_allow_html=True,
                 )
-                st.code(str(row.get("job_error")))
+
+        st.markdown(f"**Showing {len(filtered)} of {len(logs)} log row(s).**")
+        table_rows = []
+        for row in filtered:
+            error = row.get("job_error")
+            table_rows.append(
+                {
+                    "job_log_id": row.get("job_log_id"),
+                    "job_id": row.get("job_id"),
+                    "job_name": row.get("job_name"),
+                    "last_run_status": row.get("last_run_status"),
+                    "job_runtime": row.get("job_runtime"),
+                    "job_error": _shorten(error, 120),
+                }
+            )
+        st.dataframe(table_rows, width="stretch", hide_index=True)
+
+        long_errors = [
+            row
+            for row in filtered
+            if row.get("job_error") and len(str(row.get("job_error"))) > 120
+        ]
+        if long_errors:
+            with st.expander("Expand full error messages", expanded=False):
+                for row in long_errors:
+                    st.markdown(
+                        f"**Log {row.get('job_log_id')} / Job {row.get('job_id')} "
+                        f"({row.get('last_run_status')}):**"
+                    )
+                    st.code(str(row.get("job_error")))
 
 
 # ---------------------------------------------------------------------------
@@ -2281,8 +2539,7 @@ def _header_status_badges() -> None:
 
     st.markdown(
         f'<div class="pj-header-meta">{db_badge}'
-        f'{_badge("Realtime scheduler", "info")}'
-        f'{_badge("Theme: light", "info")}</div>',
+        f'{_badge("Realtime scheduler", "info")}</div>',
         unsafe_allow_html=True,
     )
 
@@ -2322,17 +2579,47 @@ def _header_status_badges() -> None:
 
 def _render_header(active_view: str) -> None:
     st.markdown(
-        f'<div class="pj-breadcrumb"><span>Workspace</span><span>/</span>'
-        f"<strong>{NAV_SIDEBAR_LABELS.get(active_view, active_view)}</strong></div>",
+        f'<div class="pj-topbar"><div class="pj-breadcrumb"><span>Workspace</span>'
+        f'<span>/</span><strong>{NAV_SIDEBAR_LABELS.get(active_view, active_view)}'
+        f"</strong></div></div>",
         unsafe_allow_html=True,
     )
-    st.markdown(
-        '<div class="pj-eyebrow"><span class="pj-eyebrow-dot"></span>'
-        "Operations console</div>",
-        unsafe_allow_html=True,
-    )
-    st.title(PAGE_TITLE)
-    st.markdown(f'<p class="pj-subtitle">{PAGE_SUBTITLE}</p>', unsafe_allow_html=True)
+
+    title_col, action_col = st.columns([3.2, 1.35])
+    with title_col:
+        st.markdown(
+            '<div class="pj-eyebrow"><span class="pj-eyebrow-dot"></span>'
+            "Operations console</div>",
+            unsafe_allow_html=True,
+        )
+        st.title(PAGE_TITLE)
+        st.markdown(
+            f'<p class="pj-subtitle">{PAGE_SUBTITLE}</p>',
+            unsafe_allow_html=True,
+        )
+    with action_col:
+        btn_a, btn_b = st.columns(2)
+        with btn_a:
+            if st.button("↻ Refresh", key="hdr_refresh", width="stretch", help="Re-check readiness and scheduler"):
+                st.session_state.pop("_scheduler_status_bundle", None)
+                _load_into_state(
+                    "database_readiness",
+                    get_database_readiness,
+                    spinner_text="Checking database readiness...",
+                )
+                st.session_state["_scheduler_status_bundle"] = fetch_scheduler_status()
+                st.rerun()
+        with btn_b:
+            if st.button(
+                "+ New job",
+                key="hdr_new_job",
+                type="primary",
+                width="stretch",
+                help="Open Create New Job",
+            ):
+                st.session_state.main_nav = NAV_CREATE
+                st.rerun()
+
     _header_status_badges()
 
 
@@ -2369,13 +2656,23 @@ def _render_sidebar_scheduler_chip() -> None:
         f"<div><strong>{title}</strong><span>{detail}</span></div></div>",
         unsafe_allow_html=True,
     )
+    st.markdown(
+        '<div class="pj-workspace" style="margin-top:0.85rem;margin-bottom:0">'
+        '<div class="pj-workspace-avatar">DB</div>'
+        "<div><span>Operator</span><strong>Streamlit UI</strong></div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _render_page_footer() -> None:
+    ok, status, _message = _probe_scheduler()
+    heartbeat = "offline"
+    if ok and status:
+        heartbeat = str(status.get("last_refresh_result") or "ok")
     st.markdown(
         '<div class="pj-footer">'
         "<strong>partition.ops</strong>"
-        "<span>Streamlit configuration UI · schedule-driven backend</span>"
+        f"<span>Scheduler heartbeat · {heartbeat}</span>"
         "<span>All systems operational</span>"
         "</div>",
         unsafe_allow_html=True,
