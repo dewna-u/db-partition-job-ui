@@ -7,21 +7,18 @@ Wants=network-online.target
 Type=simple
 User=partitionui
 Group=partitionui
-WorkingDirectory=/opt/partition-job-ui
-EnvironmentFile=/opt/partition-job-ui/.env
+WorkingDirectory=/opt/db-partition-job-ui-github/partition-job-ui
+# Leading '-' = optional; service still starts if file is briefly missing during edit.
+EnvironmentFile=-/opt/db-partition-job-ui-github/partition-job-ui/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/partition-job-ui/.venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000
+# python -m avoids needing a separate uvicorn console script in .venv/bin
+ExecStart=/opt/db-partition-job-ui-github/partition-job-ui/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
 UMask=0077
 
 [Install]

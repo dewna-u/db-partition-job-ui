@@ -276,16 +276,17 @@ Confirm:
 ## 11. Systemd setup
 
 ```bash
-sudo cp \
-  /opt/partition-job-ui/partition-job-ui.service \
-  /etc/systemd/system/partition-job-ui.service
+sudo cp /opt/partition-job-ui/systemd/partition-job-api.service \
+  /usr/lib/systemd/system/partition-job-api.service
+sudo cp /opt/partition-job-ui/partition-job-ui.service \
+  /usr/lib/systemd/system/partition-job-ui.service
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now partition-job-ui.service
-sudo systemctl status partition-job-ui.service
+sudo systemctl enable --now partition-job-api.service partition-job-ui.service
+sudo systemctl status partition-job-api.service partition-job-ui.service --no-pager -l
 ```
 
-The unit runs as `partitionui` / `partitionui`, not as root, and restarts only on failure.
+Units live under `/usr/lib/systemd/system/`. They run as `partitionui` / `partitionui`, not as root, and restart only on failure.
 
 ## 12. Internal network and firewall restriction
 
@@ -535,7 +536,8 @@ Control API (localhost by default):
 
 ### systemd (prepare only — do not auto-install from Cursor)
 
-Unit file: `systemd/partition-job-scheduler.service`
+Unit file: `systemd/partition-job-scheduler.service`  
+Install target on this host: `/usr/lib/systemd/system/`
 
 ### Troubleshooting (scheduler)
 

@@ -1,63 +1,49 @@
 # Modern web UI (Next.js) — Streamlit archived
 
-Streamlit presentation files were moved to `archives/streamlit-ui-*.zip`.
-The live UI is Next.js + FastAPI.
+Live stack: **Next.js + FastAPI**. Streamlit UI is in `archives/streamlit-ui-*.zip`.
 
-## Architecture
+## Deploy path (this host)
 
-```
-Browser
-  -> Next.js (port 8501)          frontend/
-       /api/* rewrites
-  -> FastAPI (127.0.0.1:8000)     api/
-  -> database.py / validators / job_autofill
-  -> scheduler_backend (unchanged)
+```text
+/opt/db-partition-job-ui-github/partition-job-ui
 ```
 
-Routes:
-- `/` Overview
-- `/convert` Convert existing job
-- `/jobs/new` Create new job
-- `/jobs` Configured jobs
-- `/history` Execution history
+Do **not** use `/opt/partition-job-ui` in systemd units on this server.
 
-Sidebar-only navigation (no top page tabs).
+## Fix / install services (run as root)
+
+```bash
+cd /opt/db-partition-job-ui-github/partition-job-ui
+bash scripts/fix-systemd-web-ui.sh
+```
+
+That script:
+
+1. Installs FastAPI/uvicorn into `.venv`
+2. Fixes `frontend/` ownership (`partitionui` must own `.next` + `node_modules`)
+3. Writes correct units to `/usr/lib/systemd/system/`
+4. Removes stale `/etc/systemd/system/` overrides
+5. Restarts and health-checks
+
+Units:
+
+| Unit | Port | Role |
+|---|---|---|
+| `partition-job-api.service` | `127.0.0.1:8000` | FastAPI |
+| `partition-job-ui.service` | `0.0.0.0:8501` | Next.js (proxies `/api/*`) |
+
+## Why it failed before
+
+| Code | Real cause |
+|---|---|
+| `203/EXEC` | ExecStart used `/opt/partition-job-ui/.venv/bin/uvicorn` — wrong tree + no uvicorn binary |
+| `200/CHDIR` | WorkingDirectory was `/opt/partition-job-ui/frontend` — that path does not exist |
 
 ## Local development
 
 ```bash
-# API
-pip install -r requirements.txt
-uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
-
-# Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev
-```
-
-Open http://localhost:3000  
-Dev can leave `NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000` in `.env.local`,
-or rely on Next rewrites (empty base URL) after `next build`.
-
-## Production (systemd)
-
-```bash
-cd /opt/partition-job-ui   # or your deploy path
-git pull
 .venv/bin/pip install -r requirements.txt
-cd frontend && npm ci && npm run build && cd ..
+.venv/bin/python -m uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
 
-sudo cp systemd/partition-job-api.service /etc/systemd/system/
-sudo cp partition-job-ui.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now partition-job-api.service
-sudo systemctl restart partition-job-ui.service
-sudo systemctl status partition-job-api.service partition-job-ui.service --no-pager -l
+cd frontend && npm install && npm run dev
 ```
-
-UI stays on **port 8501**. API listens on localhost **8000** only.
-
-## Restore Streamlit (optional)
-
-See `archives/README.md`. Do not unzip over the live tree unless intentional.

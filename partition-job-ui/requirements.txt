@@ -1,4 +1,5 @@
 # Shared Python runtime for FastAPI + scheduler (Streamlit removed from active tree)
+# Server venv is Python 3.9 — keep annotations 3.9-compatible (Optional[], not |).
 psycopg[binary]>=3.2,<4.0
 python-dotenv>=1.0,<2.0
 fastapi>=0.115,<1.0

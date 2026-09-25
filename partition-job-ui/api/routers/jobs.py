@@ -98,7 +98,7 @@ def create_job(body: JobCreateBody):
 
 
 @router.post("/jobs/{job_id}/run")
-def run_job(job_id: int, body: ManualRunBody | None = None):
+def run_job(job_id: int, body: Optional[ManualRunBody] = None):
     body = body or ManualRunBody()
     try:
         readiness = get_database_readiness()

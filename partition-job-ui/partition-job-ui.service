@@ -1,30 +1,24 @@
 [Unit]
 Description=Partition Manager UI (Next.js)
 After=network-online.target partition-job-api.service
-Wants=network-online.target
-Requires=partition-job-api.service
+Wants=network-online.target partition-job-api.service
 
 [Service]
 Type=simple
 User=partitionui
 Group=partitionui
-WorkingDirectory=/opt/partition-job-ui/frontend
-EnvironmentFile=-/opt/partition-job-ui/.env
+WorkingDirectory=/opt/db-partition-job-ui-github/partition-job-ui/frontend
+EnvironmentFile=-/opt/db-partition-job-ui-github/partition-job-ui/.env
 Environment=NODE_ENV=production
 Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8000
-# Same-origin /api proxy — leave NEXT_PUBLIC_API_BASE_URL empty.
-ExecStart=/usr/bin/npm run start -- --hostname 0.0.0.0 --port 8501
+# Call local Next binary directly (more reliable than npm under systemd).
+ExecStart=/opt/db-partition-job-ui-github/partition-job-ui/frontend/node_modules/.bin/next start --hostname 0.0.0.0 --port 8501
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
 UMask=0077
 
 [Install]

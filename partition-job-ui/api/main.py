@@ -40,6 +40,7 @@ app.include_router(dashboard.router, prefix="/api")
 app.include_router(cron.router, prefix="/api")
 
 
+@app.get("/health")
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "service": "partition-manager-api"}
