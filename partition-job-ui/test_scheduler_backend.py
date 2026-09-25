@@ -345,15 +345,13 @@ class SchedulerClientTests(unittest.TestCase):
         self.assertIn("unavailable", message.lower())
 
 
-class StreamlitRefreshOrderingTests(unittest.TestCase):
+class ApiRefreshOrderingTests(unittest.TestCase):
     def test_submit_calls_refresh_after_create(self) -> None:
-        import app
-
-        source = inspect.getsource(app.submit_partition_configuration)
+        with open("api/routers/jobs.py", encoding="utf-8") as handle:
+            source = handle.read()
         create_at = source.index("create_partition_job(validated)")
         refresh_at = source.index("notify_scheduler_refresh()")
         self.assertLess(create_at, refresh_at)
-        self.assertIn("DB connection is already closed", source)
 
     def test_create_partition_job_closes_before_return(self) -> None:
         import database

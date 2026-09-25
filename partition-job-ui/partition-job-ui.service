@@ -1,16 +1,19 @@
 [Unit]
-Description=Partition Job Configuration UI
-After=network-online.target
+Description=Partition Manager UI (Next.js)
+After=network-online.target partition-job-api.service
 Wants=network-online.target
+Requires=partition-job-api.service
 
 [Service]
 Type=simple
 User=partitionui
 Group=partitionui
-WorkingDirectory=/opt/partition-job-ui
-EnvironmentFile=/opt/partition-job-ui/.env
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/partition-job-ui/.venv/bin/streamlit run /opt/partition-job-ui/app.py --server.address=0.0.0.0 --server.port=8501 --server.headless=true
+WorkingDirectory=/opt/partition-job-ui/frontend
+EnvironmentFile=-/opt/partition-job-ui/.env
+Environment=NODE_ENV=production
+Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8000
+# Same-origin /api proxy — leave NEXT_PUBLIC_API_BASE_URL empty.
+ExecStart=/usr/bin/npm run start -- --hostname 0.0.0.0 --port 8501
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

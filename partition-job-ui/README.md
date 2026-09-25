@@ -6,9 +6,13 @@ git -c safe.directory=/opt/db-partition-job-ui-github pull --ff-only origin main
 
 chown -R partitionui:partitionui /opt/db-partition-job-ui-github
 
-systemctl restart partition-job-ui.service
+# Install Python API deps + build Next.js UI
+sudo -u partitionui /opt/db-partition-job-ui-github/.venv/bin/pip install -r /opt/db-partition-job-ui-github/requirements.txt
+cd /opt/db-partition-job-ui-github/frontend && sudo -u partitionui npm ci && sudo -u partitionui npm run build
 
-systemctl status partition-job-ui.service --no-pager -l
+systemctl restart partition-job-api.service partition-job-ui.service
+
+systemctl status partition-job-api.service partition-job-ui.service --no-pager -l
 
 
 
@@ -16,7 +20,11 @@ systemctl status partition-job-ui.service --no-pager -l
 
 # Partition Job Configuration UI
 
-Lightweight internal Streamlit application for configuring PostgreSQL/EDB partition jobs through an existing database function and listing pgAgent jobs with their job IDs.
+Next.js + FastAPI operations console for configuring PostgreSQL/EDB partition jobs
+through the existing database function and listing pgAgent jobs with their job IDs.
+
+> Streamlit UI was archived to `archives/streamlit-ui-*.zip` (not deleted permanently).
+> See `WEB.md` for the current run/deploy instructions.
 
 ## 1. Purpose
 
@@ -30,7 +38,7 @@ Administrators use this UI to:
 The UI never inserts into the partition job table directly — the function is the
 only write path.
 
-The browser never connects directly to PostgreSQL. All database access happens from the Streamlit process running on the database server.
+The browser never connects directly to PostgreSQL. All database access happens from the FastAPI process on the database server (Next.js proxies `/api/*`).
 
 ## 2. Lightweight architecture
 
@@ -38,58 +46,40 @@ The browser never connects directly to PostgreSQL. All database access happens f
 Administrator’s Browser
         |
         v
-Streamlit UI on Database Server
+Next.js UI on Database Server (:8501)
         |
-        +--> Local PostgreSQL/EDB database
-        |      |
-        |      +--> insert_data_to_partition_job_table(...)
+        +--> FastAPI (:8000 localhost) --> PostgreSQL/EDB
         |
-        +--> pgAgent database
-               |
-               +--> Read-only query of pgagent.pga_job
+        +--> scheduler_backend (separate systemd unit)
 ```
 
-Design goals:
-
-* Very low idle CPU and memory (no GPU, no ML, no charts, no polling)
-* Short-lived database connections only
-* File watching disabled
-* No background threads or automatic page refresh
-* Partition function and pgAgent may live in the same database or different databases
+Design goals and current runbook: see `WEB.md`.
 
 ## 3. Project structure
 
 ```text
 partition-job-ui/
-├── app.py
+├── frontend/                 # Next.js UI
+├── api/                      # FastAPI facade
+├── archives/                 # Streamlit UI zip (archived)
 ├── database.py
 ├── validators.py
 ├── job_autofill.py
 ├── scheduler_client.py
+├── dashboard_metrics.py
 ├── scheduler_backend/
-│   ├── main.py
-│   ├── scheduler.py
-│   ├── queue_manager.py
-│   ├── scheduler_database.py
-│   └── models.py
 ├── sql/
-│   ├── preflight_realtime_database.sql
-│   ├── bootstrap_partition_job_framework.sql
-│   ├── capture_reference_framework_functions.sql
-│   ├── realtime_scheduler_v1.sql
-│   └── integration_test_disposable.sql
-├── systemd/
-│   └── partition-job-scheduler.service
 ├── scripts/
 │   └── check_migration_gate.py
+├── systemd/
+│   ├── partition-job-api.service
+│   └── partition-job-scheduler.service
+├── partition-job-ui.service  # Next.js UI unit
 ├── requirements.txt
 ├── .env.example
 ├── .env.realtime.example
-├── .gitignore
-├── README.md
-├── partition-job-ui.service
-└── .streamlit/
-    └── config.toml
+├── WEB.md
+└── README.md
 ```
 
 ## 4. Prerequisites
@@ -262,15 +252,12 @@ Never commit `.env`. It is listed in `.gitignore`.
 
 ## 10. Manual testing
 
-Local-only smoke test (bind to localhost):
+See `WEB.md`. Quick production-style check after build:
 
 ```bash
-sudo -u partitionui \
-  /opt/partition-job-ui/.venv/bin/streamlit run \
-  /opt/partition-job-ui/app.py \
-  --server.address=127.0.0.1 \
-  --server.port=8501 \
-  --server.headless=true
+sudo systemctl start partition-job-api.service partition-job-ui.service
+curl -sS http://127.0.0.1:8501/ | head
+curl -sS http://127.0.0.1:8000/api/health
 ```
 
 Open:
@@ -394,8 +381,8 @@ Do not share one `.env` across environments — each server has its own secrets.
 * `.env` is git-ignored and should be mode `600`, owned by `partitionui`.
 * All SQL uses Psycopg parameter binding; user input is never concatenated into SQL.
 * Schema/table names are validated as unquoted PostgreSQL identifiers before use as bound parameters.
-* CORS and XSRF protection remain enabled in `.streamlit/config.toml`.
-* Error details are hidden from the browser (`showErrorDetails = false`).
+* Next.js proxies `/api/*` to localhost FastAPI; API is not exposed publicly by default.
+* Error details from the API are returned as structured JSON messages without SQL secrets.
 * Systemd hardening: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome`, and related options.
 * The UI role must not be a superuser and must not receive write privileges on pgAgent tables.
 * Restrict network access to trusted administrators only.
@@ -404,24 +391,16 @@ Do not share one `.env` across environments — each server has its own secrets.
 
 ## Local development (Windows / workstation)
 
-From the project directory:
+See `WEB.md` for the current Next.js + FastAPI workflow.
 
 ```bash
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 copy .env.example .env
 # Edit .env with real connection settings
-.venv\Scripts\streamlit run app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true
-```
-
-On Linux/macOS:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-cp .env.example .env
-# Edit .env
-.venv/bin/streamlit run app.py --server.address=127.0.0.1 --server.port=8501 --server.headless=true
+.venv\Scripts\uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+# In another terminal:
+cd frontend && npm install && npm run dev
 ```
 
 ---

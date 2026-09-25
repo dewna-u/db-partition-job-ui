@@ -480,7 +480,7 @@ class DbConfigExtractionTests(unittest.TestCase):
     def test_no_dummy_defaults_remain_in_autofill_modules(self) -> None:
         # Guards against a demo default creeping back into the production path.
         source_dir = os.path.dirname(os.path.abspath(__file__))
-        for module_name in ("job_autofill.py", "database.py", "app.py"):
+        for module_name in ("job_autofill.py", "database.py", "api/routers/jobs.py"):
             path = os.path.join(source_dir, module_name)
             with open(path, encoding="utf-8") as handle:
                 source = handle.read()
@@ -969,7 +969,7 @@ class DbConfigPassThroughTests(unittest.TestCase):
 
     def test_application_never_injects_a_default_lock_timeout(self) -> None:
         source_dir = os.path.dirname(os.path.abspath(__file__))
-        for module_name in ("job_autofill.py", "database.py", "app.py"):
+        for module_name in ("job_autofill.py", "database.py", "api/routers/jobs.py"):
             path = os.path.join(source_dir, module_name)
             with open(path, encoding="utf-8") as handle:
                 source = handle.read()
@@ -1165,7 +1165,12 @@ class ArchitectureTests(unittest.TestCase):
 
     def _sources(self) -> dict[str, str]:
         sources = {}
-        for name in ("app.py", "database.py", "validators.py", "job_autofill.py"):
+        for name in (
+            "api/routers/jobs.py",
+            "database.py",
+            "validators.py",
+            "job_autofill.py",
+        ):
             with open(name, "r", encoding="utf-8") as handle:
                 sources[name] = handle.read()
         return sources
@@ -1196,17 +1201,16 @@ class ArchitectureTests(unittest.TestCase):
             ):
                 self.assertNotIn(forbidden, lowered, name)
 
-    def test_both_tabs_share_one_submission_pathway(self) -> None:
-        import app
-
-        source = inspect.getsource(app)
-        # Exactly one place calls the database create method.
+    def test_create_and_convert_share_one_api_create_pathway(self) -> None:
+        with open("api/routers/jobs.py", encoding="utf-8") as handle:
+            source = handle.read()
         self.assertEqual(source.count("create_partition_job(validated)"), 1)
-        self.assertIn("def submit_partition_configuration", source)
-        # Both prefixes flow through the same field renderer and submit button.
-        self.assertIn("_render_job_fields(CONVERT_PREFIX)", source)
-        self.assertIn("_render_job_fields(NEW_PREFIX)", source)
-        self.assertEqual(source.count("_render_submit_button("), 3)
+        self.assertIn("def create_job", source)
+        self.assertIn("notify_scheduler_refresh()", source)
+        self.assertLess(
+            source.index("create_partition_job(validated)"),
+            source.index("notify_scheduler_refresh()"),
+        )
 
     def test_generic_scanner_names_are_defined(self) -> None:
         self.assertEqual(database.GENERIC_CREATE_SCANNER, "run_partition_create_jobs")

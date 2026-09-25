@@ -1,0 +1,28 @@
+[Unit]
+Description=Partition Manager API (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=partitionui
+Group=partitionui
+WorkingDirectory=/opt/partition-job-ui
+EnvironmentFile=/opt/partition-job-ui/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/partition-job-ui/.venv/bin/uvicorn api.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

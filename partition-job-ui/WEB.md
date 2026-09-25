@@ -1,15 +1,18 @@
-# Modern web stack (Streamlit remains available during migration)
+# Modern web UI (Next.js) — Streamlit archived
+
+Streamlit presentation files were moved to `archives/streamlit-ui-*.zip`.
+The live UI is Next.js + FastAPI.
 
 ## Architecture
 
 ```
-frontend/   Next.js + React + TypeScript + Tailwind  (presentation)
-api/        FastAPI                                   (HTTP facade)
-database.py / validators.py / job_autofill.py         (unchanged)
-scheduler_backend/                                    (unchanged realtime process)
+Browser
+  -> Next.js (port 8501)          frontend/
+       /api/* rewrites
+  -> FastAPI (127.0.0.1:8000)     api/
+  -> database.py / validators / job_autofill
+  -> scheduler_backend (unchanged)
 ```
-
-Navigation is **sidebar-only** (no top page tabs).
 
 Routes:
 - `/` Overview
@@ -18,33 +21,43 @@ Routes:
 - `/jobs` Configured jobs
 - `/history` Execution history
 
-## Run API
+Sidebar-only navigation (no top page tabs).
 
-From `partition-job-ui/` (so imports resolve to existing modules):
+## Local development
 
 ```bash
-pip install -r api/requirements.txt
+# API
+pip install -r requirements.txt
 uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
-```
 
-Uses the same `.env` as Streamlit for DB and scheduler URLs.
-
-## Run frontend
-
-```bash
+# Frontend (separate terminal)
 cd frontend
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000
+Open http://localhost:3000  
+Dev can leave `NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000` in `.env.local`,
+or rely on Next rewrites (empty base URL) after `next build`.
 
-Optional: set `NEXT_PUBLIC_API_BASE_URL` (defaults to `http://127.0.0.1:8000`).
+## Production (systemd)
 
-## What did not change
+```bash
+cd /opt/partition-job-ui   # or your deploy path
+git pull
+.venv/bin/pip install -r requirements.txt
+cd frontend && npm ci && npm run build && cd ..
 
-- PostgreSQL SQL functions and tables
-- `create_partition_job` / `run_partition_job_manual`
-- `scheduler_backend` queue/timer execution
-- Short-lived DB connections
-- Validation and job_autofill detection logic
+sudo cp systemd/partition-job-api.service /etc/systemd/system/
+sudo cp partition-job-ui.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now partition-job-api.service
+sudo systemctl restart partition-job-ui.service
+sudo systemctl status partition-job-api.service partition-job-ui.service --no-pager -l
+```
+
+UI stays on **port 8501**. API listens on localhost **8000** only.
+
+## Restore Streamlit (optional)
+
+See `archives/README.md`. Do not unzip over the live tree unless intentional.
