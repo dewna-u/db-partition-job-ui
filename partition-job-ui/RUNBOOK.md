@@ -1,17 +1,25 @@
-# Partition Manager — Installation Runbook
+# PartOps — Installation Runbook
 
 Audience: teammates installing or redeploying when the owner is unavailable.
+
+Product: **PartOps** — GTN EDB Partition Operations Platform.
 
 This is the **live** stack:
 
 | Layer | Technology | Service | Port |
 |---|---|---|---|
 | UI | Next.js | `partition-job-ui.service` | `8501` (public to admins) |
-| API | FastAPI | `partition-job-api.service` | `127.0.0.1:8000` (localhost only) |
+| API | FastAPI | `partition-job-api.service` | `127.0.0.1:8001` (localhost only) |
 | Scheduler | Python backend | `partition-job-scheduler.service` | `127.0.0.1:8765` (control API) |
-| Data | PostgreSQL / EDB | — | as configured in `.env` |
+| Data | PostgreSQL / EDB | — | as configured in `.env` / `.env.realtime` |
+
+> **Port note:** Another unrelated application on this host uses port **8000**.  
+> PartOps FastAPI **must** use **8001**. Do not point PartOps at 8000.
 
 Streamlit is **archived** (not used). Do not start Streamlit.
+
+The UI/API can operate while the scheduler is offline, but the scheduler is
+**REQUIRED** for automatic realtime partition execution.
 
 ---
 
@@ -61,8 +69,19 @@ cd /opt/db-partition-job-ui-github
 GIT_SSH_COMMAND='ssh -i /root/.ssh/partition_job_ui_github -o IdentitiesOnly=yes' \
   git -c safe.directory=/opt/db-partition-job-ui-github pull --ff-only origin main
 
-chown -R partitionui:partitionui /opt/db-partition-job-ui-github
+# Prefer owning application code as partitionui, then restore env file owners.
+chown -R partitionui:partitionui /opt/db-partition-job-ui-github/partition-job-ui
 cd /opt/db-partition-job-ui-github/partition-job-ui
+
+# CRITICAL: recursive chown must not leave .env.realtime owned by partitionui.
+if [[ -f .env ]]; then
+  chown partitionui:partitionui .env
+  chmod 600 .env
+fi
+if [[ -f .env.realtime ]]; then
+  chown enterprisedb:enterprisedb .env.realtime
+  chmod 600 .env.realtime
+fi
 ```
 
 Confirm layout:
@@ -71,7 +90,11 @@ Confirm layout:
 pwd
 # expect: /opt/db-partition-job-ui-github/partition-job-ui
 
-ls -la api/main.py frontend package.json database.py .venv/bin/python
+ls -la \
+  api/main.py \
+  frontend/package.json \
+  database.py \
+  .venv/bin/python
 ```
 
 ---
@@ -126,11 +149,32 @@ Never commit `.env`.
 ```bash
 cp -n .env.realtime.example .env.realtime
 chmod 600 .env.realtime
-# owner is usually the scheduler OS user (often enterprisedb) — match your unit file
+chown enterprisedb:enterprisedb .env.realtime
 vi .env.realtime
 ```
 
 `REALTIME_DB_EXPECTED_NAME` **must** equal `current_database()` on that DB.
+
+Required concepts in `.env.realtime`:
+
+```bash
+REALTIME_DB_EXPECTED_NAME=<database>
+PARTITION_SCHEDULER_BIND_HOST=127.0.0.1
+PARTITION_SCHEDULER_BIND_PORT=8765
+```
+
+The scheduler process loads **only** `.env.realtime` (never UI `.env`).
+
+Env ownership must remain:
+
+```text
+.env            partitionui:partitionui      mode 600
+.env.realtime   enterprisedb:enterprisedb   mode 600
+```
+
+Do **not** `chmod 644/666/777` env files to “fix” Permission denied.
+
+Never commit `.env.realtime`.
 
 ---
 
@@ -141,12 +185,11 @@ cd /opt/db-partition-job-ui-github/partition-job-ui
 
 # Create venv once if missing
 if [[ ! -x .venv/bin/python ]]; then
-  python3 -m venv .venv
-  chown -R partitionui:partitionui .venv
+  sudo -u partitionui python3 -m venv .venv
 fi
 
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+sudo -u partitionui .venv/bin/pip install --upgrade pip
+sudo -u partitionui .venv/bin/pip install -r requirements.txt
 
 # Smoke import (must succeed on Python 3.9)
 sudo -u partitionui .venv/bin/python -c "import fastapi, uvicorn, api.main; print('API imports OK')"
@@ -159,19 +202,22 @@ sudo -u partitionui .venv/bin/python -c "import fastapi, uvicorn, api.main; prin
 ```bash
 cd /opt/db-partition-job-ui-github/partition-job-ui/frontend
 
-# Prefer ci when lockfile exists
+# Prefer ci when lockfile exists — run as partitionui to avoid root-owned .next
 if [[ -f package-lock.json ]]; then
-  npm ci
+  sudo -u partitionui npm ci
 else
-  npm install
+  sudo -u partitionui npm install
 fi
 
-npm run build
+sudo -u partitionui npm run build
 test -d .next
 test -x node_modules/.bin/next
 
 cd ..
 chown -R partitionui:partitionui frontend
+# Restore env owners if a prior recursive chown touched them
+[[ -f .env ]] && chown partitionui:partitionui .env && chmod 600 .env
+[[ -f .env.realtime ]] && chown enterprisedb:enterprisedb .env.realtime && chmod 600 .env.realtime
 ```
 
 > If `.next` / `node_modules` stay owned by `root`, the UI service (`User=partitionui`) will fail later.
@@ -226,13 +272,19 @@ Both must reference:
 API ExecStart must look like:
 
 ```text
-.../.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+.../.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
 ```
 
 UI ExecStart must look like:
 
 ```text
 .../frontend/node_modules/.bin/next start --hostname 0.0.0.0 --port 8501
+```
+
+UI unit must also set:
+
+```text
+Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8001
 ```
 
 ### 6.4 Enable and start
@@ -263,22 +315,21 @@ systemctl is-active partition-job-ui.service
 
 # API health (wait a second after restart)
 sleep 2
-curl -sS http://127.0.0.1:8000/api/health; echo
-curl -sS http://127.0.0.1:8000/health; echo
-# expect: {"ok":true,"service":"partition-manager-api"}
+curl -sS http://127.0.0.1:8001/api/health; echo
+# expect: {"ok":true,"service":"partops-api"}
 
 # UI responds
 curl -sS -o /dev/null -w "ui_http=%{http_code}\n" http://127.0.0.1:8501/
 # expect: ui_http=200
 
 # Optional: OpenAPI reachable
-curl -sS -o /dev/null -w "openapi=%{http_code}\n" http://127.0.0.1:8000/openapi.json
+curl -sS -o /dev/null -w "openapi=%{http_code}\n" http://127.0.0.1:8001/openapi.json
 ```
 
 Browser smoke test (from an allowed admin network):
 
 1. Open `http://<server-ip>:8501`
-2. Sidebar shows Overview / Convert / Create / Jobs / History
+2. Sidebar shows Overview / Convert / Create / Jobs / History / System readiness
 3. Overview loads metrics (or a clean empty/DB-permission message)
 4. Configured Jobs lists rows (if any exist)
 5. Scheduler chip shows Online/Idle/Offline based on scheduler process
@@ -295,14 +346,18 @@ GIT_SSH_COMMAND='ssh -i /root/.ssh/partition_job_ui_github -o IdentitiesOnly=yes
   git -c safe.directory=/opt/db-partition-job-ui-github pull --ff-only origin main
 
 cd partition-job-ui
+# Own application tree as partitionui, then restore env file owners immediately.
 chown -R partitionui:partitionui .
+[[ -f .env ]] && chown partitionui:partitionui .env && chmod 600 .env
+[[ -f .env.realtime ]] && chown enterprisedb:enterprisedb .env.realtime && chmod 600 .env.realtime
 
-.venv/bin/pip install -r requirements.txt
-cd frontend && npm ci && npm run build && cd ..
+sudo -u partitionui .venv/bin/pip install -r requirements.txt
+cd frontend && sudo -u partitionui npm ci && sudo -u partitionui npm run build && cd ..
 chown -R partitionui:partitionui frontend
 
 cp systemd/partition-job-api.service /usr/lib/systemd/system/
 cp partition-job-ui.service /usr/lib/systemd/system/
+cp systemd/partition-job-scheduler.service /usr/lib/systemd/system/
 systemctl daemon-reload
 systemctl restart partition-job-api.service partition-job-ui.service
 systemctl status partition-job-api.service partition-job-ui.service --no-pager -l
@@ -326,25 +381,97 @@ systemctl restart partition-job-scheduler.service   # if used
 
 ---
 
-## 9. Scheduler backend (optional but production-normal)
+## 9. Scheduler backend (required for automatic realtime execution)
 
-The UI/API are **not** the scheduler.
+The UI/API can operate while the scheduler is offline, but the scheduler is
+**REQUIRED** for automatic realtime partition execution.
 
-1. Ensure SQL realtime functions are installed on the target DB (`sql/` migrations — DBA step).
-2. Configure `.env.realtime`.
-3. Install/adjust `systemd/partition-job-scheduler.service` for this host’s paths + OS user.
-4. Enable:
+### 9.1 Install / update the unit (do not start yet)
 
 ```bash
-systemctl enable --now partition-job-scheduler.service
+cp /opt/db-partition-job-ui-github/partition-job-ui/systemd/partition-job-scheduler.service \
+  /usr/lib/systemd/system/
+systemctl daemon-reload
+```
+
+Confirm unit paths:
+
+```bash
+grep -E 'User=|WorkingDirectory|EnvironmentFile|ExecStart' \
+  /usr/lib/systemd/system/partition-job-scheduler.service
+```
+
+Expect:
+
+```text
+User=enterprisedb
+WorkingDirectory=/opt/db-partition-job-ui-github/partition-job-ui
+EnvironmentFile=/opt/db-partition-job-ui-github/partition-job-ui/.env.realtime
+ExecStart=.../.venv/bin/python -m scheduler_backend.main --log-level INFO
+```
+
+### 9.2 Verify `.env.realtime`
+
+```bash
+ls -la /opt/db-partition-job-ui-github/partition-job-ui/.env.realtime
+# expect: enterprisedb:enterprisedb  mode 600
+```
+
+### 9.3 Verify required realtime DB functions (DBA / psql)
+
+Both must return a non-NULL procedure identity:
+
+```sql
+SELECT to_regprocedure(
+  'mubasher_oms.get_upcoming_partition_jobs(interval)'
+);
+
+SELECT to_regprocedure(
+  'mubasher_oms.run_partition_job_scheduled(numeric,timestamp without time zone)'
+);
+```
+
+Safe read-only smoke (does **not** execute partition jobs):
+
+```sql
+SELECT *
+FROM mubasher_oms.get_upcoming_partition_jobs(interval '120 seconds');
+```
+
+Do **not** call `run_partition_job_scheduled(...)` merely as a health test.
+
+### 9.4 Legacy runner safety
+
+Old functions such as `run_partition_create_jobs()` / `run_partition_drop_jobs()`
+may remain for rollback. Their **existence alone is fine**.
+
+Do **not** run the realtime scheduler at the same time as active cron/pgAgent/systemd
+jobs that still call those legacy broad runners — that can double-execute work.
+
+Check PartOps **System readiness → Legacy automation safety**, or inspect enabled
+pgAgent steps for those routine names. Do not auto-disable DB objects from the UI.
+
+### 9.5 Start, verify, then enable
+
+```bash
+systemctl start partition-job-scheduler.service
+systemctl status partition-job-scheduler.service --no-pager -l
+journalctl -u partition-job-scheduler.service -n 80 --no-pager
+
 curl -sS http://127.0.0.1:8765/health || true
 curl -sS http://127.0.0.1:8765/internal/scheduler/status || true
+
+# Only after healthy:
+systemctl enable partition-job-scheduler.service
 ```
+
+Note: `systemctl is-active` can be `active` while the process is still non-functional
+if required DB functions are missing — always complete §9.3 first.
 
 If the scheduler is down:
 
 - Job **configuration** still works
-- Overview shows scheduler offline
+- Overview / System readiness show scheduler offline
 - Jobs will not fire until the scheduler is healthy again
 
 ---
@@ -356,17 +483,19 @@ If the scheduler is down:
 | API `203/EXEC` | Wrong path or missing uvicorn | Paths must be `/opt/db-partition-job-ui-github/partition-job-ui`; `pip install -r requirements.txt`; use `python -m uvicorn` |
 | UI `200/CHDIR` | Wrong `WorkingDirectory` | Must be `.../partition-job-ui/frontend` |
 | API crash: `ManualRunBody \| None` | Python 3.9 + modern union syntax | Use `Optional[ManualRunBody]` in `api/routers/jobs.py` (already fixed in current tree) |
-| UI starts then permission errors | `frontend/.next` owned by root | `chown -R partitionui:partitionui frontend` |
+| UI starts then permission errors | `frontend/.next` owned by root | Rebuild/run npm as `partitionui`; `chown -R partitionui:partitionui frontend` |
 | API `active` but curl `/api/health` = Not Found immediately | Curled during startup | `sleep 2` then retry |
 | Units ignore repo files | Stale unit in `/etc/systemd/system/` | Delete `/etc` copies; keep `/usr/lib/systemd/system/` |
 | Overview shows DB errors | Bad `.env` or missing grants | Fix `.env`; ask DBA for least-privilege grants (UI never grants) |
+| Scheduler `Permission denied: '.env'` | Scheduler tried to load UI `.env` | Scheduler must load **only** `.env.realtime`; restore owners (partitionui vs enterprisedb) |
 | Scheduler always offline | Scheduler service down / wrong status URL | Start scheduler; check `PARTITION_SCHEDULER_STATUS_URL` |
+| API bind conflict on 8000 | Unrelated app owns 8000 | PartOps must use **8001** |
 
 Manual API start (for debugging):
 
 ```bash
 cd /opt/db-partition-job-ui-github/partition-job-ui
-sudo -u partitionui .venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+sudo -u partitionui .venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
 ```
 
 Manual UI start (for debugging):
@@ -381,11 +510,13 @@ sudo -u partitionui ./node_modules/.bin/next start --hostname 0.0.0.0 --port 850
 ## 11. Security reminders
 
 - Do not run services as root.
-- `.env` / `.env.realtime` mode `600`, correct owner.
-- Do not expose FastAPI (`8000`) or scheduler control (`8765`) publicly; keep localhost.
+- `.env` → `partitionui:partitionui` mode `600`.
+- `.env.realtime` → `enterprisedb:enterprisedb` mode `600`.
+- Do not expose FastAPI (`8001`) or scheduler control (`8765`) publicly; keep localhost.
 - Restrict `8501` to administrator networks.
 - UI DB user must not be a superuser and must not write pgAgent catalogs.
 - Never commit secrets.
+- Never “fix” env access with world-readable permissions.
 
 ---
 
@@ -394,16 +525,21 @@ sudo -u partitionui ./node_modules/.bin/next start --hostname 0.0.0.0 --port 850
 ```text
 Browser
   -> Next.js :8501
-       proxies /api/* 
-  -> FastAPI 127.0.0.1:8000
+       proxies /api/*  (PARTITION_API_ORIGIN=http://127.0.0.1:8001)
+  -> FastAPI 127.0.0.1:8001
        calls database.py / validators / job_autofill / scheduler_client
   -> PostgreSQL functions/tables
-  -> scheduler_backend (separate process) reads upcoming jobs and fires timers
+
+Separate process:
+  scheduler_backend 127.0.0.1:8765
+       loads .env.realtime only
+       calls get_upcoming_partition_jobs / run_partition_job_scheduled
 ```
 
 Safe write paths:
 
 - Create job → `insert_data_to_partition_job_table(...)`
+- Edit job → `update_data_to_partition_job_table(...)` (after migration)
 - Manual run → `run_partition_job_manual(...)`
 - Scheduled run → `run_partition_job_scheduled(...)` (scheduler only)
 
@@ -425,10 +561,10 @@ Install is successful when all of these are true:
 
 1. `partition-job-api.service` is `active`
 2. `partition-job-ui.service` is `active`
-3. `curl http://127.0.0.1:8000/api/health` returns `ok: true`
+3. `curl http://127.0.0.1:8001/api/health` returns `ok: true`
 4. `curl http://127.0.0.1:8501/` returns HTTP 200
-5. Browser opens the Partition Manager sidebar UI on port 8501
-6. (If used) scheduler service is `active` and status URL responds
+5. Browser opens the PartOps sidebar UI on port 8501
+6. (For automatic execution) scheduler service is `active`, required DB functions exist, and status URL responds
 
 If any step fails, capture:
 
@@ -436,7 +572,7 @@ If any step fails, capture:
 systemctl status partition-job-api.service partition-job-ui.service --no-pager -l
 journalctl -u partition-job-api.service -u partition-job-ui.service -n 100 --no-pager
 pwd
-ls -la api/main.py frontend/.next .venv/bin/python .env
+ls -la api/main.py frontend/package.json frontend/.next .venv/bin/python .env .env.realtime
 ```
 
 and escalate with that output.

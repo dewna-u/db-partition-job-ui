@@ -58,7 +58,10 @@ class ConfigSafetyTests(unittest.TestCase):
         example = open(
             os.path.join(os.path.dirname(__file__), ".env.example"), encoding="utf-8"
         ).read()
-        self.assertIn("DB_NAME=your_database", example)
+        self.assertIn("DB_NAME=<database>", example)
+        self.assertIn("DB_USER=partition_job_ui", example)
+        self.assertIn("replace_with_strong_password", example)
+        self.assertNotIn("8000", example)
 
 
 class NoPoolNoPersistentConnectionTests(unittest.TestCase):
@@ -93,6 +96,19 @@ class NoPoolNoPersistentConnectionTests(unittest.TestCase):
         self.assertNotIn("\n_conn ", source)
         self.assertNotIn("global_connection", source)
         self.assertIn("def open_connection", source)
+
+    def test_scheduler_loads_only_env_realtime(self) -> None:
+        root = os.path.dirname(__file__)
+        for name in (
+            "scheduler_backend/scheduler_database.py",
+            "scheduler_backend/db_safety.py",
+        ):
+            path = os.path.join(root, name.replace("/", os.sep))
+            source = open(path, encoding="utf-8").read()
+            self.assertIn('load_dotenv(".env.realtime"', source)
+            # Must not fall back to UI .env (Permission denied for enterprisedb).
+            self.assertNotIn('load_dotenv(".env"', source)
+            self.assertNotIn("load_dotenv('.env'", source)
 
 
 class QueueManagerTests(unittest.TestCase):

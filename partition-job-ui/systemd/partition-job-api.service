@@ -1,5 +1,5 @@
 [Unit]
-Description=Partition Manager API (FastAPI)
+Description=PartOps API (FastAPI)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,7 +12,8 @@ WorkingDirectory=/opt/db-partition-job-ui-github/partition-job-ui
 EnvironmentFile=-/opt/db-partition-job-ui-github/partition-job-ui/.env
 Environment=PYTHONUNBUFFERED=1
 # python -m avoids needing a separate uvicorn console script in .venv/bin
-ExecStart=/opt/db-partition-job-ui-github/partition-job-ui/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+# Port 8001: port 8000 is reserved by another unrelated application on this host.
+ExecStart=/opt/db-partition-job-ui-github/partition-job-ui/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

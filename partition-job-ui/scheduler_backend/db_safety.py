@@ -19,8 +19,8 @@ def _load_env() -> None:
     try:
         from dotenv import load_dotenv
 
+        # Scheduler OS user (enterprisedb) must not read UI .env (partitionui:600).
         load_dotenv(".env.realtime", override=False)
-        load_dotenv(".env", override=False)
     except Exception:  # noqa: BLE001
         pass
 

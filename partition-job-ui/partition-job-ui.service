@@ -1,5 +1,5 @@
 [Unit]
-Description=Partition Manager UI (Next.js)
+Description=PartOps UI (Next.js)
 After=network-online.target partition-job-api.service
 Wants=network-online.target partition-job-api.service
 
@@ -10,7 +10,7 @@ Group=partitionui
 WorkingDirectory=/opt/db-partition-job-ui-github/partition-job-ui/frontend
 EnvironmentFile=-/opt/db-partition-job-ui-github/partition-job-ui/.env
 Environment=NODE_ENV=production
-Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8000
+Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8001
 # Call local Next binary directly (more reliable than npm under systemd).
 ExecStart=/opt/db-partition-job-ui-github/partition-job-ui/frontend/node_modules/.bin/next start --hostname 0.0.0.0 --port 8501
 Restart=on-failure

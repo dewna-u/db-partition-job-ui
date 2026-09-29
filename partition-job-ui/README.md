@@ -49,9 +49,12 @@ Administrator’s Browser
         v
 Next.js UI on Database Server (:8501)
         |
-        +--> FastAPI (:8000 localhost) --> PostgreSQL/EDB
+        +--> FastAPI (127.0.0.1:8001) --> PostgreSQL/EDB
         |
-        +--> scheduler_backend (separate systemd unit)
+        +--> scheduler_backend (separate systemd unit, 127.0.0.1:8765)
+
+Note: Port 8000 is reserved by another unrelated application on the deploy host.
+PartOps FastAPI must use 8001.
 ```
 
 Design goals and current runbook: see `WEB.md`.
@@ -209,6 +212,13 @@ The application does **not** create that view. If you use a view, you would need
 
 ## 8. Installation
 
+> For the **current live host**, use deploy path  
+> `/opt/db-partition-job-ui-github/partition-job-ui` and follow **`RUNBOOK.md`**  
+> (API **8001**, UI **8501**, scheduler **8765**).
+>
+> The `/opt/partition-job-ui` path below is a generic alternate layout only.
+> Do not mix both trees on one server.
+
 ```bash
 sudo mkdir -p /opt/partition-job-ui
 sudo useradd --system \
@@ -258,7 +268,7 @@ See `WEB.md`. Quick production-style check after build:
 ```bash
 sudo systemctl start partition-job-api.service partition-job-ui.service
 curl -sS http://127.0.0.1:8501/ | head
-curl -sS http://127.0.0.1:8000/api/health
+curl -sS http://127.0.0.1:8001/api/health
 ```
 
 Open:
@@ -400,7 +410,7 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 copy .env.example .env
 # Edit .env with real connection settings
-.venv\Scripts\uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+.venv\Scripts\uvicorn api.main:app --reload --host 127.0.0.1 --port 8001
 # In another terminal:
 cd frontend && npm install && npm run dev
 ```

@@ -29,10 +29,12 @@ _IDENTIFIER_RE_MSG = "Database identifier values must be simple SQL identifiers.
 
 
 def _load_env() -> None:
-    """Prefer .env.realtime for the scheduler; never require overwriting .env."""
-    # Local override first, then fallback to .env for shared non-secret settings.
+    """Load scheduler config from .env.realtime only.
+
+    Do not fall back to .env: that file is owned by partitionui (mode 600) and
+    causes Permission denied when the scheduler runs as enterprisedb.
+    """
     load_dotenv(".env.realtime", override=False)
-    load_dotenv(".env", override=False)
 
 
 def _require(name: str) -> str:

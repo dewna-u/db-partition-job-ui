@@ -34,7 +34,7 @@ echo "=== Write systemd units to $UNIT_DIR ==="
 install -m 0644 /dev/null "$UNIT_DIR/partition-job-api.service"
 cat > "$UNIT_DIR/partition-job-api.service" <<EOF
 [Unit]
-Description=Partition Manager API (FastAPI)
+Description=PartOps API (FastAPI)
 After=network-online.target
 Wants=network-online.target
 
@@ -45,7 +45,7 @@ Group=partitionui
 WorkingDirectory=$ROOT
 EnvironmentFile=-$ROOT/.env
 Environment=PYTHONUNBUFFERED=1
-ExecStart=$ROOT/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+ExecStart=$ROOT/.venv/bin/python -m uvicorn api.main:app --host 127.0.0.1 --port 8001
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -61,7 +61,7 @@ EOF
 install -m 0644 /dev/null "$UNIT_DIR/partition-job-ui.service"
 cat > "$UNIT_DIR/partition-job-ui.service" <<EOF
 [Unit]
-Description=Partition Manager UI (Next.js)
+Description=PartOps UI (Next.js)
 After=network-online.target partition-job-api.service
 Wants=network-online.target partition-job-api.service
 
@@ -72,7 +72,7 @@ Group=partitionui
 WorkingDirectory=$ROOT/frontend
 EnvironmentFile=-$ROOT/.env
 Environment=NODE_ENV=production
-Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8000
+Environment=PARTITION_API_ORIGIN=http://127.0.0.1:8001
 ExecStart=$ROOT/frontend/node_modules/.bin/next start --hostname 0.0.0.0 --port 8501
 Restart=on-failure
 RestartSec=5
@@ -104,10 +104,20 @@ systemctl status partition-job-api.service partition-job-ui.service --no-pager -
 
 echo "=== Unit ExecStart (must show this ROOT, not /opt/partition-job-ui) ==="
 systemctl cat partition-job-api.service | grep -E 'WorkingDirectory|ExecStart'
-systemctl cat partition-job-ui.service | grep -E 'WorkingDirectory|ExecStart'
+systemctl cat partition-job-ui.service | grep -E 'WorkingDirectory|ExecStart|PARTITION_API_ORIGIN'
+
+echo "=== Restore env ownership (never leave .env.realtime owned by partitionui) ==="
+if [[ -f "$ROOT/.env" ]]; then
+  chown partitionui:partitionui "$ROOT/.env"
+  chmod 600 "$ROOT/.env"
+fi
+if [[ -f "$ROOT/.env.realtime" ]]; then
+  chown enterprisedb:enterprisedb "$ROOT/.env.realtime"
+  chmod 600 "$ROOT/.env.realtime"
+fi
 
 echo "=== Health ==="
-curl -sS http://127.0.0.1:8000/api/health || true
+curl -sS http://127.0.0.1:8001/api/health || true
 echo
 curl -sS -o /dev/null -w "ui_http=%{http_code}\n" http://127.0.0.1:8501/ || true
 

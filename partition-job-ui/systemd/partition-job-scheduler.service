@@ -1,5 +1,5 @@
 [Unit]
-Description=Partition Job Realtime Scheduler Backend
+Description=PartOps Realtime Scheduler Backend
 After=network-online.target
 Wants=network-online.target
 
@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=enterprisedb
 Group=enterprisedb
-WorkingDirectory=/opt/partition-job-ui
-EnvironmentFile=/opt/partition-job-ui/.env.realtime
+WorkingDirectory=/opt/db-partition-job-ui-github/partition-job-ui
+EnvironmentFile=/opt/db-partition-job-ui-github/partition-job-ui/.env.realtime
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/opt/partition-job-ui/.venv/bin/python -m scheduler_backend.main --log-level INFO
+ExecStart=/opt/db-partition-job-ui-github/partition-job-ui/.venv/bin/python -m scheduler_backend.main --log-level INFO
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
@@ -23,7 +23,8 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 UMask=0077
-# Control API is expected to bind to 127.0.0.1 only.
+# Control API is expected to bind to 127.0.0.1:8765 only.
+# Scheduler loads .env.realtime only (never UI .env owned by partitionui).
 
 [Install]
 WantedBy=multi-user.target

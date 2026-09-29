@@ -29,7 +29,7 @@ Units:
 
 | Unit | Port | Role |
 |---|---|---|
-| `partition-job-api.service` | `127.0.0.1:8000` | FastAPI |
+| `partition-job-api.service` | `127.0.0.1:8001` | FastAPI (PartOps; not 8000) |
 | `partition-job-ui.service` | `0.0.0.0:8501` | Next.js (proxies `/api/*`) |
 
 ## Why it failed before
@@ -43,7 +43,7 @@ Units:
 
 ```bash
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m uvicorn api.main:app --reload --host 127.0.0.1 --port 8000
+.venv/bin/python -m uvicorn api.main:app --reload --host 127.0.0.1 --port 8001
 
 cd frontend && npm install && npm run dev
 ```
