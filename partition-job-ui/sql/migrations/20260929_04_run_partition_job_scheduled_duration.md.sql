@@ -1,0 +1,28 @@
+-- =============================================================================
+-- Migration: redeploy run_partition_job_scheduled with duration capture
+-- =============================================================================
+-- PREPARED ONLY — do NOT auto-apply to production.
+--
+-- Prerequisite: 20260929_01_add_execution_duration_ms.sql
+--
+-- Source of truth for the function body is:
+--   sql/realtime_scheduler_v1.sql  (section: run_partition_job_scheduled)
+--
+-- After adding execution_duration_ms, redeploy that function from the updated
+-- realtime_scheduler_v1.sql (CREATE OR REPLACE FUNCTION ... through COMMENT).
+--
+-- Changes vs prior scheduled executor:
+--   * Measures wall-clock around db_config_para apply + create/drop worker
+--   * Stores execution_duration_ms on SUCCESS and FAIL log inserts
+--   * Does not change next_run_time / success-failure semantics
+--
+-- Rollback: restore the previous CREATE OR REPLACE body of
+--   mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone)
+--   from your backup / prior realtime_scheduler_v1.sql revision (without
+--   execution_duration_ms in the INSERT). Historical duration values remain.
+-- =============================================================================
+
+-- Apply by executing the CREATE OR REPLACE FUNCTION block for
+-- run_partition_job_scheduled from sql/realtime_scheduler_v1.sql after the
+-- duration column migration has been applied.
+SELECT 'Apply run_partition_job_scheduled from sql/realtime_scheduler_v1.sql after 20260929_01'::text AS instruction;

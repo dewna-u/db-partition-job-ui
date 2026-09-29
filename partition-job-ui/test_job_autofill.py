@@ -1135,7 +1135,7 @@ class ReadOnlyQueryTests(unittest.TestCase):
         sql, _params = self._capture(database.get_partition_jobs)
         lowered = sql.lower()
         self.assertIn("select", lowered)
-        self.assertIn("order by job_id desc", lowered)
+        self.assertIn("job_id desc", lowered)
         self.assertIn("frequency", lowered)
         self.assertNotIn("job_frequency", lowered)
         for forbidden in ("insert", "update", "delete", "truncate", "drop "):

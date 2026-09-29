@@ -25,6 +25,7 @@ through the existing database function and listing pgAgent jobs with their job I
 
 > Streamlit UI was archived to `archives/streamlit-ui-*.zip` (not deleted permanently).
 > See `WEB.md` for the current run/deploy instructions.
+> **Teammate install/redeploy guide:** [`RUNBOOK.md`](./RUNBOOK.md)
 
 ## 1. Purpose
 

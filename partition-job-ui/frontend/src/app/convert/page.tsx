@@ -80,7 +80,7 @@ export default function ConvertPage() {
                   ? "border-[#b7c9f5] bg-[#e7edff] text-[#165dff]"
                   : done
                     ? "border-[#b7d9c7] bg-[#e4f3ea] text-[#1f8a64]"
-                    : "border-[#d1cdc4] bg-white text-[#718078]"
+                    : "border-[#d1cdc4] bg-white text-pj-muted"
               }`}
             >
               {label}
@@ -113,7 +113,7 @@ export default function ConvertPage() {
         {browse.length ? (
           <div className="mt-4 overflow-hidden rounded-xl border border-pj-line">
             <table className="w-full text-left text-xs">
-              <thead className="bg-[#f3f0e9] text-[0.62rem] uppercase text-[#7e8982]">
+              <thead className="bg-pj-table-head text-[0.62rem] uppercase text-pj-muted">
                 <tr>
                   <th className="px-3 py-2">ID</th>
                   <th className="px-3 py-2">Name</th>
@@ -124,7 +124,7 @@ export default function ConvertPage() {
                 {browse.slice(0, 40).map((row) => (
                   <tr
                     key={String(row.job_id)}
-                    className="cursor-pointer border-t border-[#ebe8e1] hover:bg-[#f7f5ef]"
+                    className="cursor-pointer border-t border-pj-line hover:bg-pj-surface"
                     onClick={() => {
                       setJobId(String(row.job_id));
                       void loadDetails();
@@ -181,7 +181,7 @@ export default function ConvertPage() {
               ["Operation", opFromAutofill(details)],
               ["Schedule", String((details.autofill as Record<string, unknown>)?.job_schedule || "—")],
             ].map(([k, v]) => (
-              <div key={k} className="rounded-lg border border-[#ebe8e1] bg-white px-3 py-2">
+              <div key={k} className="rounded-lg border border-pj-line bg-pj-surface px-3 py-2">
                 <dt className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[#8a958e]">
                   {k}
                 </dt>

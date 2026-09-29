@@ -54,6 +54,17 @@ export const api = {
       "/api/jobs",
       { method: "POST", body: JSON.stringify(body) },
     ),
+  updateJob: (id: number, body: import("./types").JobUpdatePayload) =>
+    request<{
+      result: unknown;
+      job_id: number;
+      message: string;
+      refresh_ok: boolean;
+      refresh_message: string;
+    }>(`/api/jobs/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   runJob: (id: number, confirmDrop = false) =>
     request<{ result: unknown; message: string }>(`/api/jobs/${id}/run`, {
       method: "POST",
@@ -63,6 +74,12 @@ export const api = {
     request<{ logs: import("./types").JobLog[] }>(`/api/logs?limit=${limit}`),
   readiness: () =>
     request<{ readiness: Record<string, unknown> }>("/api/readiness"),
+  systemReadiness: (refresh?: boolean) => {
+    const q = refresh ? "?refresh=1" : "";
+    return request<import("./types").SystemReadinessReport>(
+      `/api/system/readiness${q}`,
+    );
+  },
   schedulerStatus: () =>
     request<{
       ok: boolean;

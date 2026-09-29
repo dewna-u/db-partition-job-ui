@@ -1,17 +1,21 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  ChevronRight,
   History,
   LayoutDashboard,
   PlusCircle,
   RefreshCw,
+  ShieldCheck,
   Workflow,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/badge";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
 import type { SchedulerStatus } from "@/lib/types";
 import { formatAge } from "@/lib/format";
 
@@ -21,6 +25,7 @@ const NAV = [
   { href: "/jobs/new", label: "Create new", icon: PlusCircle },
   { href: "/jobs", label: "Configured jobs", icon: Activity },
   { href: "/history", label: "Execution history", icon: History },
+  { href: "/system", label: "System readiness", icon: ShieldCheck },
 ] as const;
 
 export function AppSidebar({
@@ -41,36 +46,30 @@ export function AppSidebar({
   const sync = formatAge(scheduler?.last_refresh_at);
 
   return (
-    <aside className="flex h-screen w-[248px] shrink-0 flex-col border-r border-[#cfcac0] bg-[#202c34] text-[#f3f1e9]">
-      <div className="border-b border-[#45535a] px-4 pb-4 pt-5">
-        <div className="flex items-center gap-3">
-          <div className="grid h-9 w-9 -rotate-6 place-items-center rounded-[10px] bg-[#e5ff5c] text-sm font-black text-[#202c34]">
-            P
-          </div>
-          <div>
-            <div className="text-[0.95rem] font-extrabold tracking-tight">
-              Partition <span className="text-[#e5ff5c]">Manager</span>
+    <aside className="flex h-screen w-[248px] shrink-0 flex-col border-r border-pj-sidebar-border bg-pj-sidebar text-[#f3f1e9]">
+      <div className="border-b border-pj-sidebar-border px-4 pb-4 pt-5">
+        <Link href="/" className="flex items-center gap-2.5 rounded-lg outline-offset-2">
+          <Image
+            src="/branding/partops-mark.svg"
+            alt=""
+            width={36}
+            height={36}
+            className="h-9 w-9 shrink-0"
+            priority
+          />
+          <div className="min-w-0">
+            <div className="truncate text-[0.95rem] font-extrabold tracking-tight">
+              Part<span className="text-pj-lime">Ops</span>
             </div>
-            <div className="mt-0.5 text-[0.62rem] text-[#aab5b1]">
-              PostgreSQL control plane
+            <div className="mt-0.5 truncate text-[0.62rem] text-[#aab5b1]">
+              EDB Partition Operations
             </div>
           </div>
-        </div>
-        <div className="mt-4 flex items-center gap-2.5 rounded-[11px] border border-[#526067] bg-[#293840] px-3 py-2.5">
-          <div className="grid h-7 w-7 place-items-center rounded-lg bg-[#e5ff5c] text-[0.58rem] font-extrabold text-[#202c34]">
-            MO
-          </div>
-          <div>
-            <div className="text-[0.58rem] uppercase tracking-[0.12em] text-[#aab5b1]">
-              Workspace
-            </div>
-            <div className="text-xs font-bold">mubasher_oms</div>
-          </div>
-        </div>
+        </Link>
       </div>
 
       <div className="px-3 pt-4">
-        <div className="mb-2 px-2 text-[0.58rem] font-extrabold uppercase tracking-[0.14em] text-[#8a9691]">
+        <div className="mb-2 px-2 text-[0.58rem] font-extrabold uppercase tracking-[0.14em] text-pj-sidebar-muted">
           Manage
         </div>
         <nav className="space-y-1">
@@ -87,7 +86,7 @@ export function AppSidebar({
                 className={cn(
                   "flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[0.78rem] font-semibold transition-colors",
                   isActive
-                    ? "bg-[#e5ff5c] text-[#202c34]"
+                    ? "bg-pj-lime text-pj-sidebar"
                     : "text-[#d5ddd9] hover:bg-[#293840] hover:text-white",
                 )}
               >
@@ -99,15 +98,28 @@ export function AppSidebar({
         </nav>
       </div>
 
-      <div className="mt-auto space-y-3 border-t border-[#45535a] px-3 py-4">
-        <div className="px-2 text-[0.58rem] font-extrabold uppercase tracking-[0.14em] text-[#8a9691]">
+      <div className="mt-auto space-y-3 border-t border-pj-sidebar-border px-3 py-4">
+        <div className="flex items-center justify-between px-2">
+          <div className="text-[0.58rem] font-extrabold uppercase tracking-[0.14em] text-pj-sidebar-muted">
+            Appearance
+          </div>
+          <ThemeToggle />
+        </div>
+
+        <div className="px-2 text-[0.58rem] font-extrabold uppercase tracking-[0.14em] text-pj-sidebar-muted">
           System
         </div>
-        <div className="rounded-[11px] border border-[#526067] bg-[#293840] px-3 py-3">
-          <div className="flex items-center gap-2 text-xs font-bold">
-            <StatusDot tone={active ? "green" : schedulerOk ? "amber" : "red"} />
-            Scheduler{" "}
-            {active ? "Online" : schedulerOk ? "Idle" : "Offline"}
+        <Link
+          href="/system"
+          className="block rounded-[11px] border border-[#526067] bg-[#293840] px-3 py-3 transition-colors hover:border-[#6a7a82] hover:bg-[#2f3d45]"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-bold">
+              <StatusDot tone={active ? "green" : schedulerOk ? "amber" : "red"} />
+              Scheduler{" "}
+              {active ? "Online" : schedulerOk ? "Idle" : "Offline"}
+            </div>
+            <ChevronRight className="h-3.5 w-3.5 text-pj-sidebar-muted" />
           </div>
           <div className="mt-2 flex items-center gap-2 text-xs font-bold">
             <StatusDot tone={dbConnected ? "green" : "red"} />
@@ -124,17 +136,20 @@ export function AppSidebar({
           {onRefreshScheduler ? (
             <button
               type="button"
-              onClick={onRefreshScheduler}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onRefreshScheduler();
+              }}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-[#526067] px-2 py-1 text-[0.62rem] font-bold text-[#d5ddd9] hover:bg-[#334049]"
             >
               <RefreshCw className="h-3 w-3" /> Refresh status
             </button>
           ) : null}
-        </div>
-        <div className="px-2 text-[0.62rem] leading-relaxed text-[#8a9691]">
-          Readiness and realtime scheduler details live with each page’s system
-          panels.
-        </div>
+          <div className="mt-2 text-[0.62rem] font-semibold text-pj-lime">
+            Open system readiness →
+          </div>
+        </Link>
       </div>
     </aside>
   );

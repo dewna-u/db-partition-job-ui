@@ -8,7 +8,7 @@ export const Input = React.forwardRef<
   <input
     ref={ref}
     className={cn(
-      "flex h-9 w-full rounded-lg border border-[#d1cdc4] bg-white px-3 py-2 text-[0.78rem] text-[#1c2730] placeholder:text-[#8a958e] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#165dff]/40 disabled:cursor-not-allowed disabled:opacity-50",
+      "flex h-9 w-full rounded-lg border border-pj-line bg-pj-surface px-3 py-2 text-[0.78rem] text-pj-ink placeholder:text-pj-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pj-primary/40 disabled:cursor-not-allowed disabled:opacity-50",
       className,
     )}
     {...props}
@@ -23,7 +23,7 @@ export const Textarea = React.forwardRef<
   <textarea
     ref={ref}
     className={cn(
-      "flex min-h-[96px] w-full rounded-lg border border-[#d1cdc4] bg-white px-3 py-2 font-mono text-[0.78rem] text-[#1c2730] placeholder:text-[#8a958e] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#165dff]/40",
+      "flex min-h-[96px] w-full rounded-lg border border-pj-line bg-pj-surface px-3 py-2 font-mono text-[0.78rem] text-pj-ink placeholder:text-pj-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pj-primary/40",
       className,
     )}
     {...props}
@@ -38,7 +38,7 @@ export function Label({
   return (
     <label
       className={cn(
-        "mb-1.5 block text-[0.62rem] font-bold uppercase tracking-[0.12em] text-[#5f6d68]",
+        "mb-1.5 block text-[0.62rem] font-bold uppercase tracking-[0.12em] text-pj-muted",
         className,
       )}
       {...props}
@@ -54,7 +54,7 @@ export function Select({
   return (
     <select
       className={cn(
-        "flex h-9 w-full rounded-lg border border-[#d1cdc4] bg-white px-3 text-[0.78rem] text-[#1c2730] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#165dff]/40",
+        "flex h-9 w-full rounded-lg border border-pj-line bg-pj-surface px-3 text-[0.78rem] text-pj-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pj-primary/40",
         className,
       )}
       {...props}

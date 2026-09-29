@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input, Label, Select, Textarea } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api";
-import type { JobCreatePayload } from "@/lib/types";
+import type { JobCreatePayload, JobUpdatePayload } from "@/lib/types";
 
 const FREQUENCY_UNITS = ["minute", "hour", "day", "week", "month", "year"] as const;
 const PARTITION_UNITS = ["day", "week", "month", "year"] as const;
@@ -50,10 +50,19 @@ export function JobForm({
   initial,
   submitLabel = "Create job",
   onSuccess,
+  mode = "create",
+  jobId,
+  baseline,
+  onCancel,
 }: {
   initial?: Partial<JobFormValues>;
   submitLabel?: string;
   onSuccess?: (message: string) => void;
+  mode?: "create" | "edit";
+  jobId?: number;
+  /** Original values used to detect dangerous edits and dirty state. */
+  baseline?: Partial<JobFormValues>;
+  onCancel?: () => void;
 }) {
   const [values, setValues] = useState<JobFormValues>({ ...DEFAULTS, ...initial });
   const [preview, setPreview] = useState<{
@@ -66,6 +75,7 @@ export function JobForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
+  const [confirmDangerous, setConfirmDangerous] = useState(false);
 
   useEffect(() => {
     if (initial) setValues((v) => ({ ...v, ...initial }));
@@ -109,6 +119,36 @@ export function JobForm({
     };
   }, [values]);
 
+  const base = baseline || initial || DEFAULTS;
+  const dangerous =
+    mode === "edit" &&
+    (Boolean(base.is_create) !== values.is_create ||
+      String(base.table_schema || "") !== values.table_schema ||
+      String(base.table_name || "") !== values.table_name);
+
+  const dirty = useMemo(() => {
+    if (mode !== "edit") return true;
+    const keys: (keyof JobFormValues)[] = [
+      "job_name",
+      "is_enabled",
+      "is_create",
+      "table_schema",
+      "table_name",
+      "job_schedule",
+      "frequency_amount",
+      "frequency_unit",
+      "partition_unit",
+      "partition_period",
+      "create_drop_amount",
+      "create_drop_unit",
+      "db_config",
+    ];
+    if (!values.auto_next_run) {
+      keys.push("next_run_time");
+    }
+    return keys.some((key) => String(values[key] ?? "") !== String(base[key] ?? ""));
+  }, [mode, values, base]);
+
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!payload) {
@@ -119,15 +159,39 @@ export function JobForm({
       setError(preview.error || "Invalid schedule");
       return;
     }
+    if (mode === "edit" && !dirty) {
+      setError("No changes to save");
+      return;
+    }
+    if (dangerous && !confirmDangerous) {
+      setError("Confirm the dangerous configuration change before saving.");
+      return;
+    }
     setBusy(true);
     setError(null);
     setOk(null);
     try {
-      const res = await api.createJob(payload);
-      setOk(res.message);
-      onSuccess?.(res.message);
+      if (mode === "edit" && jobId != null) {
+        const body: JobUpdatePayload = {
+          ...payload,
+          confirm_dangerous: confirmDangerous,
+        };
+        const res = await api.updateJob(jobId, body);
+        setOk(res.message);
+        onSuccess?.(res.message);
+      } else {
+        const res = await api.createJob(payload);
+        setOk(res.message);
+        onSuccess?.(res.message);
+      }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Create failed");
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : mode === "edit"
+            ? "Update failed"
+            : "Create failed",
+      );
     } finally {
       setBusy(false);
     }
@@ -141,6 +205,7 @@ export function JobForm({
     setValues({ ...DEFAULTS, ...initial });
     setError(null);
     setOk(null);
+    setConfirmDangerous(false);
   }
 
   return (
@@ -156,13 +221,25 @@ export function JobForm({
             />
           </Field>
           <Field label="Enabled">
-            <label className="flex h-9 items-center gap-2 text-sm font-semibold">
-              <input
-                type="checkbox"
-                checked={values.is_enabled}
-                onChange={(e) => set("is_enabled", e.target.checked)}
-              />
-              Job is enabled for scheduling
+            <label className="flex h-9 items-center gap-3 text-sm font-semibold">
+              <span
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
+                  values.is_enabled ? "bg-[#1f8a64]" : "bg-[#c5c0b6]"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="peer sr-only"
+                  checked={values.is_enabled}
+                  onChange={(e) => set("is_enabled", e.target.checked)}
+                />
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+                    values.is_enabled ? "translate-x-5" : "translate-x-0.5"
+                  }`}
+                />
+              </span>
+              {values.is_enabled ? "ON" : "OFF"}
             </label>
           </Field>
         </div>
@@ -333,7 +410,7 @@ export function JobForm({
           onClick={() => setAdvancedOpen((v) => !v)}
         >
           <SectionTitle>Advanced settings</SectionTitle>
-          <span className="text-xs font-bold text-[#718078]">
+          <span className="text-xs font-bold text-pj-muted">
             {advancedOpen ? "Hide" : "Show"} db_config_para
           </span>
         </button>
@@ -350,14 +427,47 @@ export function JobForm({
         ) : null}
       </section>
 
+      {dangerous ? (
+        <label className="flex items-start gap-2 rounded-xl border border-[#e5c4a8] bg-[#fff0e5] px-3 py-3 text-xs font-semibold text-[#8a4b16]">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={confirmDangerous}
+            onChange={(e) => setConfirmDangerous(e.target.checked)}
+          />
+          I confirm this high-impact change (CREATE↔DROP and/or target schema.table).
+        </label>
+      ) : null}
+
       <div className="flex flex-wrap gap-2">
-        <Button type="submit" disabled={busy || Boolean(preview && !preview.valid)}>
-          {busy ? "Creating…" : submitLabel}
+        <Button
+          type="submit"
+          disabled={
+            busy ||
+            Boolean(preview && !preview.valid) ||
+            (mode === "edit" && !dirty) ||
+            (dangerous && !confirmDangerous)
+          }
+        >
+          {busy
+            ? mode === "edit"
+              ? "Saving…"
+              : "Creating…"
+            : submitLabel}
         </Button>
-        <Button type="button" variant="secondary" onClick={reset}>
-          Reset
-        </Button>
+        {mode === "edit" && onCancel ? (
+          <Button type="button" variant="secondary" onClick={onCancel}>
+            Cancel
+          </Button>
+        ) : (
+          <Button type="button" variant="secondary" onClick={reset}>
+            Reset
+          </Button>
+        )}
       </div>
+      {mode === "edit" && !dirty ? (
+        <p className="text-sm font-semibold text-pj-muted">No changes to save</p>
+      ) : null}
       {ok ? <p className="text-sm font-semibold text-[#1f8a64]">{ok}</p> : null}
       {error ? <p className="text-sm font-semibold text-[#c4473a]">{error}</p> : null}
     </form>

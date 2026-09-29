@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input, Select } from "@/components/ui/input";
 import { Sheet } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
-import { formatWhen, isFailStatus, isSuccessStatus } from "@/lib/format";
+import { formatDurationMs, formatWhen, isFailStatus, isSuccessStatus } from "@/lib/format";
 import type { JobLog } from "@/lib/types";
 
 export default function HistoryPage() {
@@ -82,11 +82,12 @@ export default function HistoryPage() {
 
       <div className="overflow-hidden rounded-card border border-pj-line bg-pj-card shadow-card">
         <table className="w-full text-left text-xs">
-          <thead className="bg-[#f3f0e9] text-[0.62rem] uppercase tracking-[0.08em] text-[#7e8982]">
+          <thead className="bg-pj-table-head text-[0.62rem] uppercase tracking-[0.08em] text-pj-muted">
             <tr>
               <th className="px-3 py-2.5">Time</th>
               <th className="px-3 py-2.5">Job</th>
               <th className="px-3 py-2.5">Status</th>
+              <th className="px-3 py-2.5">Duration</th>
               <th className="px-3 py-2.5">Error</th>
               <th className="px-3 py-2.5">Actions</th>
             </tr>
@@ -96,18 +97,23 @@ export default function HistoryPage() {
               const fail = isFailStatus(row.last_run_status);
               const ok = isSuccessStatus(row.last_run_status);
               return (
-                <tr key={row.job_log_id} className="border-t border-[#ebe8e1]">
+                <tr key={row.job_log_id} className="border-t border-pj-line">
                   <td className="px-3 py-2.5 tabular-nums">{formatWhen(row.job_runtime)}</td>
                   <td className="px-3 py-2.5">
                     <div className="font-bold">{row.job_name || `Job ${row.job_id}`}</div>
-                    <div className="text-[0.65rem] text-[#718078]">#{row.job_id}</div>
+                    <div className="text-[0.65rem] text-pj-muted">#{row.job_id}</div>
                   </td>
                   <td className="px-3 py-2.5">
                     <Badge tone={fail ? "fail" : ok ? "ok" : "mute"}>
                       {row.last_run_status || "—"}
                     </Badge>
                   </td>
-                  <td className="max-w-md truncate px-3 py-2.5 text-[#718078]">
+                  <td className="px-3 py-2.5 tabular-nums font-semibold text-[#53615b]">
+                    {row.execution_duration_ms == null
+                      ? "—"
+                      : formatDurationMs(row.execution_duration_ms)}
+                  </td>
+                  <td className="max-w-md truncate px-3 py-2.5 text-pj-muted">
                     {row.job_error ? String(row.job_error).slice(0, 120) : "—"}
                   </td>
                   <td className="px-3 py-2.5">
@@ -124,7 +130,7 @@ export default function HistoryPage() {
             })}
             {!filtered.length ? (
               <tr>
-                <td colSpan={5} className="px-3 py-10 text-center text-[#718078]">
+                <td colSpan={6} className="px-3 py-10 text-center text-pj-muted">
                   No execution history rows match.
                 </td>
               </tr>
@@ -144,9 +150,21 @@ export default function HistoryPage() {
         description="Database error from partitioning_job_table_log"
         wide
       >
-        <pre className="whitespace-pre-wrap rounded-xl border border-[#cbd7ef] bg-[#eef3ff] p-3 font-mono text-xs text-[#40526f]">
-          {selected?.job_error}
-        </pre>
+        <div className="space-y-3 text-xs">
+          <div className="rounded-lg border border-pj-line bg-pj-surface px-3 py-2">
+            <div className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[#8a958e]">
+              Duration
+            </div>
+            <div className="mt-1 font-semibold">
+              {selected?.execution_duration_ms == null
+                ? "Not recorded"
+                : formatDurationMs(selected.execution_duration_ms)}
+            </div>
+          </div>
+          <pre className="whitespace-pre-wrap rounded-xl border border-[#cbd7ef] bg-[#eef3ff] p-3 font-mono text-xs text-[#40526f]">
+            {selected?.job_error}
+          </pre>
+        </div>
       </Sheet>
     </div>
   );

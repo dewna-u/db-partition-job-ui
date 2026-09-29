@@ -17,7 +17,15 @@ import {
   operationLabel,
   targetTable,
 } from "@/lib/format";
-import type { DashboardSummary, PartitionJob } from "@/lib/types";
+import type {
+  DashboardSummary,
+  PartitionJob,
+  SystemReadinessReport,
+} from "@/lib/types";
+import {
+  readinessStatusBadgeTone,
+  readinessStatusLabel,
+} from "@/components/ui/badge";
 import { JobDetailPanel } from "@/components/jobs/job-detail-panel";
 
 export default function OverviewPage() {
@@ -29,6 +37,9 @@ export default function OverviewPage() {
   const [stateFilter, setStateFilter] = useState("All");
   const [selected, setSelected] = useState<PartitionJob | null>(null);
   const [errorLog, setErrorLog] = useState<{ title: string; body: string } | null>(
+    null,
+  );
+  const [systemReady, setSystemReady] = useState<SystemReadinessReport | null>(
     null,
   );
 
@@ -51,6 +62,10 @@ export default function OverviewPage() {
   useEffect(() => {
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void api.systemReadiness().then(setSystemReady).catch(() => setSystemReady(null));
   }, []);
 
   const filtered = useMemo(() => {
@@ -127,7 +142,7 @@ export default function OverviewPage() {
             className="mt-1.5"
           />
           <div>
-            <div className="text-sm font-extrabold text-[#1c2730]">{banner.title}</div>
+            <div className="text-sm font-extrabold text-pj-ink">{banner.title}</div>
             <div className="mt-0.5 text-xs text-[#5f6d68]">{banner.detail}</div>
           </div>
         </div>
@@ -146,12 +161,38 @@ export default function OverviewPage() {
       </section>
 
       {error ? (
-        <div className="rounded-card border border-[#e7b7b1] bg-[#fff5f3] px-4 py-3 text-sm text-[#c4473a]">
+        <div className="rounded-card border border-pj-fail/30 bg-pj-fail-bg px-4 py-3 text-sm text-pj-fail">
           {error}
         </div>
       ) : null}
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+      <Link
+        href="/system"
+        className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-pj-line bg-pj-card px-4 py-3 shadow-card transition-colors hover:border-pj-primary/40"
+      >
+        <div>
+          <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.12em] text-pj-muted">
+            System readiness
+          </div>
+          <div className="mt-1 text-sm font-bold text-pj-ink">
+            {systemReady?.overall_label ?? "Open deployment diagnostics"}
+          </div>
+          <p className="mt-0.5 text-xs text-pj-muted">
+            {systemReady
+              ? `${systemReady.counts.ready} ready · ${systemReady.counts.warning} warning · ${systemReady.counts.failed} failed`
+              : "Database, scheduler, host services, and runtime checks"}
+          </p>
+        </div>
+        {systemReady ? (
+          <Badge tone={readinessStatusBadgeTone(systemReady.overall_status)}>
+            {readinessStatusLabel(systemReady.overall_status)}
+          </Badge>
+        ) : (
+          <span className="text-xs font-semibold text-pj-primary">View →</span>
+        )}
+      </Link>
+
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         {[
           {
             label: "Configured jobs",
@@ -183,6 +224,11 @@ export default function OverviewPage() {
             value: data?.failed_executions ?? (loading ? "…" : "0"),
             detail: "In loaded history",
           },
+          {
+            label: "Average duration",
+            value: data?.average_duration?.label ?? "—",
+            detail: data?.average_duration?.detail || "No runtime data yet",
+          },
         ].map((card) => (
           <div
             key={card.label}
@@ -190,13 +236,13 @@ export default function OverviewPage() {
               card.warn ? "border-[#e5c4a8] bg-[#fff7f0]" : ""
             }`}
           >
-            <div className="text-[0.68rem] font-bold uppercase tracking-[0.12em] text-[#7e8982]">
+            <div className="text-[0.68rem] font-bold uppercase tracking-[0.12em] text-pj-muted">
               {card.label}
             </div>
-            <div className="mt-2 text-[1.65rem] font-extrabold tracking-[-0.04em] tabular-nums">
+            <div className="mt-2 text-[1.65rem] font-extrabold tracking-[-0.04em] tabular-nums text-pj-ink">
               {card.value}
             </div>
-            <div className="mt-1 text-xs text-[#718078]">{card.detail}</div>
+            <div className="mt-1 text-xs text-pj-muted">{card.detail}</div>
           </div>
         ))}
       </section>
@@ -234,7 +280,7 @@ export default function OverviewPage() {
           </div>
           <div className="overflow-hidden rounded-xl border border-pj-line">
             <table className="w-full text-left text-xs">
-              <thead className="bg-[#f3f0e9] text-[0.62rem] uppercase tracking-[0.08em] text-[#7e8982]">
+              <thead className="bg-pj-table-head text-[0.62rem] uppercase tracking-[0.08em] text-pj-muted">
                 <tr>
                   <th className="px-3 py-2.5 font-bold">Job</th>
                   <th className="px-3 py-2.5 font-bold">Type</th>
@@ -251,15 +297,15 @@ export default function OverviewPage() {
                     <tr
                       key={job.job_id}
                       onClick={() => setSelected(job)}
-                      className={`cursor-pointer border-t border-[#ebe8e1] hover:bg-[#f7f5ef] ${
+                      className={`cursor-pointer border-t border-pj-line hover:bg-pj-surface ${
                         isSel ? "bg-[#eef3ff]" : ""
                       }`}
                     >
                       <td className="px-3 py-2.5">
-                        <div className="font-bold text-[#1c2730]">
+                        <div className="font-bold text-pj-ink">
                           {job.job_name || `Job ${job.job_id}`}
                         </div>
-                        <div className="mt-0.5 text-[0.65rem] text-[#718078]">
+                        <div className="mt-0.5 text-[0.65rem] text-pj-muted">
                           {targetTable(job)}
                         </div>
                       </td>
@@ -292,7 +338,7 @@ export default function OverviewPage() {
                 })}
                 {!loading && filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-3 py-8 text-center text-[#718078]">
+                    <td colSpan={4} className="px-3 py-8 text-center text-pj-muted">
                       No configured jobs match the current filters.
                     </td>
                   </tr>
@@ -306,7 +352,7 @@ export default function OverviewPage() {
           {selected ? (
             <JobDetailPanel job={selected} onRan={() => void load()} />
           ) : (
-            <div className="text-sm text-[#718078]">Select a job to inspect details.</div>
+            <div className="text-sm text-pj-muted">Select a job to inspect details.</div>
           )}
         </div>
       </section>
@@ -332,7 +378,7 @@ export default function OverviewPage() {
                 <button
                   key={log.job_log_id}
                   type="button"
-                  className="flex w-full items-start gap-3 py-3 text-left hover:bg-[#f7f5ef]"
+                  className="flex w-full items-start gap-3 py-3 text-left hover:bg-pj-surface"
                   onClick={() => {
                     if (log.job_error) {
                       setErrorLog({
@@ -365,7 +411,7 @@ export default function OverviewPage() {
               );
             })}
             {!loading && !(data?.logs || []).length ? (
-              <div className="py-8 text-center text-sm text-[#718078]">No executions yet.</div>
+              <div className="py-8 text-center text-sm text-pj-muted">No executions yet.</div>
             ) : null}
           </div>
         </div>

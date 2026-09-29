@@ -12,11 +12,11 @@ if str(_ROOT) not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import cron, dashboard, jobs, logs, pgagent, readiness, scheduler
+from api.routers import cron, dashboard, jobs, logs, pgagent, readiness, scheduler, system
 
 app = FastAPI(
-    title="Partition Manager API",
-    description="HTTP facade over existing partition-job database and scheduler clients.",
+    title="PartOps API",
+    description="GTN EDB Partition Operations Platform — HTTP facade over partition-job database and scheduler clients.",
     version="1.0.0",
 )
 
@@ -38,9 +38,10 @@ app.include_router(logs.router, prefix="/api")
 app.include_router(pgagent.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(cron.router, prefix="/api")
+app.include_router(system.router, prefix="/api")
 
 
 @app.get("/health")
 @app.get("/api/health")
 def health() -> dict:
-    return {"ok": True, "service": "partition-manager-api"}
+    return {"ok": True, "service": "partops-api"}

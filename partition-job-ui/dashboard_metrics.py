@@ -106,6 +106,64 @@ def format_age(moment: Any, *, now: Optional[datetime] = None) -> str:
     return f"{secs // 86400}d ago"
 
 
+def format_duration_ms(value: Any) -> str:
+    """
+    Human-friendly duration from stored milliseconds.
+
+    NULL / missing → em dash (never invent values for old history).
+    """
+    if value is None or value == "":
+        return "—"
+    try:
+        ms = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if ms < 0:
+        return "—"
+    if ms < 1000:
+        return f"{ms} ms"
+    seconds = ms / 1000.0
+    if seconds < 60:
+        if seconds < 10:
+            text = f"{seconds:.2f}".rstrip("0").rstrip(".")
+            return f"{text} s"
+        text = f"{seconds:.1f}".rstrip("0").rstrip(".")
+        return f"{text} s"
+    total_secs = int(round(seconds))
+    minutes = total_secs // 60
+    rem = total_secs % 60
+    return f"{minutes}m {rem:02d}s"
+
+
+def average_execution_duration_ms(logs: list[dict[str, Any]]) -> dict[str, Any]:
+    """Average duration from rows where execution_duration_ms IS NOT NULL."""
+    values: list[int] = []
+    for row in logs:
+        raw = row.get("execution_duration_ms")
+        if raw is None or raw == "":
+            continue
+        try:
+            values.append(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if not values:
+        return {
+            "available": False,
+            "average_ms": None,
+            "label": "—",
+            "detail": "No runtime data yet",
+            "sample_count": 0,
+        }
+    avg = int(round(sum(values) / len(values)))
+    return {
+        "available": True,
+        "average_ms": avg,
+        "label": format_duration_ms(avg),
+        "detail": f"From {len(values)} recorded run{'s' if len(values) != 1 else ''}",
+        "sample_count": len(values),
+    }
+
+
 def target_table(job: dict[str, Any]) -> str:
     schema = job.get("table_schema") or ""
     table = job.get("table_name") or ""

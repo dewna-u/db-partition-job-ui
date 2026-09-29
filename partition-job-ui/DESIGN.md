@@ -1,7 +1,7 @@
-# Design system — Partition Manager
+# Design system — PartOps
 
 ## World
-Commercial PostgreSQL operations console. Cream paper workspace (`#f3f0e9` / `#fbfaf7`), charcoal rail (`#202c34`), lime identity mark (`#e5ff5c`), primary action blue (`#165dff`). Restrained status greens/ambers/reds. No glassmorphism, no purple gradients, no neon glow.
+**PartOps** — GTN EDB Partition Operations Platform. Commercial PostgreSQL ops console with Light / Dark / System themes via CSS variables (`--pj-*`). Light: cream paper (`#f3f0e9` / `#fbfaf7`). Dark: deep charcoal/navy content surfaces. Charcoal rail (`#202c34`) in both modes. Lime identity (`#e5ff5c`), primary blue (`#165dff` / brighter in dark). Restrained status greens/ambers/reds. No glassmorphism, no purple gradients, no neon glow.
 
 ## Typography
 - UI sans: `Geist` (or `Inter` fallback only if Geist unavailable via next/font).
@@ -9,10 +9,12 @@ Commercial PostgreSQL operations console. Cream paper workspace (`#f3f0e9` / `#f
 - Display headings: tight tracking (−0.03em), heavy weight; section labels uppercase 0.12em tracking, muted.
 
 ## Shell
-- Fixed left sidebar ~248px, permanent navigation (Overview, Convert, Create, Jobs, History).
+- Fixed left sidebar ~248px, permanent navigation (Overview, Convert, Create, Jobs, History, System readiness).
+- Compact PartOps mark + wordmark; no Workspace card.
+- Theme toggle (Light / Dark / System) in sidebar Appearance section.
 - No duplicate top nav tabs.
-- Page header: eyebrow “Operations console”, title, subtitle, page actions only (Export, New job).
-- Compact SYSTEM footer in sidebar: scheduler + database dots, last sync.
+- Page header: eyebrow “PartOps”, title, subtitle, page actions only (Export, New job).
+- Compact SYSTEM footer in sidebar: scheduler + database dots → links to `/system`.
 
 ## Components
 - KPI cards: subtle 1px border, soft offset shadow, large tabular numeral.

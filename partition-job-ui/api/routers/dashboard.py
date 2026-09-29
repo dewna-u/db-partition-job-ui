@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from api.deps import ok, raise_for_domain
 from dashboard_metrics import (
     FAIL_STATUSES,
+    average_execution_duration_ms,
     failed_count_recent,
     job_counts,
     next_execution,
@@ -52,6 +53,7 @@ def dashboard_summary():
     )
     fails_24h = failed_count_recent(logs, hours=24)
     insights = system_insights(jobs, logs, scheduler_ok=scheduler_ok, status=status)
+    avg_duration = average_execution_duration_ms(logs)
 
     return ok(
         {
@@ -63,6 +65,7 @@ def dashboard_summary():
             "scheduler_uptime": uptime,
             "failed_executions": fails,
             "failed_last_24h": fails_24h,
+            "average_duration": avg_duration,
             "insights": insights,
             "scheduler": {
                 "ok": scheduler_ok,

@@ -4,21 +4,20 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[9px] text-[0.72rem] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#165dff] focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-45",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[9px] text-[0.72rem] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pj-primary focus-visible:ring-offset-2 focus-visible:ring-offset-pj-bg disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       variant: {
         default:
-          "bg-[#165dff] text-white shadow-[0_8px_20px_#165dff2b] hover:bg-[#0f4fd6]",
+          "bg-pj-primary text-white shadow-[0_8px_20px_color-mix(in_srgb,var(--pj-primary)_17%,transparent)] hover:opacity-90",
         secondary:
-          "border border-[#c9c6bd] bg-[#fbfaf7] text-[#3f4e4a] hover:border-[#7f8d87] hover:bg-white",
+          "border border-pj-line bg-pj-card text-pj-ink hover:border-pj-muted hover:bg-pj-surface",
         outline:
-          "border border-[#c9c6bd] bg-transparent text-[#3f4e4a] hover:bg-white",
-        ghost: "text-[#5f6d68] hover:bg-[#efece4] hover:text-[#1c2730]",
+          "border border-pj-line bg-transparent text-pj-ink hover:bg-pj-surface",
+        ghost: "text-pj-muted hover:bg-pj-table-head hover:text-pj-ink",
         success:
-          "bg-[#1f8a64] text-white shadow-[0_8px_20px_#1f8a642b] hover:bg-[#187554]",
-        danger:
-          "bg-[#c76b2d] text-white hover:bg-[#a85720]",
+          "bg-pj-ok text-white shadow-[0_8px_20px_color-mix(in_srgb,var(--pj-ok)_17%,transparent)] hover:opacity-90",
+        danger: "bg-pj-warn text-white hover:opacity-90",
       },
       size: {
         default: "h-9 px-4 py-2",

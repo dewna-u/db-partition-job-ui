@@ -178,12 +178,15 @@ DECLARE
     v_lock_ok             boolean;
     v_cfg                 record;
     v_attempted           boolean := FALSE;
+    v_exec_start          timestamptz;
+    v_duration_ms         bigint;
 BEGIN
     v_now := clock_timestamp()::timestamp without time zone;
     v_status := 'FAILED';
     v_message := NULL;
     v_error := NULL;
     v_new_next_run := NULL;
+    v_duration_ms := NULL;
 
     -- Transaction-scoped advisory lock (no persistent session required).
     v_lock_ok := pg_try_advisory_xact_lock(
@@ -265,13 +268,18 @@ BEGIN
                last_run_status = 'FAIL'
          WHERE job_id = v_job.job_id;
         INSERT INTO mubasher_oms.partitioning_job_table_log (
-            job_id, job_name, last_run_status, job_runtime, job_error
+            job_id, job_name, last_run_status, job_runtime, job_error,
+            execution_duration_ms
         ) VALUES (
-            v_job.job_id, v_job.job_name, 'FAIL', v_now, message
+            v_job.job_id, v_job.job_name, 'FAIL', v_now, message, 0
         );
         RETURN NEXT;
         RETURN;
     END IF;
+
+    -- Measure wall-clock duration of config apply + partition worker only
+    -- (not queue wait). Recorded for both SUCCESS and FAIL attempts.
+    v_exec_start := clock_timestamp();
 
     -- Apply db_config_para for this transaction only (is_local = true).
     -- Verify against reference run_partition_create_jobs() when imported.
@@ -325,6 +333,11 @@ BEGIN
         END;
     END IF;
 
+    v_duration_ms := GREATEST(
+        0,
+        (EXTRACT(EPOCH FROM (clock_timestamp() - v_exec_start)) * 1000)::bigint
+    );
+
     -- Calculate next_run_time using authoritative cron helper + legacy CASE.
     BEGIN
         v_schedule := mubasher_oms.cron_to_interval_or_next_run(v_job.job_schedule);
@@ -368,12 +381,14 @@ BEGIN
      WHERE job_id = v_job.job_id;
 
     -- job_log_id uses column DEFAULT / sequence — do not supply it manually.
+    -- job_runtime = when the attempt occurred; execution_duration_ms = how long.
     INSERT INTO mubasher_oms.partitioning_job_table_log (
         job_id,
         job_name,
         last_run_status,
         job_runtime,
-        job_error
+        job_error,
+        execution_duration_ms
     ) VALUES (
         v_job.job_id,
         v_job.job_name,
@@ -382,7 +397,8 @@ BEGIN
             ELSE 'FAIL'
         END,
         v_now,
-        v_error
+        v_error,
+        v_duration_ms
     );
 
     status := v_status;
@@ -397,6 +413,7 @@ $function$;
 COMMENT ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone) IS
 'Execute one scheduled partition-job occurrence after DB revalidation. '
 'Uses exact create_any_table_partition / drop_any_table_partition signatures. '
+'Records execution_duration_ms on SUCCESS and FAIL log rows. '
 'Does not replace run_partition_job_manual. Does not call legacy polling runners.';
 
 

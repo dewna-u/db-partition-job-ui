@@ -156,6 +156,33 @@ def to_interval_string(amount: int, unit: str) -> str:
     return f"{amount} {unit}s"
 
 
+_INTERVAL_PARTS_RE = re.compile(
+    r"^\s*(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s*$",
+    re.IGNORECASE,
+)
+
+
+def parse_interval_parts(value: Any) -> tuple[int, str]:
+    """
+    Parse a PostgreSQL-ish interval literal such as '2 months' into (amount, unit).
+
+    Unit is returned in singular form matching the form validators.
+    """
+    text = trim_text(value)
+    if not text:
+        raise ValidationError("Interval value is required.")
+    match = _INTERVAL_PARTS_RE.match(text)
+    if not match:
+        raise ValidationError(
+            f"Could not parse interval '{text}'. Expected forms like '1 day' or '2 months'."
+        )
+    amount = int(match.group(1))
+    unit = match.group(2).lower().rstrip("s")
+    if amount < 1:
+        raise ValidationError("Interval amount must be greater than zero.")
+    return amount, unit
+
+
 def validate_form_data(raw: dict[str, Any]) -> dict[str, Any]:
     """
     Validate and normalise all form fields.

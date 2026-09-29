@@ -14,6 +14,8 @@ export type PartitionJob = {
   is_create?: boolean;
   create_drop_interval?: string | null;
   job_schedule?: string | null;
+  last_execution_duration_ms?: number | null;
+  avg_execution_duration_ms?: number | null;
 };
 
 export type JobLog = {
@@ -23,6 +25,7 @@ export type JobLog = {
   last_run_status: string | null;
   job_runtime: string | null;
   job_error: string | null;
+  execution_duration_ms?: number | null;
 };
 
 export type SchedulerStatus = {
@@ -70,6 +73,13 @@ export type DashboardSummary = {
   };
   failed_executions: number;
   failed_last_24h?: number;
+  average_duration?: {
+    available: boolean;
+    average_ms?: number | null;
+    label: string;
+    detail: string;
+    sample_count?: number;
+  };
   insights: string[];
   scheduler: {
     ok: boolean;
@@ -97,4 +107,53 @@ export type JobCreatePayload = {
   is_create: boolean;
   create_drop_amount: number;
   create_drop_unit: string;
+};
+
+export type JobUpdatePayload = JobCreatePayload & {
+  confirm_dangerous?: boolean;
+};
+
+export type ReadinessStatus =
+  | "ready"
+  | "warning"
+  | "failed"
+  | "not_required"
+  | "unknown";
+
+export type SystemReadinessCheck = {
+  key: string;
+  label: string;
+  category: string;
+  status: ReadinessStatus | string;
+  summary: string;
+  details?: Record<string, unknown> | unknown;
+  remediation_hint?: string;
+};
+
+export type SystemReadinessCategory = {
+  key: string;
+  label: string;
+  status: ReadinessStatus | string;
+  checks: SystemReadinessCheck[];
+};
+
+export type SystemReadinessCounts = {
+  ready: number;
+  warning: number;
+  failed: number;
+  not_required: number;
+  unknown: number;
+};
+
+export type SystemReadinessReport = {
+  overall_status: ReadinessStatus | string;
+  overall_label: string;
+  checked_at: string;
+  from_cache: boolean;
+  counts: SystemReadinessCounts;
+  categories: SystemReadinessCategory[];
+  product: {
+    name: string;
+    subtitle: string;
+  };
 };

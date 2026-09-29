@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { AppSidebar } from "@/components/shell/sidebar";
+import { ThemeProvider } from "@/components/theme/theme-provider";
 import { api } from "@/lib/api";
 import type { SchedulerStatus } from "@/lib/types";
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+function AppShellInner({ children }: { children: React.ReactNode }) {
   const [schedulerOk, setSchedulerOk] = useState(false);
   const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
   const [schedulerMessage, setSchedulerMessage] = useState("");
@@ -37,7 +38,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   return (
-    <div className="flex min-h-screen bg-[#f3f0e9] text-[#1c2730]">
+    <div className="flex min-h-screen bg-pj-bg text-pj-ink">
       <AppSidebar
         schedulerOk={schedulerOk}
         scheduler={scheduler}
@@ -47,8 +48,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       />
       <div className="flex min-h-screen min-w-0 flex-1 flex-col">
         <main className="flex-1 px-8 py-7">{children}</main>
-        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-[#ebe8e1] px-8 py-3 text-[0.68rem] text-[#8b958f]">
-          <strong className="font-extrabold text-[#5e6d66]">Partition Manager</strong>
+        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-pj-line px-8 py-3 text-[0.68rem] text-pj-muted">
+          <strong className="font-extrabold text-pj-ink">PartOps</strong>
+          <span className="text-pj-muted">GTN EDB Partition Operations Platform</span>
           <span>
             Scheduler heartbeat{" "}
             {schedulerOk
@@ -67,5 +69,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </footer>
       </div>
     </div>
+  );
+}
+
+export function AppShell({ children }: { children: React.ReactNode }) {
+  return (
+    <ThemeProvider>
+      <AppShellInner>{children}</AppShellInner>
+    </ThemeProvider>
   );
 }

@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
 from dotenv import load_dotenv
 from psycopg import Connection, Error as PsycopgError
+from psycopg.errors import UndefinedColumn
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -44,10 +46,12 @@ APPLICATION_NAME = "partition-job-ui"
 # change. Both values are validated as plain PostgreSQL identifiers before use.
 DEFAULT_PARTITION_JOB_SCHEMA = "mubasher_oms"
 DEFAULT_PARTITION_JOB_FUNCTION = "insert_data_to_partition_job_table"
+DEFAULT_PARTITION_JOB_UPDATE_FUNCTION = "update_data_to_partition_job_table"
 DEFAULT_PARTITION_JOB_TABLE = "partitioning_job_table"
 DEFAULT_PARTITION_JOB_LOG_TABLE = "partitioning_job_table_log"
 DEFAULT_PARTITION_JOB_SEQUENCE = "seq_partitioning_job_id"
 DEFAULT_MANUAL_RUN_FUNCTION = "run_partition_job_manual"
+DEFAULT_STAMP_DURATION_FUNCTION = "stamp_latest_job_log_duration"
 
 # The two generic scanners that replace per-table pgAgent jobs. The application
 # only ever *detects* these; it never creates pgAgent jobs.
@@ -109,8 +113,67 @@ SELECT {schema}.{function}(
 ) AS result;
 """
 
+_UPDATE_PARTITION_JOB_SQL_TEMPLATE = """
+SELECT {schema}.{function}(
+    p_job_id                   => %(job_id)s,
+    p_job_name                 => %(job_name)s,
+    p_is_enabled               => %(is_enabled)s,
+    p_table_schema             => %(table_schema)s,
+    p_table_name               => %(table_name)s,
+    p_db_config_para           => %(db_config)s,
+    p_job_schedule             => %(job_schedule)s,
+    p_frequency                => %(frequency)s::interval,
+    p_next_run_time            => %(next_run_time)s,
+    p_partition_unit           => %(partition_unit)s,
+    p_partition_period         => %(partition_period)s,
+    p_is_create                => %(is_create)s,
+    p_is_create_drop_interval  => %(create_drop_interval)s::interval
+) AS result;
+"""
+
+_STAMP_LOG_DURATION_SQL_TEMPLATE = """
+SELECT {schema}.{function}(
+    p_job_id      => %(job_id)s,
+    p_duration_ms => %(duration_ms)s
+) AS result;
+"""
+
 # Read-only view of the parameterised configurations. Each row IS a partition job.
 _PARTITION_JOBS_SQL_TEMPLATE = """
+SELECT
+    j.job_id,
+    j.job_name,
+    j.is_enabled,
+    j.table_schema,
+    j.table_name,
+    j.db_config_para,
+    j.frequency,
+    j.last_run_time,
+    j.next_run_time,
+    j.last_run_status,
+    j.partition_unit,
+    j.partition_period,
+    j.is_create,
+    j.create_drop_interval,
+    j.job_schedule,
+    (
+        SELECT l.execution_duration_ms
+          FROM {schema}.{log_table} AS l
+         WHERE l.job_id = j.job_id
+         ORDER BY l.job_runtime DESC NULLS LAST, l.job_log_id DESC
+         LIMIT 1
+    ) AS last_execution_duration_ms,
+    (
+        SELECT AVG(l.execution_duration_ms)::bigint
+          FROM {schema}.{log_table} AS l
+         WHERE l.job_id = j.job_id
+           AND l.execution_duration_ms IS NOT NULL
+    ) AS avg_execution_duration_ms
+FROM {schema}.{table} AS j
+ORDER BY j.job_id DESC;
+"""
+
+_PARTITION_JOBS_SQL_TEMPLATE_LEGACY = """
 SELECT
     job_id,
     job_name,
@@ -133,6 +196,40 @@ ORDER BY job_id DESC;
 
 _PARTITION_JOB_BY_ID_SQL_TEMPLATE = """
 SELECT
+    j.job_id,
+    j.job_name,
+    j.is_enabled,
+    j.table_schema,
+    j.table_name,
+    j.db_config_para,
+    j.frequency,
+    j.last_run_time,
+    j.next_run_time,
+    j.last_run_status,
+    j.partition_unit,
+    j.partition_period,
+    j.is_create,
+    j.create_drop_interval,
+    j.job_schedule,
+    (
+        SELECT l.execution_duration_ms
+          FROM {schema}.{log_table} AS l
+         WHERE l.job_id = j.job_id
+         ORDER BY l.job_runtime DESC NULLS LAST, l.job_log_id DESC
+         LIMIT 1
+    ) AS last_execution_duration_ms,
+    (
+        SELECT AVG(l.execution_duration_ms)::bigint
+          FROM {schema}.{log_table} AS l
+         WHERE l.job_id = j.job_id
+           AND l.execution_duration_ms IS NOT NULL
+    ) AS avg_execution_duration_ms
+FROM {schema}.{table} AS j
+WHERE j.job_id = %(job_id)s;
+"""
+
+_PARTITION_JOB_BY_ID_SQL_TEMPLATE_LEGACY = """
+SELECT
     job_id,
     job_name,
     is_enabled,
@@ -153,6 +250,20 @@ WHERE job_id = %(job_id)s;
 """
 
 _PARTITION_JOB_LOGS_SQL_TEMPLATE = """
+SELECT
+    job_log_id,
+    job_id,
+    job_name,
+    last_run_status,
+    job_runtime,
+    job_error,
+    execution_duration_ms
+FROM {schema}.{table}
+ORDER BY job_runtime DESC
+LIMIT %(row_limit)s;
+"""
+
+_PARTITION_JOB_LOGS_SQL_TEMPLATE_LEGACY = """
 SELECT
     job_log_id,
     job_id,
@@ -362,6 +473,29 @@ def partition_job_function_identity() -> tuple[str, str]:
     )
 
 
+def partition_job_update_function_identity() -> tuple[str, str]:
+    """Return the (schema, function) used to update an existing configuration."""
+    return (
+        _configured_identifier(
+            "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
+        ),
+        _configured_identifier(
+            "PARTITION_JOB_UPDATE_FUNCTION", DEFAULT_PARTITION_JOB_UPDATE_FUNCTION
+        ),
+    )
+
+
+def stamp_duration_function_identity() -> tuple[str, str]:
+    return (
+        _configured_identifier(
+            "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
+        ),
+        _configured_identifier(
+            "PARTITION_JOB_STAMP_DURATION_FUNCTION", DEFAULT_STAMP_DURATION_FUNCTION
+        ),
+    )
+
+
 def partition_job_schema() -> str:
     return _configured_identifier(
         "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
@@ -400,20 +534,53 @@ def build_create_partition_job_sql() -> str:
     )
 
 
-def build_partition_jobs_sql() -> str:
-    return _PARTITION_JOBS_SQL_TEMPLATE.format(
-        schema=partition_job_schema(), table=partition_job_table_name()
+def build_update_partition_job_sql() -> str:
+    schema, function_name = partition_job_update_function_identity()
+    return _UPDATE_PARTITION_JOB_SQL_TEMPLATE.format(
+        schema=schema, function=function_name
     )
 
 
-def build_partition_job_by_id_sql() -> str:
-    return _PARTITION_JOB_BY_ID_SQL_TEMPLATE.format(
-        schema=partition_job_schema(), table=partition_job_table_name()
+def build_stamp_log_duration_sql() -> str:
+    schema, function_name = stamp_duration_function_identity()
+    return _STAMP_LOG_DURATION_SQL_TEMPLATE.format(
+        schema=schema, function=function_name
     )
 
 
-def build_partition_job_logs_sql() -> str:
-    return _PARTITION_JOB_LOGS_SQL_TEMPLATE.format(
+def build_partition_jobs_sql(*, include_duration: bool = True) -> str:
+    template = (
+        _PARTITION_JOBS_SQL_TEMPLATE
+        if include_duration
+        else _PARTITION_JOBS_SQL_TEMPLATE_LEGACY
+    )
+    return template.format(
+        schema=partition_job_schema(),
+        table=partition_job_table_name(),
+        log_table=partition_job_log_table_name(),
+    )
+
+
+def build_partition_job_by_id_sql(*, include_duration: bool = True) -> str:
+    template = (
+        _PARTITION_JOB_BY_ID_SQL_TEMPLATE
+        if include_duration
+        else _PARTITION_JOB_BY_ID_SQL_TEMPLATE_LEGACY
+    )
+    return template.format(
+        schema=partition_job_schema(),
+        table=partition_job_table_name(),
+        log_table=partition_job_log_table_name(),
+    )
+
+
+def build_partition_job_logs_sql(*, include_duration: bool = True) -> str:
+    template = (
+        _PARTITION_JOB_LOGS_SQL_TEMPLATE
+        if include_duration
+        else _PARTITION_JOB_LOGS_SQL_TEMPLATE_LEGACY
+    )
+    return template.format(
         schema=partition_job_schema(), table=partition_job_log_table_name()
     )
 
@@ -1324,12 +1491,19 @@ def _validate_job_id(job_id: Any) -> int:
 
 def get_partition_jobs() -> list[dict]:
     """Return every parameterised configuration row. Read-only."""
-    statement = build_partition_jobs_sql()
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(statement)
-                return [dict(row) for row in cur.fetchall()]
+                try:
+                    cur.execute(build_partition_jobs_sql(include_duration=True))
+                except UndefinedColumn:
+                    conn.rollback()
+                    cur.execute(build_partition_jobs_sql(include_duration=False))
+                rows = [dict(row) for row in cur.fetchall()]
+                for row in rows:
+                    row.setdefault("last_execution_duration_ms", None)
+                    row.setdefault("avg_execution_duration_ms", None)
+                return rows
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
 
@@ -1337,13 +1511,27 @@ def get_partition_jobs() -> list[dict]:
 def get_partition_job(job_id: Any) -> Optional[dict]:
     """Return one parameterised configuration row, or None. Read-only."""
     job_id_int = _validate_job_id(job_id)
-    statement = build_partition_job_by_id_sql()
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(statement, {"job_id": job_id_int})
+                try:
+                    cur.execute(
+                        build_partition_job_by_id_sql(include_duration=True),
+                        {"job_id": job_id_int},
+                    )
+                except UndefinedColumn:
+                    conn.rollback()
+                    cur.execute(
+                        build_partition_job_by_id_sql(include_duration=False),
+                        {"job_id": job_id_int},
+                    )
                 row = cur.fetchone()
-                return dict(row) if row else None
+                if not row:
+                    return None
+                result = dict(row)
+                result.setdefault("last_execution_duration_ms", None)
+                result.setdefault("avg_execution_duration_ms", None)
+                return result
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
 
@@ -1356,13 +1544,70 @@ def get_partition_job_logs(limit: int = 100) -> list[dict]:
         row_limit = 100
     row_limit = max(1, min(row_limit, 1000))
 
-    statement = build_partition_job_logs_sql()
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(statement, {"row_limit": row_limit})
-                return [dict(row) for row in cur.fetchall()]
+                try:
+                    cur.execute(
+                        build_partition_job_logs_sql(include_duration=True),
+                        {"row_limit": row_limit},
+                    )
+                except UndefinedColumn:
+                    conn.rollback()
+                    cur.execute(
+                        build_partition_job_logs_sql(include_duration=False),
+                        {"row_limit": row_limit},
+                    )
+                rows = [dict(row) for row in cur.fetchall()]
+                for row in rows:
+                    row.setdefault("execution_duration_ms", None)
+                return rows
         except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def update_partition_job(job_id: Any, data: dict) -> Any:
+    """
+    Update an existing partition-job configuration via the approved DB function.
+
+    Never writes last_run_time / last_run_status / job_id. History is untouched.
+    """
+    job_id_int = _validate_job_id(job_id)
+    params = {
+        "job_id": job_id_int,
+        "job_name": data["job_name"],
+        "is_enabled": bool(data["is_enabled"]),
+        "table_schema": data["table_schema"],
+        "table_name": data["table_name"],
+        "db_config": Jsonb(data["db_config"]),
+        "job_schedule": data["job_schedule"],
+        "frequency": data["frequency"],
+        "next_run_time": data["next_run_time"],
+        "partition_unit": data["partition_unit"],
+        "partition_period": int(data["partition_period"]),
+        "is_create": bool(data["is_create"]),
+        "create_drop_interval": data["create_drop_interval"],
+    }
+    statement = build_update_partition_job_sql()
+
+    with _connection(_main_db_kwargs()) as conn:
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(statement, params)
+                    result = None
+                    if cur.description is not None:
+                        row = cur.fetchone()
+                        if row:
+                            result = row[0]
+            return result
+        except DatabaseError:
+            raise
+        except PsycopgError as exc:
+            # P0002 / no_data_found style from the update function → not found.
+            sqlstate = getattr(exc, "sqlstate", None) or ""
+            if sqlstate in ("P0002", "02000") or "not found" in str(exc).lower():
+                raise DatabaseError(f"Job {job_id_int} not found.") from None
             raise _map_psycopg_error(exc) from None
 
 
@@ -1374,25 +1619,55 @@ def run_partition_job_manual(job_id: Any) -> Any:
     writes execution history. next_run_time is deliberately never modified here —
     scheduling stays under database control so a manual retry does not disturb
     the automatic schedule.
+
+    Wall-clock duration of the DB call is measured here and stamped onto the
+    newest log row when execution_duration_ms is still NULL (so a future native
+    duration write inside the DB function is not overwritten). Stamping is a
+    separate short transaction so a missing duration column/function never
+    undoes a successful manual run.
     """
     job_id_int = _validate_job_id(job_id)
     statement = build_run_partition_job_manual_sql()
+    stamp_sql = build_stamp_log_duration_sql()
+    duration_ms = 0
+    result: Any = None
 
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    started = time.perf_counter()
                     cur.execute(statement, {"job_id": job_id_int})
-                    result = None
+                    duration_ms = max(
+                        0, int(round((time.perf_counter() - started) * 1000))
+                    )
                     if cur.description is not None:
                         row = cur.fetchone()
                         if row:
                             result = row[0]
-            return result
         except DatabaseError:
             raise
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+    try:
+        with _connection(_main_db_kwargs()) as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        stamp_sql,
+                        {"job_id": job_id_int, "duration_ms": duration_ms},
+                    )
+                    if cur.description is not None:
+                        cur.fetchone()
+    except Exception:
+        # Duration stamp is best-effort until migrations are applied.
+        logger.exception(
+            "Could not stamp execution_duration_ms for job_id=%s after manual run",
+            job_id_int,
+        )
+
+    return result
 
 
 def get_generic_partition_schedulers() -> dict[str, Any]:

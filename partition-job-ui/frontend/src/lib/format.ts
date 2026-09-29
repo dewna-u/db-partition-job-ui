@@ -102,3 +102,58 @@ export function isFailStatus(status?: string | null): boolean {
 export function isSuccessStatus(status?: string | null): boolean {
   return SUCCESS.has((status || "").toUpperCase());
 }
+
+/** Format stored execution_duration_ms for display. NULL → em dash. */
+export function formatDurationMs(value?: number | null): string {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  const ms = Math.trunc(Number(value));
+  if (ms < 0) return "—";
+  if (ms < 1000) return `${ms} ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) {
+    if (seconds < 10) {
+      const text = seconds.toFixed(2).replace(/\.?0+$/, "");
+      return `${text} s`;
+    }
+    const text = seconds.toFixed(1).replace(/\.0$/, "");
+    return `${text} s`;
+  }
+  const totalSecs = Math.round(seconds);
+  const minutes = Math.floor(totalSecs / 60);
+  const rem = totalSecs % 60;
+  return `${minutes}m ${String(rem).padStart(2, "0")}s`;
+}
+
+/** Parse PostgreSQL-ish interval like "2 months" → { amount, unit }. */
+export function parseIntervalParts(
+  value?: string | null,
+): { amount: number; unit: string } | null {
+  if (!value) return null;
+  const match = String(value)
+    .trim()
+    .match(
+      /^(\d+)\s+(minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)$/i,
+    );
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase().replace(/s$/, "");
+  if (!amount || amount < 1) return null;
+  return { amount, unit };
+}
+
+export function dbConfigToString(value: unknown): string {
+  if (value == null) return "{}";
+  if (typeof value === "string") {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value;
+    }
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+

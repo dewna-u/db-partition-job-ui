@@ -11,6 +11,45 @@
   --pj-primary: #165dff;
   --pj-lime: #e5ff5c;
   --pj-sidebar: #202c34;
+  --pj-sidebar-border: #45535a;
+  --pj-sidebar-muted: #8a9691;
+  --pj-surface: #ffffff;
+  --pj-table-head: #f5f3ee;
+  --pj-ok: #1f8a64;
+  --pj-warn: #b8672d;
+  --pj-fail: #c4473a;
+  --pj-create-bg: #e7edff;
+  --pj-drop-bg: #fff0e5;
+  --pj-ok-bg: #f3faf6;
+  --pj-warn-bg: #fff7f0;
+  --pj-fail-bg: #fff5f3;
+  --pj-focus: #165dff;
+  --background: var(--pj-bg);
+  --foreground: var(--pj-ink);
+}
+
+.dark {
+  --pj-bg: #0f1419;
+  --pj-card: #161d24;
+  --pj-line: #2a3540;
+  --pj-ink: #e8ecef;
+  --pj-muted: #8a9aa8;
+  --pj-primary: #4d8bff;
+  --pj-lime: #d4f05a;
+  --pj-sidebar: #202c34;
+  --pj-sidebar-border: #45535a;
+  --pj-sidebar-muted: #8a9691;
+  --pj-surface: #1a2229;
+  --pj-table-head: #1e2730;
+  --pj-ok: #3ecf9a;
+  --pj-warn: #e8a05c;
+  --pj-fail: #f07167;
+  --pj-create-bg: #1a2840;
+  --pj-drop-bg: #2a2218;
+  --pj-ok-bg: #122820;
+  --pj-warn-bg: #2a2218;
+  --pj-fail-bg: #2a1816;
+  --pj-focus: #4d8bff;
   --background: var(--pj-bg);
   --foreground: var(--pj-ink);
 }
@@ -27,18 +66,24 @@ body {
 body {
   color: var(--foreground);
   background:
-    radial-gradient(circle at 74% 0%, #dbe8ff 0, transparent 27rem),
-    linear-gradient(135deg, #f3f0e9 0%, #eeece5 100%);
+    radial-gradient(circle at 74% 0%, color-mix(in srgb, var(--pj-primary) 12%, transparent) 0, transparent 27rem),
+    linear-gradient(135deg, var(--pj-bg) 0%, color-mix(in srgb, var(--pj-bg) 92%, var(--pj-ink)) 100%);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
+.dark body {
+  background:
+    radial-gradient(circle at 72% -5%, color-mix(in srgb, var(--pj-primary) 18%, transparent) 0, transparent 32rem),
+    linear-gradient(160deg, #0f1419 0%, #121a22 45%, #0d1116 100%);
+}
+
 ::selection {
-  background: #cfe0ff;
-  color: #1c2730;
+  background: color-mix(in srgb, var(--pj-primary) 35%, transparent);
+  color: var(--pj-ink);
 }
 
 :focus-visible {
-  outline: 3px solid #165dff;
+  outline: 3px solid var(--pj-focus);
   outline-offset: 2px;
 }
 
