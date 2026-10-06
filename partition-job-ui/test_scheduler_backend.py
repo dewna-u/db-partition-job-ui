@@ -110,6 +110,61 @@ class NoPoolNoPersistentConnectionTests(unittest.TestCase):
             self.assertNotIn('load_dotenv(".env"', source)
             self.assertNotIn("load_dotenv('.env'", source)
 
+    def test_api_scheduler_client_does_not_load_env_realtime(self) -> None:
+        root = os.path.dirname(__file__)
+        path = os.path.join(root, "scheduler_client.py")
+        source = open(path, encoding="utf-8").read()
+        self.assertNotIn(".env.realtime", source)
+        self.assertNotIn("load_dotenv", source)
+        self.assertIn("PARTITION_SCHEDULER_REFRESH_URL", source)
+        self.assertIn("http://127.0.0.1:8765", source)
+
+    def test_reloading_scheduler_client_does_not_open_env_realtime(self) -> None:
+        import builtins
+        import importlib
+
+        opened = []
+        real_open = builtins.open
+
+        def tracking_open(file, *args, **kwargs):
+            opened.append(str(file))
+            if str(file).replace("\\", "/").endswith(".env.realtime"):
+                raise AssertionError("API/scheduler_client must not open .env.realtime")
+            return real_open(file, *args, **kwargs)
+
+        with patch("builtins.open", tracking_open):
+            importlib.reload(scheduler_client)
+
+        self.assertFalse(
+            any(str(path).replace("\\", "/").endswith(".env.realtime") for path in opened)
+        )
+        ok, _payload, message = scheduler_client.fetch_scheduler_status()
+        self.assertFalse(ok)
+        self.assertIn("unavailable", message.lower())
+
+    def test_api_main_import_does_not_open_env_realtime(self) -> None:
+        import builtins
+        import importlib
+
+        import api.main as api_main
+
+        opened = []
+        real_open = builtins.open
+
+        def tracking_open(file, *args, **kwargs):
+            opened.append(str(file))
+            if str(file).replace("\\", "/").endswith(".env.realtime"):
+                raise AssertionError("API import must not open .env.realtime")
+            return real_open(file, *args, **kwargs)
+
+        with patch("builtins.open", tracking_open):
+            importlib.reload(api_main)
+
+        self.assertFalse(
+            any(str(path).replace("\\", "/").endswith(".env.realtime") for path in opened)
+        )
+        self.assertIsNotNone(api_main.app)
+
 
 class QueueManagerTests(unittest.TestCase):
     def test_orders_by_due_then_job_id(self) -> None:

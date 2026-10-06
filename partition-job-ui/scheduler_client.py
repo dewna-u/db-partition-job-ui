@@ -13,12 +13,6 @@ import urllib.error
 import urllib.request
 from typing import Any, Optional
 
-from dotenv import load_dotenv
-
-# Prefer realtime overrides for scheduler URLs without forcing password overwrite.
-load_dotenv(".env.realtime", override=False)
-load_dotenv(".env", override=False)
-
 logger = logging.getLogger(__name__)
 
 
