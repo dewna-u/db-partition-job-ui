@@ -492,6 +492,26 @@ class ManualDurationMigrationContractTests(unittest.TestCase):
             "DROP FUNCTION IF EXISTS mubasher_oms.run_partition_job_manual(numeric) CASCADE",
             text,
         )
+        self.assertIn("v_dependents > 0", text)
+        self.assertIn("SECURITY INVOKER", text)
+        create_at = text.find("CREATE FUNCTION mubasher_oms.run_partition_job_manual")
+        owner_at = text.find(
+            "ALTER FUNCTION mubasher_oms.run_partition_job_manual(numeric)"
+        )
+        grant_at = text.find(
+            "GRANT EXECUTE ON FUNCTION\n    mubasher_oms.run_partition_job_manual(numeric)"
+        )
+        self.assertGreater(create_at, 0)
+        self.assertGreater(owner_at, create_at)
+        self.assertGreater(grant_at, owner_at)
+        self.assertNotIn("GRANT ALL ON", text)
+        self.assertNotIn("-- GRANT EXECUTE ON FUNCTION", text)
+        grant_stmt = text[grant_at : text.find(";", grant_at) + 1]
+        self.assertIn("partition_job_ui", grant_stmt)
+        self.assertIn(
+            "ALTER FUNCTION mubasher_oms.run_partition_job_manual(numeric)",
+            text,
+        )
 
     def test_manual_does_not_modify_schedule_columns(self) -> None:
         text = self._manual_sql()

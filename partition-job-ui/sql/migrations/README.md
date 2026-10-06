@@ -17,7 +17,9 @@ Apply in a controlled DBA window, in order:
    MANUAL_FAIL log INSERT**. Worker failures **return** `status = MANUAL_FAIL`
    instead of `RAISE`, so the calling transaction can COMMIT the failure log.
    Return contract: `TABLE(status text, message text, execution_duration_ms bigint)`.
-   Re-GRANT `EXECUTE` after DROP. There is no `stamp_latest_job_log_duration` helper.
+   Restore `OWNER TO mubasher_oms` after CREATE. Re-GRANT `EXECUTE` to
+   `partition_job_ui` after DROP (not GRANT ALL). There is no
+   `stamp_latest_job_log_duration` helper.
 
 4. Deploy **both** realtime scheduler functions from `../realtime_scheduler_v1.sql`:
    - `mubasher_oms.get_upcoming_partition_jobs(interval)`

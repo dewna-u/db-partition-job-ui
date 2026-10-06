@@ -14,10 +14,12 @@
 --   2. DROP FUNCTION mubasher_oms.run_partition_job_manual(numeric)
 --      WITHOUT CASCADE so unexpected dependents fail the migration loudly.
 --   3. CREATE FUNCTION ... RETURNS TABLE(status, message, execution_duration_ms)
+--   4. ALTER FUNCTION ... OWNER TO mubasher_oms
+--   5. GRANT EXECUTE ... TO partition_job_ui  (not GRANT ALL)
 --
 -- Source-tree callers: the UI/API SELECT only. There is no SQL wrapper that
--- depends on the void signature. Re-GRANT EXECUTE after DROP (privileges
--- do not survive DROP FUNCTION).
+-- depends on the void signature. DROP drops owner and privileges, so both
+-- must be restored after CREATE.
 --
 -- Behaviour:
 --   * fetch job row (missing job still RAISE — no attempt, no log)
@@ -195,8 +197,11 @@ COMMENT ON FUNCTION mubasher_oms.run_partition_job_manual(numeric) IS
 'status/message/duration; MANUAL_FAIL does not RAISE so the caller can COMMIT. '
 'Does not change next_run_time, last_run_time, or last_run_status.';
 
--- Privileges are dropped with the function. Re-grant if the app role exists:
--- GRANT EXECUTE ON FUNCTION mubasher_oms.run_partition_job_manual(numeric)
---     TO partition_job_ui;
+ALTER FUNCTION mubasher_oms.run_partition_job_manual(numeric)
+    OWNER TO mubasher_oms;
+
+GRANT EXECUTE ON FUNCTION
+    mubasher_oms.run_partition_job_manual(numeric)
+    TO partition_job_ui;
 
 COMMIT;
