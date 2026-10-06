@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import time
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
@@ -51,7 +50,6 @@ DEFAULT_PARTITION_JOB_TABLE = "partitioning_job_table"
 DEFAULT_PARTITION_JOB_LOG_TABLE = "partitioning_job_table_log"
 DEFAULT_PARTITION_JOB_SEQUENCE = "seq_partitioning_job_id"
 DEFAULT_MANUAL_RUN_FUNCTION = "run_partition_job_manual"
-DEFAULT_STAMP_DURATION_FUNCTION = "stamp_latest_job_log_duration"
 
 # The two generic scanners that replace per-table pgAgent jobs. The application
 # only ever *detects* these; it never creates pgAgent jobs.
@@ -128,13 +126,6 @@ SELECT {schema}.{function}(
     p_partition_period         => %(partition_period)s,
     p_is_create                => %(is_create)s,
     p_is_create_drop_interval  => %(create_drop_interval)s::interval
-) AS result;
-"""
-
-_STAMP_LOG_DURATION_SQL_TEMPLATE = """
-SELECT {schema}.{function}(
-    p_job_id      => %(job_id)s,
-    p_duration_ms => %(duration_ms)s
 ) AS result;
 """
 
@@ -485,17 +476,6 @@ def partition_job_update_function_identity() -> tuple[str, str]:
     )
 
 
-def stamp_duration_function_identity() -> tuple[str, str]:
-    return (
-        _configured_identifier(
-            "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
-        ),
-        _configured_identifier(
-            "PARTITION_JOB_STAMP_DURATION_FUNCTION", DEFAULT_STAMP_DURATION_FUNCTION
-        ),
-    )
-
-
 def partition_job_schema() -> str:
     return _configured_identifier(
         "PARTITION_JOB_SCHEMA", DEFAULT_PARTITION_JOB_SCHEMA
@@ -537,13 +517,6 @@ def build_create_partition_job_sql() -> str:
 def build_update_partition_job_sql() -> str:
     schema, function_name = partition_job_update_function_identity()
     return _UPDATE_PARTITION_JOB_SQL_TEMPLATE.format(
-        schema=schema, function=function_name
-    )
-
-
-def build_stamp_log_duration_sql() -> str:
-    schema, function_name = stamp_duration_function_identity()
-    return _STAMP_LOG_DURATION_SQL_TEMPLATE.format(
         schema=schema, function=function_name
     )
 
@@ -1616,31 +1589,20 @@ def run_partition_job_manual(job_id: Any) -> Any:
     Execute an already-configured partition job immediately.
 
     Delegates entirely to the database function, which chooses create or drop and
-    writes execution history. next_run_time is deliberately never modified here —
-    scheduling stays under database control so a manual retry does not disturb
-    the automatic schedule.
-
-    Wall-clock duration of the DB call is measured here and stamped onto the
-    newest log row when execution_duration_ms is still NULL (so a future native
-    duration write inside the DB function is not overwritten). Stamping is a
-    separate short transaction so a missing duration column/function never
-    undoes a successful manual run.
+    writes execution history including execution_duration_ms on the same log
+    INSERT. next_run_time is deliberately never modified here — scheduling stays
+    under database control so a manual retry does not disturb the automatic
+    schedule.
     """
     job_id_int = _validate_job_id(job_id)
     statement = build_run_partition_job_manual_sql()
-    stamp_sql = build_stamp_log_duration_sql()
-    duration_ms = 0
     result: Any = None
 
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
-                    started = time.perf_counter()
                     cur.execute(statement, {"job_id": job_id_int})
-                    duration_ms = max(
-                        0, int(round((time.perf_counter() - started) * 1000))
-                    )
                     if cur.description is not None:
                         row = cur.fetchone()
                         if row:
@@ -1649,23 +1611,6 @@ def run_partition_job_manual(job_id: Any) -> Any:
             raise
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
-
-    try:
-        with _connection(_main_db_kwargs()) as conn:
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute(
-                        stamp_sql,
-                        {"job_id": job_id_int, "duration_ms": duration_ms},
-                    )
-                    if cur.description is not None:
-                        cur.fetchone()
-    except Exception:
-        # Duration stamp is best-effort until migrations are applied.
-        logger.exception(
-            "Could not stamp execution_duration_ms for job_id=%s after manual run",
-            job_id_int,
-        )
 
     return result
 

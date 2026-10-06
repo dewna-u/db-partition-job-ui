@@ -1,28 +1,36 @@
 -- =============================================================================
--- Migration: redeploy run_partition_job_scheduled with duration capture
+-- Deploy realtime scheduler functions (including duration capture)
 -- =============================================================================
 -- PREPARED ONLY — do NOT auto-apply to production.
 --
 -- Prerequisite: 20260929_01_add_execution_duration_ms.sql
 --
--- Source of truth for the function body is:
---   sql/realtime_scheduler_v1.sql  (section: run_partition_job_scheduled)
---
--- After adding execution_duration_ms, redeploy that function from the updated
--- realtime_scheduler_v1.sql (CREATE OR REPLACE FUNCTION ... through COMMENT).
---
--- Changes vs prior scheduled executor:
---   * Measures wall-clock around db_config_para apply + create/drop worker
---   * Stores execution_duration_ms on SUCCESS and FAIL log inserts
---   * Does not change next_run_time / success-failure semantics
---
--- Rollback: restore the previous CREATE OR REPLACE body of
+-- The live database may not yet have EITHER of:
+--   mubasher_oms.get_upcoming_partition_jobs(interval)
 --   mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone)
---   from your backup / prior realtime_scheduler_v1.sql revision (without
---   execution_duration_ms in the INSERT). Historical duration values remain.
+--
+-- Source of truth for BOTH function bodies:
+--   sql/realtime_scheduler_v1.sql
+--
+-- Apply the full file (or at least both CREATE OR REPLACE FUNCTION blocks plus
+-- comments). This is not a duration-only patch of an already-deployed executor.
+--
+-- Scheduled duration design (inside run_partition_job_scheduled):
+--   * v_now is refreshed after FOR UPDATE
+--   * wall-clock around db_config_para apply + create/drop worker
+--   * execution_duration_ms stored on SUCCESS and FAIL log inserts
+--   * is_create NULL stores duration NULL and advances next_run_time by 1 day
+--
+-- After deploy, verify:
+--   SELECT to_regprocedure('mubasher_oms.get_upcoming_partition_jobs(interval)');
+--   SELECT to_regprocedure(
+--       'mubasher_oms.run_partition_job_scheduled(numeric,timestamp without time zone)'
+--   );
+-- Both must be NOT NULL before starting partition-job-scheduler.service.
+--
+-- Rollback: DROP FUNCTION the two realtime functions only if they were newly
+-- created by this deploy and no scheduler is using them. Do not drop
+-- run_partition_job_manual or partition workers.
 -- =============================================================================
 
--- Apply by executing the CREATE OR REPLACE FUNCTION block for
--- run_partition_job_scheduled from sql/realtime_scheduler_v1.sql after the
--- duration column migration has been applied.
-SELECT 'Apply run_partition_job_scheduled from sql/realtime_scheduler_v1.sql after 20260929_01'::text AS instruction;
+SELECT 'Apply sql/realtime_scheduler_v1.sql (get_upcoming + run_partition_job_scheduled) after 20260929_01'::text AS instruction;

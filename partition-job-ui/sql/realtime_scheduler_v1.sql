@@ -219,6 +219,9 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Recalculate after FOR UPDATE so due-time checks use post-lock time.
+    v_now := clock_timestamp()::timestamp without time zone;
+
     IF v_job.is_enabled IS NOT TRUE THEN
         status := 'SKIPPED_DISABLED';
         job_id := v_job.job_id;
@@ -261,17 +264,20 @@ BEGIN
         status := 'FAILED';
         job_id := v_job.job_id;
         message := 'is_create is NULL; refusing to decide CREATE vs DROP.';
-        next_run_time := v_job.next_run_time;
+        next_run_time := v_now + interval '1 day';
         is_create := NULL;
-        UPDATE mubasher_oms.partitioning_job_table
+        -- No CREATE/DROP worker ran — duration is unknown, not 0ms.
+        -- Advance next_run_time so an invalid job cannot tight-loop overdue.
+        UPDATE mubasher_oms.partitioning_job_table AS j
            SET last_run_time   = v_now,
-               last_run_status = 'FAIL'
-         WHERE job_id = v_job.job_id;
+               last_run_status = 'FAIL',
+               next_run_time   = v_now + interval '1 day'
+         WHERE j.job_id = v_job.job_id;
         INSERT INTO mubasher_oms.partitioning_job_table_log (
             job_id, job_name, last_run_status, job_runtime, job_error,
             execution_duration_ms
         ) VALUES (
-            v_job.job_id, v_job.job_name, 'FAIL', v_now, message, 0
+            v_job.job_id, v_job.job_name, 'FAIL', v_now, message, NULL
         );
         RETURN NEXT;
         RETURN;
@@ -371,14 +377,14 @@ BEGIN
         v_attempted := TRUE;
     END IF;
 
-    UPDATE mubasher_oms.partitioning_job_table
+    UPDATE mubasher_oms.partitioning_job_table AS j
        SET last_run_time   = v_now,
            last_run_status = CASE
                                  WHEN v_status = 'EXECUTED' THEN 'SUCCESS'
                                  ELSE 'FAIL'
                              END,
            next_run_time   = COALESCE(v_new_next_run, v_now + interval '1 day')
-     WHERE job_id = v_job.job_id;
+     WHERE j.job_id = v_job.job_id;
 
     -- job_log_id uses column DEFAULT / sequence — do not supply it manually.
     -- job_runtime = when the attempt occurred; execution_duration_ms = how long.

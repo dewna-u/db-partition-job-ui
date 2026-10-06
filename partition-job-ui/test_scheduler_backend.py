@@ -446,6 +446,51 @@ class SqlMigrationPresenceTests(unittest.TestCase):
         text = self._read_sql("realtime_scheduler_v1.sql")
         self.assertIn("IF v_job.is_create IS NULL THEN", text)
         self.assertIn("refusing to decide CREATE vs DROP", text)
+        null_block = text.split("IF v_job.is_create IS NULL THEN", 1)[1]
+        null_block = null_block.split("END IF;", 1)[0]
+        self.assertIn("execution_duration_ms", null_block)
+        self.assertIn("NULL", null_block)
+        self.assertNotRegex(null_block, r"execution_duration_ms[^\n]{0,40}0")
+        self.assertIn("next_run_time   = v_now + interval '1 day'", null_block)
+        self.assertIn("UPDATE mubasher_oms.partitioning_job_table AS j", null_block)
+        self.assertIn("WHERE j.job_id = v_job.job_id", null_block)
+
+    def test_v_now_refreshed_after_for_update(self) -> None:
+        text = self._read_sql("realtime_scheduler_v1.sql")
+        lock_at = text.find("FOR UPDATE;")
+        self.assertGreater(lock_at, 0)
+        found_at = text.find("IF NOT FOUND THEN", lock_at)
+        post_lock_now = text.find(
+            "v_now := clock_timestamp()::timestamp without time zone;",
+            lock_at,
+        )
+        due_check = text.find("IF v_job.next_run_time > v_now THEN")
+        enabled_check = text.find("IF v_job.is_enabled IS NOT TRUE THEN")
+        self.assertGreater(found_at, lock_at)
+        self.assertGreater(post_lock_now, found_at)
+        self.assertLess(post_lock_now, enabled_check)
+        self.assertLess(post_lock_now, due_check)
+
+    def test_updates_are_alias_qualified(self) -> None:
+        text = self._read_sql("realtime_scheduler_v1.sql")
+        self.assertIn("UPDATE mubasher_oms.partitioning_job_table AS j", text)
+        self.assertIn("WHERE j.job_id = v_job.job_id", text)
+        self.assertNotIn(
+            "UPDATE mubasher_oms.partitioning_job_table\n"
+            "       SET last_run_time",
+            text,
+        )
+
+    def test_scheduled_success_and_fail_store_duration(self) -> None:
+        text = self._read_sql("realtime_scheduler_v1.sql")
+        self.assertIn("v_exec_start := clock_timestamp();", text)
+        self.assertIn("v_duration_ms", text)
+        insert_tail = text.split("INSERT INTO mubasher_oms.partitioning_job_table_log (")[-1]
+        self.assertIn("execution_duration_ms", insert_tail.split(") VALUES (")[0])
+        values = insert_tail.split(") VALUES (")[1].split(");")[0]
+        self.assertIn("v_duration_ms", values)
+        self.assertIn("'SUCCESS'", insert_tail)
+        self.assertIn("'FAIL'", insert_tail)
 
     def test_preflight_is_read_only(self) -> None:
         text = self._read_sql("preflight_realtime_database.sql")

@@ -238,10 +238,6 @@ class RequiredFunctionsTests(unittest.TestCase):
             "partition_job_update_function_identity",
             return_value=("mubasher_oms", "update_data_to_partition_job_table"),
         ), patch.object(
-            sr,
-            "stamp_duration_function_identity",
-            return_value=("mubasher_oms", "stamp_latest_job_log_duration"),
-        ), patch.object(
             sr, "manual_run_function_name", return_value="run_partition_job_manual"
         ):
             checks = check_required_functions()
@@ -255,6 +251,10 @@ class RequiredFunctionsTests(unittest.TestCase):
             and c["status"] == STATUS_FAILED
         ]
         self.assertEqual(required_failed, [])
+        self.assertFalse(any(c["key"] == "stamp_duration_function" for c in checks))
+        source = inspect.getsource(sr.check_required_functions)
+        self.assertNotIn("stamp_latest_job_log_duration", source)
+        self.assertNotIn("stamp_duration_function", source)
 
 
 class RuntimeConfigurationTests(unittest.TestCase):

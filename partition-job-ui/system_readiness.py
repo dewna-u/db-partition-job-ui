@@ -30,7 +30,6 @@ from database import (
     partition_job_schema,
     partition_job_table_name,
     partition_job_update_function_identity,
-    stamp_duration_function_identity,
 )
 from scheduler_client import fetch_scheduler_status, scheduler_status_url
 
@@ -406,7 +405,6 @@ def check_required_functions() -> List[Dict[str, Any]]:
     schema = partition_job_schema()
     _, insert_fn = partition_job_function_identity()
     _, update_fn = partition_job_update_function_identity()
-    _, stamp_fn = stamp_duration_function_identity()
     manual_fn = manual_run_function_name()
 
     required: List[Tuple[str, str, str, str]] = [
@@ -454,12 +452,6 @@ def check_required_functions() -> List[Dict[str, Any]]:
             "Update configuration function",
             update_fn,
             UPDATE_FUNCTION_ARGUMENT_TYPES,
-        ),
-        (
-            "stamp_duration_function",
-            "stamp_latest_job_log_duration",
-            stamp_fn,
-            "numeric, bigint",
         ),
     ]
 
@@ -511,7 +503,7 @@ def check_required_functions() -> List[Dict[str, Any]]:
                                 category,
                                 STATUS_WARNING,
                                 f"{identity} is not deployed (optional for some flows).",
-                                remediation_hint="Apply update/stamp migrations if you use edit or manual duration.",
+                                remediation_hint="Apply 20260929_02_update_data_to_partition_job_table.sql for Edit.",
                             )
                         )
     except DatabaseError as exc:
