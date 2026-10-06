@@ -271,7 +271,8 @@ LIMIT %(row_limit)s;
 # between create/drop and writes history; next_run_time is intentionally left
 # untouched so a manual retry never disturbs the automatic schedule.
 _RUN_PARTITION_JOB_MANUAL_SQL_TEMPLATE = """
-SELECT {schema}.{function}(%(job_id)s) AS result;
+SELECT status, message, execution_duration_ms
+  FROM {schema}.{function}(%(job_id)s);
 """
 
 # Read-only privilege introspection. to_reg* keeps the check safe when an object
@@ -1584,33 +1585,60 @@ def update_partition_job(job_id: Any, data: dict) -> Any:
             raise _map_psycopg_error(exc) from None
 
 
+_MANUAL_FAIL_STATUSES = frozenset({"MANUAL_FAIL", "FAIL", "FAILED"})
+
+
 def run_partition_job_manual(job_id: Any) -> Any:
     """
     Execute an already-configured partition job immediately.
 
     Delegates entirely to the database function, which chooses create or drop and
-    writes execution history including execution_duration_ms on the same log
-    INSERT. next_run_time is deliberately never modified here — scheduling stays
-    under database control so a manual retry does not disturb the automatic
-    schedule.
+    writes MANUAL_SUCCESS / MANUAL_FAIL with execution_duration_ms on the same
+    log INSERT. The function returns that outcome instead of RAISEing on worker
+    failure so this connection can COMMIT the failure log first.
+
+    next_run_time is deliberately never modified here — scheduling stays under
+    database control so a manual retry does not disturb the automatic schedule.
     """
     job_id_int = _validate_job_id(job_id)
     statement = build_run_partition_job_manual_sql()
-    result: Any = None
+    result: Optional[dict] = None
+    failure_message: Optional[str] = None
 
     with _connection(_main_db_kwargs()) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute(statement, {"job_id": job_id_int})
-                    if cur.description is not None:
-                        row = cur.fetchone()
-                        if row:
-                            result = row[0]
+                    row = cur.fetchone() if cur.description is not None else None
         except DatabaseError:
             raise
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+        status = ""
+        message = None
+        duration_ms = None
+        if row:
+            status = str(row[0] or "").strip()
+            if len(row) > 1:
+                message = row[1]
+            if len(row) > 2:
+                duration_ms = row[2]
+            result = {
+                "status": status,
+                "message": message,
+                "execution_duration_ms": duration_ms,
+            }
+            if status.upper() in _MANUAL_FAIL_STATUSES:
+                failure_message = (
+                    str(message).strip()
+                    if message
+                    else "Manual partition job execution failed."
+                )
+
+    if failure_message:
+        raise DatabaseError(failure_message)
 
     return result
 

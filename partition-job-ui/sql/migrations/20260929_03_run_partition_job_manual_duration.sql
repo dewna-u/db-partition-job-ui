@@ -1,37 +1,77 @@
 -- =============================================================================
--- Migration: run_partition_job_manual stores execution_duration_ms atomically
+-- Migration: run_partition_job_manual stores duration atomically and
+--            returns a structured result so MANUAL_FAIL can COMMIT
 -- =============================================================================
 -- PREPARED ONLY — do NOT auto-apply to production.
 --
 -- Prerequisite: 20260929_01_add_execution_duration_ms.sql
 --
--- CREATE OR REPLACE of the existing authoritative function:
---   mubasher_oms.run_partition_job_manual(numeric) RETURNS void
+-- PostgreSQL cannot CREATE OR REPLACE a function to change RETURNS void
+-- into RETURNS TABLE. This migration therefore:
 --
--- Behaviour preserved:
---   * fetch job row
+--   1. Inspects that only the (numeric) signature exists (no extra overloads
+--      in this product).
+--   2. DROP FUNCTION mubasher_oms.run_partition_job_manual(numeric)
+--      WITHOUT CASCADE so unexpected dependents fail the migration loudly.
+--   3. CREATE FUNCTION ... RETURNS TABLE(status, message, execution_duration_ms)
+--
+-- Source-tree callers: the UI/API SELECT only. There is no SQL wrapper that
+-- depends on the void signature. Re-GRANT EXECUTE after DROP (privileges
+-- do not survive DROP FUNCTION).
+--
+-- Behaviour:
+--   * fetch job row (missing job still RAISE — no attempt, no log)
 --   * apply db_config_para with set_config(..., is_local = true)
 --   * CREATE -> create_any_table_partition(varchar, varchar, varchar, integer, interval)
 --   * DROP  -> drop_any_table_partition(varchar, varchar, interval)
---   * success log status = MANUAL_SUCCESS
---   * failure log status = MANUAL_FAIL
+--   * success: INSERT MANUAL_SUCCESS + duration, RETURN status MANUAL_SUCCESS
+--   * failure: INSERT MANUAL_FAIL + duration, RETURN status MANUAL_FAIL
+--     (do NOT RAISE — that would abort the transaction and lose the log)
 --   * does NOT change next_run_time / last_run_time / last_run_status
---   * RAISE after MANUAL_FAIL log insert
 --
 -- Duration is measured around config apply + worker, then written on the SAME
 -- INSERT as the log row. There is no "stamp latest log" helper.
---
--- Rollback: restore the previous CREATE OR REPLACE body of
---   mubasher_oms.run_partition_job_manual(numeric)
---   from the reference database (without execution_duration_ms in the INSERT).
 -- =============================================================================
 
 BEGIN;
 
-CREATE OR REPLACE FUNCTION mubasher_oms.run_partition_job_manual(
+DO $$
+DECLARE
+    v_dependents integer;
+BEGIN
+    -- Other objects that normally depend on this function (views, other
+    -- functions, etc.). Internal pg_proc/extension links use other deptypes.
+    SELECT count(*)
+      INTO v_dependents
+      FROM pg_catalog.pg_proc AS p
+      JOIN pg_catalog.pg_namespace AS n
+        ON n.oid = p.pronamespace
+      JOIN pg_catalog.pg_depend AS d
+        ON d.refobjid = p.oid
+       AND d.deptype = 'n'
+     WHERE n.nspname = 'mubasher_oms'
+       AND p.proname = 'run_partition_job_manual'
+       AND pg_catalog.pg_get_function_identity_arguments(p.oid) = 'numeric';
+
+    IF v_dependents > 0 THEN
+        RAISE EXCEPTION
+            'run_partition_job_manual(numeric) has % dependent object(s); '
+            'refusing DROP without CASCADE. Inspect pg_depend before migrating.',
+            v_dependents;
+    END IF;
+END;
+$$;
+
+DROP FUNCTION IF EXISTS mubasher_oms.run_partition_job_manual(numeric);
+
+CREATE FUNCTION mubasher_oms.run_partition_job_manual(
     p_job_id numeric
 )
-RETURNS void
+RETURNS TABLE (
+    status text,
+    message text,
+    execution_duration_ms bigint
+)
 LANGUAGE plpgsql
 SECURITY INVOKER
 AS $function$
@@ -104,6 +144,17 @@ BEGIN
             NULL,
             v_duration_ms
         );
+
+        status := 'MANUAL_SUCCESS';
+        message := CASE
+            WHEN v_job.is_create IS TRUE THEN
+                'CREATE partition operation completed.'
+            ELSE
+                'DROP partition operation completed.'
+        END;
+        execution_duration_ms := v_duration_ms;
+        RETURN NEXT;
+        RETURN;
     EXCEPTION
         WHEN OTHERS THEN
             v_error := SQLERRM;
@@ -128,14 +179,24 @@ BEGIN
                 v_error,
                 v_duration_ms
             );
-            RAISE;
+            -- Do not RAISE: the caller must be able to COMMIT this log row.
+            status := 'MANUAL_FAIL';
+            message := v_error;
+            execution_duration_ms := v_duration_ms;
+            RETURN NEXT;
+            RETURN;
     END;
 END;
 $function$;
 
 COMMENT ON FUNCTION mubasher_oms.run_partition_job_manual(numeric) IS
 'Execute one configured partition job immediately. Writes MANUAL_SUCCESS or '
-'MANUAL_FAIL with execution_duration_ms on the same log INSERT. Does not '
-'change next_run_time, last_run_time, or last_run_status.';
+'MANUAL_FAIL with execution_duration_ms on the same log INSERT. Returns '
+'status/message/duration; MANUAL_FAIL does not RAISE so the caller can COMMIT. '
+'Does not change next_run_time, last_run_time, or last_run_status.';
+
+-- Privileges are dropped with the function. Re-grant if the app role exists:
+-- GRANT EXECUTE ON FUNCTION mubasher_oms.run_partition_job_manual(numeric)
+--     TO partition_job_ui;
 
 COMMIT;

@@ -1087,16 +1087,34 @@ class ManualRunTests(unittest.TestCase):
             return database.run_partition_job_manual(job_id)
 
     def test_uses_bound_parameter_and_manual_function(self) -> None:
-        conn = FakeConnection(row=("MANUAL_SUCCESS",))
+        conn = FakeConnection(
+            row=("MANUAL_SUCCESS", "CREATE partition operation completed.", 12)
+        )
         result = self._run(conn)
         sql, params = conn.executed[0]
 
-        self.assertEqual(result, "MANUAL_SUCCESS")
+        self.assertEqual(result["status"], "MANUAL_SUCCESS")
+        self.assertEqual(result["execution_duration_ms"], 12)
         self.assertIn("mubasher_oms.run_partition_job_manual", sql)
         self.assertIn("%(job_id)s", sql)
         self.assertEqual(params, {"job_id": 7})
         self.assertNotIn("7", sql)
         self.assertTrue(conn.committed)
+
+    def test_fail_status_commits_then_raises(self) -> None:
+        conn = FakeConnection(
+            row=("MANUAL_FAIL", "worker boom", 45)
+        )
+        with self.assertRaises(database.DatabaseError) as ctx:
+            self._run(conn)
+        self.assertIn("worker boom", ctx.exception.message)
+        self.assertTrue(conn.committed)
+        self.assertFalse(conn.rolled_back)
+        sql, params = conn.executed[0]
+        self.assertIn("run_partition_job_manual", sql)
+        self.assertEqual(params, {"job_id": 7})
+        self.assertNotIn("stamp_latest", sql.lower())
+        self.assertNotIn("duration_ms", params)
 
     def test_does_not_touch_next_run_time(self) -> None:
         conn = FakeConnection(row=(None,))

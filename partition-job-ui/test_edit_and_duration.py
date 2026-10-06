@@ -342,7 +342,11 @@ class DurationApiAndManualPathTests(unittest.TestCase):
         mock_conn = MagicMock()
         mock_cur = MagicMock()
         mock_cur.description = [("result",)]
-        mock_cur.fetchone.return_value = ("ok",)
+        mock_cur.fetchone.return_value = (
+            "MANUAL_SUCCESS",
+            "CREATE partition operation completed.",
+            12,
+        )
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
         mock_conn.__exit__ = MagicMock(return_value=False)
         mock_conn.transaction.return_value.__enter__ = MagicMock(return_value=None)
@@ -359,7 +363,8 @@ class DurationApiAndManualPathTests(unittest.TestCase):
         ):
             result = database.run_partition_job_manual(34)
 
-        self.assertEqual(result, "ok")
+        self.assertEqual(result["status"], "MANUAL_SUCCESS")
+        self.assertEqual(result["execution_duration_ms"], 12)
         self.assertEqual(mock_cur.execute.call_count, 1)
         sql, params = mock_cur.execute.call_args[0]
         self.assertIn("run_partition_job_manual", sql)
@@ -367,6 +372,22 @@ class DurationApiAndManualPathTests(unittest.TestCase):
         self.assertNotIn("duration_ms", params)
         self.assertFalse(hasattr(database, "build_stamp_log_duration_sql"))
         self.assertFalse(hasattr(database, "stamp_duration_function_identity"))
+
+    def test_python_raises_failure_after_connection_block(self) -> None:
+        import inspect
+        import database
+
+        source = inspect.getsource(database.run_partition_job_manual)
+        conn_at = source.find("with _connection(")
+        raise_at = source.rfind("raise DatabaseError(failure_message)")
+        self.assertGreater(conn_at, 0)
+        self.assertGreater(raise_at, conn_at)
+        after_conn = source[source.find("with _connection(") :]
+        # The application-level failure raise must not sit inside the transaction.
+        self.assertIn("if failure_message:", source[source.rfind("with _connection(") :])
+        nested = after_conn.split("if failure_message:", 1)
+        self.assertEqual(len(nested), 2)
+        self.assertNotIn("with conn.transaction()", nested[1])
 
     def test_run_now_api_still_accepts_manual_run(self) -> None:
         client = TestClient(app)
@@ -381,6 +402,22 @@ class DurationApiAndManualPathTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         run_mock.assert_called_once_with(34)
         self.assertIn("completed", res.json()["message"])
+
+    def test_run_now_api_surfaces_manual_failure(self) -> None:
+        from database import DatabaseError
+
+        client = TestClient(app)
+        job = {"job_id": 34, "job_name": "JOB_A", "is_create": True}
+        with patch(
+            "api.routers.jobs.get_database_readiness",
+            return_value={"config_table_select": True},
+        ), patch("api.routers.jobs.get_partition_job", return_value=job), patch(
+            "api.routers.jobs.run_partition_job_manual",
+            side_effect=DatabaseError("worker boom"),
+        ):
+            res = client.post("/api/jobs/34/run")
+        self.assertEqual(res.status_code, 502)
+        self.assertIn("worker boom", res.json()["detail"])
 
     def test_update_sql_does_not_touch_last_run_columns(self) -> None:
         import database
@@ -439,6 +476,22 @@ class ManualDurationMigrationContractTests(unittest.TestCase):
         self.assertIn("v_duration_ms", fail_tail[:800])
         fail_head = text.split("'MANUAL_FAIL'")[0]
         self.assertIn("execution_duration_ms", fail_head[-400:])
+
+    def test_manual_fail_returns_without_reraise(self) -> None:
+        text = self._manual_sql()
+        handler = text.split("WHEN OTHERS THEN", 1)[1].split("END;", 1)[0]
+        self.assertIn("status := 'MANUAL_FAIL'", handler)
+        self.assertIn("RETURN NEXT", handler)
+        self.assertNotIn("RAISE;", handler)
+        self.assertIn("RETURNS TABLE", text)
+        self.assertIn(
+            "DROP FUNCTION IF EXISTS mubasher_oms.run_partition_job_manual(numeric);",
+            text,
+        )
+        self.assertNotIn(
+            "DROP FUNCTION IF EXISTS mubasher_oms.run_partition_job_manual(numeric) CASCADE",
+            text,
+        )
 
     def test_manual_does_not_modify_schedule_columns(self) -> None:
         text = self._manual_sql()

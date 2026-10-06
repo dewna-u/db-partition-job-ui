@@ -12,9 +12,12 @@ Apply in a controlled DBA window, in order:
    Config-edit function. Does not touch `job_id`, `last_run_time`, `last_run_status`, or logs.
 
 3. `20260929_03_run_partition_job_manual_duration.sql`  
-   CREATE OR REPLACE `mubasher_oms.run_partition_job_manual(numeric)` so duration is stored
-   **atomically in the same MANUAL_SUCCESS / MANUAL_FAIL log INSERT**.  
-   There is no `stamp_latest_job_log_duration` helper.
+   Replaces `mubasher_oms.run_partition_job_manual(numeric)` (DROP without CASCADE,
+   then CREATE) so duration is stored **atomically in the same MANUAL_SUCCESS /
+   MANUAL_FAIL log INSERT**. Worker failures **return** `status = MANUAL_FAIL`
+   instead of `RAISE`, so the calling transaction can COMMIT the failure log.
+   Return contract: `TABLE(status text, message text, execution_duration_ms bigint)`.
+   Re-GRANT `EXECUTE` after DROP. There is no `stamp_latest_job_log_duration` helper.
 
 4. Deploy **both** realtime scheduler functions from `../realtime_scheduler_v1.sql`:
    - `mubasher_oms.get_upcoming_partition_jobs(interval)`
@@ -31,7 +34,14 @@ error — do not enable Edit in production until this function exists and the
 app role has `EXECUTE`.
 
 Until (3) is applied, manual runs still succeed but new duration values will
-not be stored on MANUAL_SUCCESS / MANUAL_FAIL rows.
+not be stored on MANUAL_SUCCESS / MANUAL_FAIL rows, and a worker `RAISE` can
+still roll back a MANUAL_FAIL insert.
+
+After (3), `SELECT status, message, execution_duration_ms FROM
+mubasher_oms.run_partition_job_manual(job_id)` returns the outcome. The
+application COMMITs first, then maps `MANUAL_FAIL` to an HTTP error. Missing
+jobs still `RAISE` (no attempt, no log). The function does not change
+`next_run_time`, `last_run_time`, or `last_run_status`.
 
 ## Before starting the realtime scheduler
 
