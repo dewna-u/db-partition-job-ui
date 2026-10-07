@@ -456,8 +456,18 @@ Streamlit UI (config only)          Scheduler backend (persistent process)
 
 Important properties:
 
-* PostgreSQL is authoritative; memory is temporary.
-* Streamlit is **not** the scheduler.
+* PostgreSQL is authoritative; memory is temporary/ephemeral.
+* Occurrence identity for an attempt is `(job_id, expected_run_time)` where
+  `expected_run_time` is the job row’s current `next_run_time` at discovery.
+* After locking the row (`FOR UPDATE`), stale timers
+  (`expected_run_time ≠ next_run_time`) and disabled jobs are rejected before
+  CREATE/DROP workers run.
+* After a handled occurrence, `next_run_time` must advance to a **future**
+  timestamp distinct from that occurrence (no same-`T` tight loop).
+* Overdue semantics: discover overdue jobs, execute the current occurrence
+  **once**, then advance to the next **future** occurrence — not an
+  uncontrolled miss-by-miss catch-up storm.
+* Streamlit/Next.js UI is **not** the scheduler.
 * No Redis, Celery, Kafka, RabbitMQ, LISTEN/NOTIFY, or connection pools.
 * DB connections are open → one logical operation → close immediately.
 * Idle timer waits hold **zero** database sessions.
@@ -467,6 +477,8 @@ Important properties:
 * Overdue jobs remain discoverable after downtime (`delay_seconds <= 0` → run immediately after revalidation).
 * Same-time jobs execute sequentially ordered by `next_run_time`, then `job_id`.
 * OS singleton lock prevents two backends; DB uses `FOR UPDATE` + `pg_try_advisory_xact_lock`.
+* Secondary Python circuit breaker (process-local) refuses rediscovery of an
+  occurrence already handled in this process lifetime; DB remains primary.
 
 ### New database configuration (production-copy / sensitive)
 

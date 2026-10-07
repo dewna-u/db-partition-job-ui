@@ -489,7 +489,55 @@ If the scheduler is down:
 | Overview shows DB errors | Bad `.env` or missing grants | Fix `.env`; ask DBA for least-privilege grants (UI never grants) |
 | Scheduler `Permission denied: '.env'` | Scheduler tried to load UI `.env` | Scheduler must load **only** `.env.realtime`; restore owners (partitionui vs enterprisedb) |
 | Scheduler always offline | Scheduler service down / wrong status URL | Start scheduler; check `PARTITION_SCHEDULER_STATUS_URL` |
+| Scheduler repeated same occurrence | Occurrence `T` not advanced / stale SQL | See §10.1; keep scheduler STOPPED until SQL+Python Phase 0 fix deployed |
 | API bind conflict on 8000 | Unrelated app owns 8000 | PartOps must use **8001** |
+
+### 10.1 Scheduler repeated-execution emergency
+
+If journal shows the same `job_id` + `expected_run_time` executing repeatedly:
+
+1. **Immediately stop** (do not bounce-restart):
+   ```bash
+   sudo systemctl stop partition-job-scheduler.service
+   ```
+2. Confirm API/UI separately (`systemctl status partition-job-api`,
+   `partition-job-ui`). Configuration UI may stay up; scheduled DDL must not.
+3. Inspect scheduler journal for `job_id`, `expected_run_time`, result, and
+   `returned_next_run_time` / circuit-breaker CRITICAL lines:
+   ```bash
+   sudo journalctl -u partition-job-scheduler.service -n 200 --no-pager
+   ```
+4. With a DBA read-only session, identify for the suspect job:
+   - `next_run_time`, `is_enabled`, `job_schedule`, `frequency`
+   - recent `partitioning_job_table_log` rows (`last_run_status`,
+     `job_runtime`, `execution_duration_ms`)
+5. Verify scheduler functions exist:
+   ```sql
+   SELECT to_regprocedure(
+     'mubasher_oms.run_partition_job_scheduled(numeric,timestamp without time zone)'
+   );
+   SELECT to_regprocedure(
+     'mubasher_oms.get_upcoming_partition_jobs(interval)'
+   );
+   ```
+6. Verify deployed SQL includes occurrence-advancement safety (non-future /
+   same-as-`p_expected_run_time` rejection) and that Python includes the
+   circuit breaker (`scheduler_backend/scheduler.py`).
+7. Restart the scheduler **only after** root cause is understood and corrected
+   SQL + Python are both live.
+
+### 10.2 Scheduler pre-start safety checklist
+
+Before `systemctl start partition-job-scheduler.service`:
+
+- [ ] Scheduler remains stopped until checks pass
+- [ ] `.env.realtime` is `enterprisedb:enterprisedb` mode `600`
+- [ ] API `.env` is `partitionui:partitionui` mode `600` (API must not read `.env.realtime`)
+- [ ] Both realtime functions resolve via `to_regprocedure`
+- [ ] Phase 0 occurrence-safety SQL is deployed (or equivalent body)
+- [ ] Deployed Python includes circuit breaker / logging of `expected_run_time`
+- [ ] No known job is intentionally left with a pathological non-advancing schedule
+- [ ] Watch journal after start for first executions and any CRITICAL breaker lines
 
 Manual API start (for debugging):
 

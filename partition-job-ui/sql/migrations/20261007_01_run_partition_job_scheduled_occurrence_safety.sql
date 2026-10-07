@@ -1,158 +1,26 @@
--- ============================================================================
--- realtime_scheduler_v1.sql
--- ============================================================================
--- NEW DATABASE ONLY (production-copy / sensitive). Do NOT run on live reference.
+﻿-- =============================================================================
+-- Migration: Phase 0 scheduled-occurrence safety for run_partition_job_scheduled
+-- =============================================================================
+-- PREPARED ONLY — do NOT auto-apply to production.
 --
--- Prerequisites (must already exist from bootstrap + reference-function import):
---   mubasher_oms.partitioning_job_table
---   mubasher_oms.partitioning_job_table_log
---   mubasher_oms.cron_schedule_result
---   mubasher_oms.cron_to_interval_or_next_run(text)
---   mubasher_oms.create_any_table_partition(varchar,varchar,varchar,integer,interval)
---   mubasher_oms.drop_any_table_partition(varchar,varchar,interval)
+-- Prerequisite: mubasher_oms.run_partition_job_scheduled already deployed
+-- (or deploy from sql/realtime_scheduler_v1.sql first).
 --
--- This file creates ONLY:
---   get_upcoming_partition_jobs(interval)
---   run_partition_job_scheduled(numeric, timestamp without time zone)
+-- Same return type — CREATE OR REPLACE is sufficient (no DROP).
+-- Authoritative body is kept in sync with sql/realtime_scheduler_v1.sql.
 --
--- No LISTEN/NOTIFY. No legacy runner changes.
--- Tables must remain empty of production-copy target rows until controlled onboarding.
+-- Safety added:
+--   * After worker attempt, next_run_time must be a FUTURE timestamp
+--     distinct from p_expected_run_time (occurrence T).
+--   * Invalid / non-future cron helper results use frequency or 1-day fallback.
+--   * Prevents same (job_id, expected_run_time) tight-loop after EXECUTED.
+--   * Overdue semantics: execute once, advance to next future occurrence
+--     (no miss-by-miss catch-up storm).
 --
--- DO NOT RUN until:
---   1. preflight reviewed
---   2. bootstrap applied
---   3. missing reference functions imported and signature-verified
---   4. TEMP TABLE _partition_realtime_migration_approved created in-session
---   5. explicit human approval
--- ============================================================================
-
-
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1
-          FROM pg_catalog.pg_class c
-          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-         WHERE c.relname = '_partition_realtime_migration_approved'
-           AND n.nspname LIKE 'pg_temp%'
-           AND c.relkind = 'r'
-    ) THEN
-        RAISE EXCEPTION
-            'Refusing realtime migration: create TEMP TABLE '
-            '_partition_realtime_migration_approved AS '
-            'SELECT now() AS approved_at, current_database() AS approved_database; '
-            'after explicit approval. Current database=%',
-            current_database();
-    END IF;
-END
-$$;
-
-
--- Dependency checks (fail closed; no function DDL until these pass)
-DO $$
-DECLARE
-    v_missing text := '';
-BEGIN
-    IF to_regclass('mubasher_oms.partitioning_job_table') IS NULL THEN
-        v_missing := v_missing || ' partitioning_job_table';
-    END IF;
-    IF to_regclass('mubasher_oms.partitioning_job_table_log') IS NULL THEN
-        v_missing := v_missing || ' partitioning_job_table_log';
-    END IF;
-    IF to_regtype('mubasher_oms.cron_schedule_result') IS NULL THEN
-        v_missing := v_missing || ' cron_schedule_result';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-          FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'mubasher_oms'
-           AND p.proname = 'create_any_table_partition'
-    ) THEN
-        v_missing := v_missing || ' create_any_table_partition';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-          FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'mubasher_oms'
-           AND p.proname = 'drop_any_table_partition'
-    ) THEN
-        v_missing := v_missing || ' drop_any_table_partition';
-    END IF;
-    IF NOT EXISTS (
-        SELECT 1
-          FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-         WHERE n.nspname = 'mubasher_oms'
-           AND p.proname = 'cron_to_interval_or_next_run'
-    ) THEN
-        v_missing := v_missing || ' cron_to_interval_or_next_run';
-    END IF;
-
-    IF v_missing <> '' THEN
-        RAISE EXCEPTION
-            'Realtime migration prerequisites missing:% — apply bootstrap and import '
-            'authoritative reference function definitions first.',
-            v_missing;
-    END IF;
-END
-$$;
-
+-- Also redeploy Python scheduler_backend for secondary circuit breaker.
+-- =============================================================================
 
 BEGIN;
-
--- ----------------------------------------------------------------------------
--- 1. Upcoming jobs discovery (READ ONLY)
--- ----------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION mubasher_oms.get_upcoming_partition_jobs(
-    p_lookahead interval
-)
-RETURNS TABLE (
-    job_id            numeric,
-    job_name          character varying,
-    is_create         boolean,
-    expected_run_time timestamp without time zone,
-    delay_seconds     double precision
-)
-LANGUAGE plpgsql
-STABLE
-SECURITY INVOKER
-AS $function$
-DECLARE
-    v_now timestamp without time zone;
-BEGIN
-    IF p_lookahead IS NULL OR p_lookahead <= interval '0' THEN
-        RAISE EXCEPTION
-            'get_upcoming_partition_jobs: p_lookahead must be NOT NULL and > 0 (got %)',
-            p_lookahead;
-    END IF;
-
-    v_now := clock_timestamp()::timestamp without time zone;
-
-    RETURN QUERY
-    SELECT
-        j.job_id,
-        j.job_name,
-        j.is_create,
-        j.next_run_time AS expected_run_time,
-        EXTRACT(EPOCH FROM (j.next_run_time - v_now))::double precision AS delay_seconds
-    FROM mubasher_oms.partitioning_job_table AS j
-    WHERE j.is_enabled IS TRUE
-      AND j.next_run_time IS NOT NULL
-      AND j.next_run_time <= v_now + p_lookahead
-    ORDER BY j.next_run_time ASC, j.job_id ASC;
-END;
-$function$;
-
-COMMENT ON FUNCTION mubasher_oms.get_upcoming_partition_jobs(interval) IS
-'Read-only discovery of enabled partition jobs due within the lookahead window '
-'(including overdue). Used by the realtime scheduler backend. Does not mutate data.';
-
-
--- ----------------------------------------------------------------------------
--- 2. Single scheduled occurrence executor
--- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION mubasher_oms.run_partition_job_scheduled(
     p_job_id numeric,
     p_expected_run_time timestamp without time zone
@@ -266,7 +134,7 @@ BEGIN
         message := 'is_create is NULL; refusing to decide CREATE vs DROP.';
         next_run_time := v_now + interval '1 day';
         is_create := NULL;
-        -- No CREATE/DROP worker ran — duration is unknown, not 0ms.
+        -- No CREATE/DROP worker ran â€” duration is unknown, not 0ms.
         -- Advance next_run_time so an invalid job cannot tight-loop overdue.
         UPDATE mubasher_oms.partitioning_job_table AS j
            SET last_run_time   = v_now,
@@ -414,7 +282,7 @@ BEGIN
            next_run_time   = COALESCE(v_new_next_run, v_now + interval '1 day')
      WHERE j.job_id = v_job.job_id;
 
-    -- job_log_id uses column DEFAULT / sequence — do not supply it manually.
+    -- job_log_id uses column DEFAULT / sequence â€” do not supply it manually.
     -- job_runtime = when the attempt occurred; execution_duration_ms = how long.
     INSERT INTO mubasher_oms.partitioning_job_table_log (
         job_id,
@@ -450,63 +318,7 @@ COMMENT ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp 
 'Records execution_duration_ms on SUCCESS and FAIL log rows. '
 'Advances next_run_time to a future occurrence distinct from p_expected_run_time. '
 'Rejects stale expected_run_time and disabled jobs before workers run. '
-'Does not replace run_partition_job_manual. Does not call legacy polling runners.';
-
-
--- ----------------------------------------------------------------------------
--- 3. Least-privilege grants (role must already exist — DBA creates it)
--- ----------------------------------------------------------------------------
--- Do NOT GRANT ALL. Do NOT grant DDL over existing business tables here.
--- Production table onboarding is a separate controlled DBA action.
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'partition_job_scheduler') THEN
-        RAISE NOTICE
-            'Role partition_job_scheduler does not exist — skipping grants. '
-            'Create the role, then re-run the GRANT section manually.';
-        RETURN;
-    END IF;
-
-    EXECUTE 'GRANT USAGE ON SCHEMA mubasher_oms TO partition_job_scheduler';
-    EXECUTE 'GRANT EXECUTE ON FUNCTION mubasher_oms.get_upcoming_partition_jobs(interval) TO partition_job_scheduler';
-    EXECUTE 'GRANT EXECUTE ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone) TO partition_job_scheduler';
-    EXECUTE 'GRANT SELECT ON mubasher_oms.partitioning_job_table TO partition_job_scheduler';
-    EXECUTE 'GRANT UPDATE (last_run_time, last_run_status, next_run_time) ON mubasher_oms.partitioning_job_table TO partition_job_scheduler';
-    EXECUTE 'GRANT INSERT ON mubasher_oms.partitioning_job_table_log TO partition_job_scheduler';
-END
-$$;
-
--- Downstream EXECUTE on workers/cron is required for SECURITY INVOKER:
---   GRANT EXECUTE ON FUNCTION mubasher_oms.create_any_table_partition(varchar, varchar, varchar, integer, interval)
---       TO partition_job_scheduler;
---   GRANT EXECUTE ON FUNCTION mubasher_oms.drop_any_table_partition(varchar, varchar, interval)
---       TO partition_job_scheduler;
---   GRANT EXECUTE ON FUNCTION mubasher_oms.cron_to_interval_or_next_run(text)
---       TO partition_job_scheduler;
--- Plus only the table-level privileges needed for explicitly onboarded targets.
-
-
--- ----------------------------------------------------------------------------
--- 4. Verification
--- ----------------------------------------------------------------------------
-SELECT proname, pg_get_function_identity_arguments(oid) AS args
-  FROM pg_proc
- WHERE pronamespace = 'mubasher_oms'::regnamespace
-   AND proname IN (
-         'get_upcoming_partition_jobs',
-         'run_partition_job_scheduled'
-       )
- ORDER BY 1;
+'Does not replace run_partition_job_manual. Does not call legacy polling runners.'
 
 COMMIT;
 
-
--- ----------------------------------------------------------------------------
--- ROLLBACK NOTES (NEW realtime objects only)
--- ----------------------------------------------------------------------------
---   DROP FUNCTION IF EXISTS mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone);
---   DROP FUNCTION IF EXISTS mubasher_oms.get_upcoming_partition_jobs(interval);
---
--- Do NOT drop legacy/reference functions or application schemas/tables.
--- Legacy runners are preserved for rollback and are NOT called by the backend.
