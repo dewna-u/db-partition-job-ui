@@ -99,12 +99,22 @@ def _db_kwargs() -> dict[str, Any]:
 
 @contextmanager
 def open_connection(purpose: str) -> Generator[Connection, None, None]:
-    """Open one short-lived connection, verify DB name, then always close."""
+    """Open one short-lived connection, verify DB name, then always close.
+
+    Database identity uses ``SELECT current_database()``. With psycopg's
+    default ``autocommit=False`` that SELECT would otherwise leave an open
+    transaction, causing later ``conn.transaction()`` to nest as a savepoint
+    whose outer rollback discarded EXECUTED next_run_time updates. After the
+    identity check we ``commit()`` so the connection is idle before yield.
+    That commit ends only the read-only safety SELECT — no business DML yet.
+    """
     logger.debug("Opening DB connection for %s", purpose)
     conn: Optional[Connection] = None
     try:
         conn = connect(**_db_kwargs())
         assert_expected_database(read_current_database(conn))
+        # End the implicit transaction from the identity SELECT.
+        conn.commit()
         yield conn
         logger.debug("DB operation completed for %s", purpose)
     finally:
@@ -167,6 +177,7 @@ def execute_scheduled_job(
     )
     with open_connection(f"scheduled job {job_id}") as conn:
         try:
+            # Top-level transaction: identity check already committed above.
             with conn.transaction():
                 with conn.cursor(row_factory=dict_row) as cur:
                     cur.execute(
@@ -178,8 +189,9 @@ def execute_scheduled_job(
                     )
                     row = cur.fetchone()
                     if not row:
+                        # No SQL result row — do not claim a committed occurrence.
                         return {
-                            "status": "FAILED",
+                            "status": "FAILED_DATABASE",
                             "job_id": job_id,
                             "message": "Scheduled executor returned no row.",
                             "next_run_time": None,
@@ -187,15 +199,18 @@ def execute_scheduled_job(
                         }
                     return dict(row)
         except PsycopgError as exc:
+            # Transaction aborted / rolled back — occurrence NOT handled.
+            # Must not return SQL-style FAILED (that status is cacheable).
             logger.exception(
-                "Scheduled execution failed for job_id=%s (sqlstate=%s)",
+                "Scheduled execution database error for job_id=%s (sqlstate=%s)",
                 job_id,
                 getattr(exc, "sqlstate", None),
             )
             return {
-                "status": "FAILED",
+                "status": "FAILED_DATABASE",
                 "job_id": job_id,
-                "message": "Database error during scheduled execution.",
+                "message": "Database error during scheduled execution; "
+                "transaction did not complete.",
                 "next_run_time": None,
                 "is_create": None,
             }

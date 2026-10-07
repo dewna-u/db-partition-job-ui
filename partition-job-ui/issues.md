@@ -19,63 +19,70 @@ Detected:
     seconds. Scheduler was stopped.
 
 Description:
-    The realtime scheduler appeared to re-process the same scheduled occurrence
-    `(job_id, expected_run_time)` in a tight loop after a successful DROP/CREATE
-    attempt on an overdue job.
+    The realtime scheduler re-processed the same scheduled occurrence
+    `(job_id, expected_run_time)` in a tight loop after reporting EXECUTED for
+    an overdue DROP job (Job 33).
 
 Evidence:
-    Runtime log pattern equivalent to:
+    Runtime log pattern:
     - Timer fired for job_id=33 expected_run_time=2026-09-18 00:15:00
     - Scheduled job 33 result EXECUTED (DROP completed)
     - Queue refreshed
     - Next job again job_id=33 with the same expected_run_time
     - Immediate re-execution
 
-Impact:
-    Uncontrolled repeated partition DDL for the same occurrence; risk of load,
-    lock contention, and inconsistent operational history. Scheduler had to be
-    left STOPPED.
+    Live read-only Job 33 state (not modified):
+    - `job_schedule = 0 15 0 * * 5` (Friday 00:15)
+    - `frequency = 7 days`
+    - `next_run_time = 2026-09-18 00:15:00` still present after EXECUTED logs
+    - `last_run_status = FAIL`, `is_create = false`
 
 Root Cause:
-    Source-level defect consistent with the observed production incident and
-    reproduced by regression tests (production DB row state was not re-queried
-    in this investigation):
+    Root cause confirmed from deployed source and live read-only inspection.
 
-    1. Primary — `run_partition_job_scheduled` accepted cron-helper next-run
-       values without requiring a future timestamp distinct from occurrence T,
-       and originally calculated next-run after workers. Invalid next state
-       could leave the job rediscoverable by `get_upcoming_partition_jobs`.
+    Primary — transaction boundary bug in `open_connection()`:
+    1. `SELECT current_database()` (DB identity check) ran with psycopg
+       `autocommit=False`, starting an implicit outer transaction.
+    2. `execute_scheduled_job()` then used `conn.transaction()`, which nested
+       as a savepoint under that still-open outer transaction.
+    3. `run_partition_job_scheduled` could return EXECUTED (worker DDL +
+       next_run_time UPDATE + log INSERT inside the nested block).
+    4. Closing the connection rolled back the uncommitted outer transaction,
+       so next_run_time / log changes were not persisted.
+    5. Refresh rediscovered the same occurrence → tight loop.
 
-    2. Secondary — Python had no bounded process-local guard against
-       re-executing a recently handled `(job_id, expected_run_time)`.
+    Secondary contributing factors (also hardened in source):
+    - SQL next-run validation / fail-closed behaviour for invalid schedules.
+    - Python rapid-loop breaker (short TTL) for committed transitions only.
+    - Python PsycopgError previously returned cacheable status `FAILED`
+      (now `FAILED_DATABASE`, not cached).
+
+    Not the cause of Job 33 loop: live call of
+    `cron_to_interval_or_next_run('0 15 0 * * 5')` at ~2026-10-07 10:01 UTC
+    correctly returned `next_run_time = 2026-10-09 00:15:00`
+    (see ISSUE-003 — still not version-controlled, but not this incident).
 
 Fix:
-    - SQL: validate next occurrence **before** CREATE/DROP; reject NULL /
-      same-as-T / `<= T` / `<= now`; **fail closed** with
-      `FAILED_INVALID_SCHEDULE`, `next_run_time = NULL`, no worker, no invented
-      `+1 day` or frequency fallback.
-    - Python: short-lived rapid-loop circuit breaker (TTL 300s, max 512)
-      caching only committed occurrence transitions (`EXECUTED`, `FAILED`,
-      `FAILED_INVALID_SCHEDULE`). Ordinary skips are not cached.
-    - Logging: expected_run_time and returned next_run_time on results.
+    - `open_connection()`: after identity assert, `conn.commit()` so the
+      connection is idle before yield; `conn.transaction()` is then a real
+      top-level business transaction.
+    - PsycopgError / incomplete txn → `FAILED_DATABASE` (not cached).
+    - SQL fail-closed + pre-DDL next validation (prior hardening retained).
+    - Rapid-loop cache: EXECUTED / SQL FAILED / FAILED_INVALID_SCHEDULE only;
+      TTL 300s, max 512.
 
 Tests:
-    `test_scheduler_phase0_safety.py` plus SQL contract updates.
+    Transaction-boundary tests in `test_scheduler_backend.py`;
+    cache/status policy in `test_scheduler_phase0_safety.py`.
 
 Deployment Notes:
-    Deploy updated `scheduler_backend` Python AND redeploy
-    `run_partition_job_scheduled` via
-    `sql/migrations/20261007_01_run_partition_job_scheduled_occurrence_safety.sql`
-    (body must match `sql/realtime_scheduler_v1.sql`) BEFORE restarting
-    `partition-job-scheduler.service`. Keep scheduler STOPPED until both are
-    applied. Production verification is still pending.
+    Deploy updated Python (`scheduler_database.py`, `scheduler.py`) AND the
+    Phase 0 SQL migration body before starting the scheduler. Keep scheduler
+    STOPPED until both are live. Fix production verification pending.
 
 Remaining Risk:
-    Authoritative body of `cron_to_interval_or_next_run` is not in this repo
-    (see ISSUE-003). Fail-closed clears `next_run_time` until an operator
-    corrects the schedule. Rapid-loop breaker is process-local, TTL 300s,
-    and does not suppress SKIPPED_*/NOT_FOUND (DB remains authoritative).
-    Live production behaviour must still be confirmed after controlled deploy.
+    Production behaviour after controlled deploy not yet observed.
+    Cron helper still not versioned (ISSUE-003).
 
 
 ## ISSUE-002 — Edit / Enable-Disable not covered in Phase 0
@@ -124,48 +131,49 @@ Remaining Risk:
 ## ISSUE-003 — Scheduler depends on non-version-controlled cron helper
 
 Severity:
-    High
+    Medium
 
 Status:
-    Open
+    Open (not the Job 33 incident cause)
 
 Component:
     Database framework function
     `mubasher_oms.cron_to_interval_or_next_run(text)`
 
 Detected:
-    Phase 0 hardening review.
+    Phase 0 hardening review; live read-only validation 2026-10-07.
 
 Description:
     Scheduled execution depends on `cron_to_interval_or_next_run`, but the
     authoritative function body is not stored in this repository (bootstrap
-    explicitly requires import from a reference DB). Local tests cannot fully
-    validate its production semantics.
+    explicitly requires import from a reference DB).
 
 Evidence:
-    `sql/bootstrap_partition_job_framework.sql` documents the function as
-    missing/import-only; no CREATE FUNCTION body exists under `sql/`.
+    - No CREATE FUNCTION body under `sql/`.
+    - Live read-only call with Job 33 schedule `0 15 0 * * 5` at
+      ~2026-10-07 10:01:21 UTC returned
+      `schedule_interval = NULL`, `next_run_time = 2026-10-09 00:15:00`
+      (correct next Friday). Therefore the helper was **not** identified as
+      the cause of the Job 33 tight loop (see ISSUE-001 transaction bug).
 
 Impact:
-    Next-run validation can fail closed if the helper returns invalid values,
-    but operators cannot review the helper’s source in Git. Deployment must
-    inspect the live definition before starting the scheduler.
+    Local tests cannot fully validate helper semantics; future drift risk
+    remains until the function is versioned. Not the proven Job 33 root cause.
 
 Root Cause:
-    Historical framework functions were imported from a reference database and
-    never checked into this repo.
+    Historical framework functions imported from a reference DB, never checked
+    into this repo.
 
 Fix:
-    Future work should capture/version the authoritative definition safely
-    (without inventing a new implementation in this task).
+    Future work should capture/version the authoritative definition safely.
 
 Tests:
-    N/A in-repo (cannot execute live helper here).
+    N/A in-repo for live helper body.
 
 Deployment Notes:
     Before scheduler start, verify
     `to_regprocedure('mubasher_oms.cron_to_interval_or_next_run(text)')`
-    and review the live function definition in a controlled DBA session.
+    and review the live definition in a controlled DBA session.
 
 Remaining Risk:
-    Helper behaviour drift between environments remains possible until versioned.
+    Helper behaviour drift between environments until versioned.

@@ -19,13 +19,14 @@ from scheduler_backend.scheduler_database import (
 logger = logging.getLogger(__name__)
 
 # Rapid-loop breaker: cache only when the DB committed a transition of this
-# occurrence. Ordinary skips leave the DB authoritative (do not cache).
-# NOT cached: FAILED_CONNECTION, SKIPPED_*, NOT_FOUND, connection exceptions.
+# occurrence (SQL returned status AND surrounding conn.transaction() committed).
+# NOT cached: FAILED_DATABASE, FAILED_CONNECTION, SKIPPED_*, NOT_FOUND,
+# connection/transaction exceptions.
 _HANDLED_OCCURRENCE_STATUSES = frozenset(
     {
-        "EXECUTED",  # worker ran; next_run_time advanced
-        "FAILED",  # worker failed but occurrence still advanced/logged in DB
-        "FAILED_INVALID_SCHEDULE",  # fail-closed: next_run_time cleared to NULL
+        "EXECUTED",  # worker ran; next_run_time advanced; txn committed
+        "FAILED",  # SQL-handled worker failure; occurrence advanced; txn committed
+        "FAILED_INVALID_SCHEDULE",  # fail-closed next_run_time=NULL; txn committed
     }
 )
 

@@ -221,6 +221,66 @@ class TightLoopRegressionTests(unittest.TestCase):
         asyncio.run(scenario())
         self.assertEqual(calls["n"], 1)
 
+    def test_failed_database_is_not_cached(self) -> None:
+        t = datetime(2026, 9, 18, 0, 15, 0)
+        scheduler = PartitionScheduler(_config())
+        calls = {"n": 0}
+
+        def fake_execute(config, job_id, expected):
+            calls["n"] += 1
+            return {
+                "status": "FAILED_DATABASE",
+                "job_id": job_id,
+                "message": "Database error; transaction did not complete.",
+                "next_run_time": None,
+                "is_create": None,
+            }
+
+        async def scenario() -> None:
+            with patch(
+                "scheduler_backend.scheduler.execute_scheduled_job",
+                side_effect=fake_execute,
+            ):
+                await scheduler._execute_one(33, t)
+                self.assertEqual(
+                    scheduler.status.last_execution_result, "FAILED_DATABASE"
+                )
+                self.assertFalse(scheduler._handled_occurrences.contains((33, t)))
+                await scheduler._execute_one(33, t)
+
+        asyncio.run(scenario())
+        self.assertEqual(calls["n"], 2)
+
+    def test_skipped_not_due_and_locked_are_not_cached(self) -> None:
+        t = datetime(2026, 9, 18, 0, 15, 0)
+        for status in ("SKIPPED_NOT_DUE", "SKIPPED_LOCKED"):
+            scheduler = PartitionScheduler(_config())
+            calls = {"n": 0}
+
+            def fake_execute(config, job_id, expected, _status=status):
+                calls["n"] += 1
+                return {
+                    "status": _status,
+                    "job_id": job_id,
+                    "message": _status,
+                    "next_run_time": expected,
+                    "is_create": False,
+                }
+
+            async def scenario() -> None:
+                with patch(
+                    "scheduler_backend.scheduler.execute_scheduled_job",
+                    side_effect=fake_execute,
+                ):
+                    await scheduler._execute_one(33, t)
+                    self.assertFalse(
+                        scheduler._handled_occurrences.contains((33, t))
+                    )
+                    await scheduler._execute_one(33, t)
+
+            asyncio.run(scenario())
+            self.assertEqual(calls["n"], 2, msg=status)
+
     def test_connection_failure_does_not_suppress_occurrence(self) -> None:
         t = datetime(2026, 9, 18, 0, 15, 0)
         scheduler = PartitionScheduler(_config())
@@ -430,11 +490,13 @@ class CircuitBreakerBoundTests(unittest.TestCase):
             frozenset({"EXECUTED", "FAILED", "FAILED_INVALID_SCHEDULE"}),
         )
         for status in (
+            "FAILED_DATABASE",
             "FAILED_CONNECTION",
             "SKIPPED_DISABLED",
             "SKIPPED_RESCHEDULED",
             "NOT_FOUND",
             "SKIPPED_NOT_DUE",
+            "SKIPPED_LOCKED",
         ):
             self.assertNotIn(status, _HANDLED_OCCURRENCE_STATUSES)
 

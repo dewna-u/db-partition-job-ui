@@ -160,3 +160,65 @@ Rollback:
 Notes:
     No production DB access, no migrations executed, no services restarted,
     no Git history rewrite, no commit/push from this agent turn.
+    Extended by CHANGE-003 (transaction boundary / FAILED_DATABASE).
+
+
+## CHANGE-003 — Phase 0 transaction-boundary and FAILED_DATABASE correction
+
+Date:
+    2026-10-07
+
+Reason:
+    Live read-only inspection + deployed-source review confirmed the Job 33
+    tight loop primary cause: DB identity `SELECT current_database()` left an
+    open psycopg transaction so scheduled work nested under a savepoint and
+    rolled back on connection close. Also stop mapping PsycopgError to
+    cacheable `FAILED`.
+
+Related Issues:
+    ISSUE-001 (primary), ISSUE-003 (cron helper not the Job 33 cause)
+
+Files Changed:
+    - `scheduler_backend/scheduler_database.py`
+    - `scheduler_backend/scheduler.py` (cache policy comments / FAILED_DATABASE)
+    - `test_scheduler_backend.py`
+    - `test_scheduler_phase0_safety.py`
+    - `issues.md`
+    - `changes.md`
+    - `README.md`
+    - `RUNBOOK.md`
+
+Database Changes:
+    None in this correction (prior Phase 0 SQL hardening retained unchanged).
+
+Configuration Changes:
+    None.
+
+Behavioural Impact:
+    - After identity check, `open_connection()` commits so the connection is
+      idle before yield; `execute_scheduled_job()` `conn.transaction()` is a
+      real top-level COMMIT/ROLLBACK for the occurrence.
+    - Python DB/transaction errors return `FAILED_DATABASE` (not cached).
+    - Rapid-loop cache still: EXECUTED / SQL FAILED / FAILED_INVALID_SCHEDULE
+      only; TTL 300s; max 512.
+    - Live cron helper for Job 33 schedule correctly returned next Friday;
+      not treated as incident root cause.
+
+Tests:
+    Identity-check commit-before-yield; PsycopgError → FAILED_DATABASE;
+    FAILED_DATABASE / SKIPPED_* / NOT_FOUND uncached; full suite.
+
+Deployment Steps (NOT executed here):
+    1. Keep scheduler STOPPED.
+    2. Pull/deploy updated Python (`scheduler_database.py`, `scheduler.py`).
+    3. Ensure Phase 0 SQL migration body already applied (or apply matching
+       `realtime_scheduler_v1.sql` function).
+    4. Verify cron helper exists; start scheduler only after Python+SQL match.
+
+Rollback:
+    Restore prior `scheduler_database.py` / `scheduler.py` from Git or backup
+    ZIP; keep scheduler stopped until verified.
+
+Notes:
+    No server pull, no migration execution, no service restart, no commit/push
+    from this agent turn.

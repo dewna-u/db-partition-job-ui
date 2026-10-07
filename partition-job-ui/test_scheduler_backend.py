@@ -287,6 +287,93 @@ class SchedulerDatabaseLifecycleTests(unittest.TestCase):
         conn.close.assert_called()
         conn.transaction.assert_called()
 
+    def test_psycopg_error_returns_failed_database_not_failed(self) -> None:
+        from psycopg import Error as PsycopgError
+
+        config = SchedulerConfig()
+        conn = MagicMock()
+        conn.closed = False
+        txn = MagicMock()
+        txn.__enter__.return_value = txn
+        txn.__exit__.side_effect = PsycopgError("boom")
+        conn.transaction.return_value = txn
+
+        @contextmanager
+        def fake_open(_purpose):
+            yield conn
+            conn.close()
+
+        with patch.object(scheduler_database, "open_connection", fake_open):
+            result = scheduler_database.execute_scheduled_job(
+                config, 33, datetime(2026, 9, 18, 0, 15, 0)
+            )
+
+        self.assertEqual(result["status"], "FAILED_DATABASE")
+        self.assertNotEqual(result["status"], "FAILED")
+        self.assertIn("transaction did not complete", result["message"])
+
+
+class OpenConnectionTransactionBoundaryTests(unittest.TestCase):
+    """Identity SELECT must not leave an open txn before business work."""
+
+    def test_identity_check_then_commit_before_yield(self) -> None:
+        call_order: list[str] = []
+        conn = MagicMock()
+        conn.closed = False
+
+        def fake_read(c):
+            call_order.append("read_current_database")
+            self.assertIs(c, conn)
+            return "new_db_copy"
+
+        def fake_assert(name):
+            call_order.append(f"assert:{name}")
+
+        def fake_commit():
+            call_order.append("commit")
+
+        conn.commit.side_effect = fake_commit
+
+        with patch.dict(
+            os.environ,
+            {
+                "DB_HOST": "127.0.0.1",
+                "DB_NAME": "new_db_copy",
+                "DB_USER": "u",
+                "DB_PASSWORD": "p",
+                "REALTIME_DB_EXPECTED_NAME": "new_db_copy",
+            },
+            clear=False,
+        ), patch.object(
+            scheduler_database, "connect", return_value=conn
+        ), patch.object(
+            scheduler_database, "read_current_database", side_effect=fake_read
+        ), patch.object(
+            scheduler_database, "assert_expected_database", side_effect=fake_assert
+        ):
+            with scheduler_database.open_connection("boundary-test") as yielded:
+                call_order.append("yielded")
+                self.assertIs(yielded, conn)
+
+        self.assertEqual(
+            call_order,
+            [
+                "read_current_database",
+                "assert:new_db_copy",
+                "commit",
+                "yielded",
+            ],
+        )
+        conn.close.assert_called()
+
+    def test_open_connection_source_commits_after_identity_check(self) -> None:
+        source = inspect.getsource(scheduler_database.open_connection)
+        self.assertIn("read_current_database(conn)", source)
+        self.assertIn("assert_expected_database", source)
+        self.assertIn("conn.commit()", source)
+        # Commit must appear before yield in source order.
+        self.assertLess(source.index("conn.commit()"), source.index("yield conn"))
+
 
 class SchedulerLoopTests(unittest.TestCase):
     def test_refresh_event_wakes_and_rereads_db(self) -> None:

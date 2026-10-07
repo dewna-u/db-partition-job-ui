@@ -474,6 +474,14 @@ Important properties:
 * Streamlit/Next.js UI is **not** the scheduler.
 * No Redis, Celery, Kafka, RabbitMQ, LISTEN/NOTIFY, or connection pools.
 * DB connections are open → one logical operation → close immediately.
+* Scheduler transaction contract:
+  1. connect
+  2. `SELECT current_database()` + identity assert
+  3. end identity-check transaction (`commit` of that read-only check)
+  4. connection idle
+  5. `BEGIN` via `conn.transaction()` for the scheduled occurrence
+  6. `run_partition_job_scheduled` (workers / updates / log)
+  7. COMMIT (handled) or ROLLBACK (not handled — e.g. `FAILED_DATABASE`)
 * Idle timer waits hold **zero** database sessions.
 * UI refresh HTTP is a wake-up signal only; the backend always rereads PostgreSQL.
 * Periodic reconciliation (`PARTITION_SCHEDULER_RECONCILE_SECONDS`) catches direct SQL edits.
@@ -482,9 +490,10 @@ Important properties:
 * Same-time jobs execute sequentially ordered by `next_run_time`, then `job_id`.
 * OS singleton lock prevents two backends; DB uses `FOR UPDATE` + `pg_try_advisory_xact_lock`.
 * Secondary Python rapid-loop breaker is a short-lived process-local cache
-  (TTL 300s, max 512) of recently **transitioned** occurrences
-  (`EXECUTED` / `FAILED` / `FAILED_INVALID_SCHEDULE` only). Ordinary DB skips
-  are not cached; the database remains the scheduling source of truth.
+  (TTL 300s, max 512) of recently **committed** occurrence transitions
+  (`EXECUTED` / SQL `FAILED` / `FAILED_INVALID_SCHEDULE` only).
+  `FAILED_DATABASE`, `FAILED_CONNECTION`, ordinary skips, and exceptions are
+  not cached; the database remains the scheduling source of truth.
 
 ### New database configuration (production-copy / sensitive)
 

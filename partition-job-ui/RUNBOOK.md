@@ -532,6 +532,7 @@ If journal shows the same `job_id` + `expected_run_time` executing repeatedly:
 Before `systemctl start partition-job-scheduler.service`:
 
 - [ ] Scheduler remains stopped until checks pass
+- [ ] Controlled deploy completed: pulled source matches intended Git revision
 - [ ] `.env.realtime` is `enterprisedb:enterprisedb` mode `600`
 - [ ] API `.env` is `partitionui:partitionui` mode `600` (API must not read `.env.realtime`)
 - [ ] Both realtime functions resolve via `to_regprocedure`
@@ -540,12 +541,19 @@ Before `systemctl start partition-job-scheduler.service`:
       the **live** definition during controlled deploy; see ISSUE-003)
 - [ ] Phase 0 fail-closed occurrence-safety SQL is deployed (body matches
       `sql/realtime_scheduler_v1.sql`; no invented `+1 day` fallback)
+- [ ] Deployed Python includes transaction-boundary fix:
+      identity check then `conn.commit()` before yield so no open transaction
+      remains when business `conn.transaction()` begins
+- [ ] Deployed Python maps incomplete DB/txn errors to `FAILED_DATABASE`
+      (not cacheable `FAILED`)
 - [ ] Deployed Python includes rapid-loop breaker (TTL 300s, max 512;
       caches only EXECUTED / FAILED / FAILED_INVALID_SCHEDULE) +
       `expected_run_time` logging
+- [ ] SQL migration version and Python source version are known-good together
 - [ ] Jobs with `next_run_time IS NULL` after fail-closed are reviewed by an
       operator before re-enabling a schedule
-- [ ] Watch journal after start for first executions and any CRITICAL breaker lines
+- [ ] Start scheduler only after the above; watch journal for first executions
+      and any rapid-loop breaker CRITICAL lines
 
 Manual API start (for debugging):
 
