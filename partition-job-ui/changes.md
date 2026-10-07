@@ -87,3 +87,76 @@ Rollback:
 Notes:
     No AWS Secrets Manager, Datadog, or parallel execution changes.
     No `.env` / `.env.realtime` edits.
+    Superseded/hardened by CHANGE-002 for fail-closed next-run semantics.
+
+
+## CHANGE-002 — Phase 0 scheduler safety hardening
+
+Date:
+    2026-10-07
+
+Reason:
+    Correct Phase 0 after final review: remove invented `+1 day` / frequency
+    fallbacks, fail closed on invalid next schedule, bound the Python circuit
+    breaker, and align migration/canonical SQL. Prior Phase 0 commit already
+    pushed; this is an additive correction (no history rewrite).
+
+Related Issues:
+    ISSUE-001, ISSUE-003
+
+Files Changed:
+    - `sql/realtime_scheduler_v1.sql`
+    - `sql/migrations/20261007_01_run_partition_job_scheduled_occurrence_safety.sql`
+    - `sql/migrations/README.md`
+    - `scheduler_backend/scheduler.py`
+    - `test_scheduler_phase0_safety.py`
+    - `test_scheduler_backend.py`
+    - `issues.md`
+    - `changes.md`
+    - `README.md`
+    - `RUNBOOK.md`
+
+Database Changes:
+    `CREATE OR REPLACE` of `run_partition_job_scheduled` (same signature):
+    - Compute/validate next occurrence **before** CREATE/DROP.
+    - Accept only future `N` with `N IS DISTINCT FROM T` and `N > NOW`.
+    - On invalid/NULL helper result: `FAILED_INVALID_SCHEDULE`,
+      `next_run_time = NULL`, log FAIL, **no worker**, no `+1 day` /
+      frequency invention.
+    - `is_create IS NULL` also fail-closed with `next_run_time = NULL`.
+
+Configuration Changes:
+    None.
+
+Security Impact:
+    None beyond safer scheduling control (no credential changes).
+
+Behavioural Impact:
+    - Invalid schedule stops rediscovery (`get_upcoming` requires non-NULL
+      `next_run_time`) until an operator sets a valid next time.
+    - Valid schedules still execute CREATE/DROP once, then advance to the
+      validated future next.
+    - Rapid-loop breaker: OrderedDict + TTL **300s** + max **512** entries.
+      Caches only committed occurrence transitions: `EXECUTED`, `FAILED`,
+      `FAILED_INVALID_SCHEDULE`. Does **not** cache `FAILED_CONNECTION`,
+      `SKIPPED_DISABLED`, `SKIPPED_RESCHEDULED`, `NOT_FOUND`, or connection
+      exceptions — DB remains authoritative for ordinary skips.
+
+Tests:
+    Full suite; migration body must match canonical function extract.
+
+Deployment Steps (NOT executed here):
+    1. Keep scheduler STOPPED.
+    2. Deploy Python `scheduler_backend/scheduler.py`.
+    3. Apply updated
+       `20261007_01_run_partition_job_scheduled_occurrence_safety.sql`.
+    4. Verify live `cron_to_interval_or_next_run(text)` exists (ISSUE-003).
+    5. Start scheduler only after SQL + Python are both live.
+
+Rollback:
+    Restore previous function body + previous `scheduler.py` from Git or
+    hardening backup ZIP; keep scheduler stopped until verified.
+
+Notes:
+    No production DB access, no migrations executed, no services restarted,
+    no Git history rewrite, no commit/push from this agent turn.

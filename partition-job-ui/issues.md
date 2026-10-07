@@ -6,7 +6,7 @@ Severity:
     Critical
 
 Status:
-    Fixed (source + tests; not yet deployed)
+    Fixed in source — production verification pending
 
 Component:
     Realtime Scheduler
@@ -37,28 +37,27 @@ Impact:
     left STOPPED.
 
 Root Cause:
-    Proven in source (without assuming production next_run_time row values):
+    Source-level defect consistent with the observed production incident and
+    reproduced by regression tests (production DB row state was not re-queried
+    in this investigation):
 
-    1. Primary — `run_partition_job_scheduled` accepted whatever
-       `cron_to_interval_or_next_run` returned for `next_run_time` without
-       requiring the new value to be:
-       - distinct from `p_expected_run_time` (occurrence T), and
-       - strictly in the future relative to post-lock `v_now`.
-       If the helper returns T again, or another non-future timestamp, UPDATE
-       can leave the job immediately rediscoverable by
-       `get_upcoming_partition_jobs`, so post-execution refresh requeues the
-       same occurrence.
+    1. Primary — `run_partition_job_scheduled` accepted cron-helper next-run
+       values without requiring a future timestamp distinct from occurrence T,
+       and originally calculated next-run after workers. Invalid next state
+       could leave the job rediscoverable by `get_upcoming_partition_jobs`.
 
-    2. Secondary gap — the Python scheduler trusted refresh results and had no
-       process-local guard against re-executing an occurrence it had already
-       handled in this process lifetime.
+    2. Secondary — Python had no bounded process-local guard against
+       re-executing a recently handled `(job_id, expected_run_time)`.
 
 Fix:
-    - SQL: after cron helper calculation, reject NULL / same-as-T / `<= T` /
-      `<= v_now` next times; advance using `frequency` or `now + 1 day`.
-    - Python: secondary circuit breaker suppresses rediscovery/re-execution of
-      already-handled `(job_id, expected_run_time)` for the process lifetime.
-    - Logging: record expected_run_time and returned next_run_time on results.
+    - SQL: validate next occurrence **before** CREATE/DROP; reject NULL /
+      same-as-T / `<= T` / `<= now`; **fail closed** with
+      `FAILED_INVALID_SCHEDULE`, `next_run_time = NULL`, no worker, no invented
+      `+1 day` or frequency fallback.
+    - Python: short-lived rapid-loop circuit breaker (TTL 300s, max 512)
+      caching only committed occurrence transitions (`EXECUTED`, `FAILED`,
+      `FAILED_INVALID_SCHEDULE`). Ordinary skips are not cached.
+    - Logging: expected_run_time and returned next_run_time on results.
 
 Tests:
     `test_scheduler_phase0_safety.py` plus SQL contract updates.
@@ -67,15 +66,16 @@ Deployment Notes:
     Deploy updated `scheduler_backend` Python AND redeploy
     `run_partition_job_scheduled` via
     `sql/migrations/20261007_01_run_partition_job_scheduled_occurrence_safety.sql`
-    (or equivalent body from `sql/realtime_scheduler_v1.sql`) BEFORE restarting
+    (body must match `sql/realtime_scheduler_v1.sql`) BEFORE restarting
     `partition-job-scheduler.service`. Keep scheduler STOPPED until both are
-    applied.
+    applied. Production verification is still pending.
 
 Remaining Risk:
-    Authoritative body of `cron_to_interval_or_next_run` is not in this repo;
-    fallback advancement may differ from ideal cron “next future tick” but is
-    intentionally safe. Circuit breaker is process-local only (DB remains
-    primary). Production verification still required after controlled deploy.
+    Authoritative body of `cron_to_interval_or_next_run` is not in this repo
+    (see ISSUE-003). Fail-closed clears `next_run_time` until an operator
+    corrects the schedule. Rapid-loop breaker is process-local, TTL 300s,
+    and does not suppress SKIPPED_*/NOT_FOUND (DB remains authoritative).
+    Live production behaviour must still be confirmed after controlled deploy.
 
 
 ## ISSUE-002 — Edit / Enable-Disable not covered in Phase 0
@@ -119,3 +119,53 @@ Deployment Notes:
 
 Remaining Risk:
     Unrelated Edit defects may still exist.
+
+
+## ISSUE-003 — Scheduler depends on non-version-controlled cron helper
+
+Severity:
+    High
+
+Status:
+    Open
+
+Component:
+    Database framework function
+    `mubasher_oms.cron_to_interval_or_next_run(text)`
+
+Detected:
+    Phase 0 hardening review.
+
+Description:
+    Scheduled execution depends on `cron_to_interval_or_next_run`, but the
+    authoritative function body is not stored in this repository (bootstrap
+    explicitly requires import from a reference DB). Local tests cannot fully
+    validate its production semantics.
+
+Evidence:
+    `sql/bootstrap_partition_job_framework.sql` documents the function as
+    missing/import-only; no CREATE FUNCTION body exists under `sql/`.
+
+Impact:
+    Next-run validation can fail closed if the helper returns invalid values,
+    but operators cannot review the helper’s source in Git. Deployment must
+    inspect the live definition before starting the scheduler.
+
+Root Cause:
+    Historical framework functions were imported from a reference database and
+    never checked into this repo.
+
+Fix:
+    Future work should capture/version the authoritative definition safely
+    (without inventing a new implementation in this task).
+
+Tests:
+    N/A in-repo (cannot execute live helper here).
+
+Deployment Notes:
+    Before scheduler start, verify
+    `to_regprocedure('mubasher_oms.cron_to_interval_or_next_run(text)')`
+    and review the live function definition in a controlled DBA session.
+
+Remaining Risk:
+    Helper behaviour drift between environments remains possible until versioned.

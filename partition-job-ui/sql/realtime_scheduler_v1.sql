@@ -261,17 +261,71 @@ BEGIN
     END IF;
 
     IF v_job.is_create IS NULL THEN
-        status := 'FAILED';
+        -- Fail closed: clear next_run_time so get_upcoming cannot rediscover.
+        -- Do not invent a schedule (no +1 day / frequency fallback).
+        status := 'FAILED_INVALID_SCHEDULE';
         job_id := v_job.job_id;
         message := 'is_create is NULL; refusing to decide CREATE vs DROP.';
-        next_run_time := v_now + interval '1 day';
+        next_run_time := NULL;
         is_create := NULL;
-        -- No CREATE/DROP worker ran — duration is unknown, not 0ms.
-        -- Advance next_run_time so an invalid job cannot tight-loop overdue.
         UPDATE mubasher_oms.partitioning_job_table AS j
            SET last_run_time   = v_now,
                last_run_status = 'FAIL',
-               next_run_time   = v_now + interval '1 day'
+               next_run_time   = NULL
+         WHERE j.job_id = v_job.job_id;
+        INSERT INTO mubasher_oms.partitioning_job_table_log (
+            job_id, job_name, last_run_status, job_runtime, job_error,
+            execution_duration_ms
+        ) VALUES (
+            v_job.job_id, v_job.job_name, 'FAIL', v_now, message, NULL
+        );
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Calculate and VALIDATE the next occurrence BEFORE any CREATE/DROP worker.
+    -- Overdue semantics: execute occurrence T at most once, then require a
+    -- future next N. PartOps does not invent arbitrary dates (+1 day / frequency)
+    -- when the cron helper cannot produce a valid next state.
+    BEGIN
+        v_schedule := mubasher_oms.cron_to_interval_or_next_run(v_job.job_schedule);
+        v_new_next_run := CASE
+            WHEN v_schedule.schedule_interval IS NOT NULL
+                THEN v_now + v_schedule.schedule_interval
+            WHEN v_schedule.next_run_time IS NOT NULL
+                THEN v_schedule.next_run_time
+            ELSE
+                NULL
+        END;
+    EXCEPTION
+        WHEN OTHERS THEN
+            v_new_next_run := NULL;
+            v_error := 'Cron calculation failed: ' || SQLERRM;
+    END;
+
+    IF v_new_next_run IS NULL
+       OR v_new_next_run IS NOT DISTINCT FROM p_expected_run_time
+       OR v_new_next_run <= p_expected_run_time
+       OR v_new_next_run <= v_now THEN
+        status := 'FAILED_INVALID_SCHEDULE';
+        job_id := v_job.job_id;
+        message := COALESCE(
+            v_error,
+            format(
+                'Invalid next_run_time from schedule helper '
+                || '(calculated=%s, expected_occurrence=%s, now=%s). '
+                || 'Fail closed: no CREATE/DROP; next_run_time cleared for operator fix.',
+                v_new_next_run,
+                p_expected_run_time,
+                v_now
+            )
+        );
+        next_run_time := NULL;
+        is_create := v_job.is_create;
+        UPDATE mubasher_oms.partitioning_job_table AS j
+           SET last_run_time   = v_now,
+               last_run_status = 'FAIL',
+               next_run_time   = NULL
          WHERE j.job_id = v_job.job_id;
         INSERT INTO mubasher_oms.partitioning_job_table_log (
             job_id, job_name, last_run_status, job_runtime, job_error,
@@ -288,7 +342,6 @@ BEGIN
     v_exec_start := clock_timestamp();
 
     -- Apply db_config_para for this transaction only (is_local = true).
-    -- Verify against reference run_partition_create_jobs() when imported.
     BEGIN
         FOR v_cfg IN
             SELECT key, value
@@ -307,7 +360,6 @@ BEGIN
     IF v_error IS NULL THEN
         BEGIN
             IF v_job.is_create IS TRUE THEN
-                -- Exact 5-argument CREATE worker signature.
                 PERFORM mubasher_oms.create_any_table_partition(
                     v_job.table_schema,
                     v_job.table_name,
@@ -316,7 +368,6 @@ BEGIN
                     v_job.create_drop_interval
                 );
             ELSE
-                -- Exact 3-argument DROP worker signature.
                 PERFORM mubasher_oms.drop_any_table_partition(
                     v_job.table_schema,
                     v_job.table_name,
@@ -344,78 +395,16 @@ BEGIN
         (EXTRACT(EPOCH FROM (clock_timestamp() - v_exec_start)) * 1000)::bigint
     );
 
-    -- Calculate next_run_time using authoritative cron helper + legacy CASE.
-    -- Intended overdue semantics: execute THIS occurrence once, then advance to
-    -- a next FUTURE occurrence (no uncontrolled miss-by-miss catch-up loop).
-    BEGIN
-        v_schedule := mubasher_oms.cron_to_interval_or_next_run(v_job.job_schedule);
-        v_new_next_run := CASE
-            WHEN v_schedule.schedule_interval IS NOT NULL
-                THEN v_now + v_schedule.schedule_interval
-            WHEN v_schedule.next_run_time IS NOT NULL
-                THEN v_schedule.next_run_time
-            ELSE
-                v_now + interval '1 day'
-        END;
-    EXCEPTION
-        WHEN OTHERS THEN
-            -- Controlled fallback prevents uncontrolled overdue retry loops.
-            v_new_next_run := v_now + interval '1 day';
-            IF v_error IS NULL THEN
-                v_error := 'Cron calculation failed: ' || SQLERRM
-                    || ' (fallback next_run_time = now() + 1 day)';
-            ELSE
-                v_error := v_error
-                    || ' | Cron calculation failed: ' || SQLERRM
-                    || ' (fallback next_run_time = now() + 1 day)';
-            END IF;
-            v_status := 'FAILED';
-            v_message := 'Schedule recalculation failed; applied 1-day fallback.';
-    END;
-
-    -- Reject invalid / non-advancing next states that would re-queue occurrence T
-    -- or drive an immediate overdue catch-up storm after refresh.
-    IF v_new_next_run IS NULL
-       OR v_new_next_run IS NOT DISTINCT FROM p_expected_run_time
-       OR v_new_next_run <= p_expected_run_time
-       OR v_new_next_run <= v_now THEN
-        IF v_job.frequency IS NOT NULL AND v_job.frequency > interval '0' THEN
-            v_new_next_run := v_now + v_job.frequency;
-        ELSE
-            v_new_next_run := v_now + interval '1 day';
-        END IF;
-        IF v_new_next_run IS NULL
-           OR v_new_next_run IS NOT DISTINCT FROM p_expected_run_time
-           OR v_new_next_run <= v_now THEN
-            v_new_next_run := v_now + interval '1 day';
-        END IF;
-        IF v_message IS NULL THEN
-            v_message := 'Schedule advanced with controlled fallback '
-                || '(invalid or non-future next occurrence).';
-        ELSE
-            v_message := v_message
-                || ' Schedule advanced with controlled fallback '
-                || '(invalid or non-future next occurrence).';
-        END IF;
-    END IF;
-
-    -- After an actual attempt, advance next_run_time so the same occurrence
-    -- cannot tight-loop during reconciliation.
-    IF NOT v_attempted AND v_error IS NOT NULL THEN
-        v_attempted := TRUE;
-    END IF;
-
+    -- Validated v_new_next_run is already a future occurrence distinct from T.
     UPDATE mubasher_oms.partitioning_job_table AS j
        SET last_run_time   = v_now,
            last_run_status = CASE
                                  WHEN v_status = 'EXECUTED' THEN 'SUCCESS'
                                  ELSE 'FAIL'
                              END,
-           next_run_time   = COALESCE(v_new_next_run, v_now + interval '1 day')
+           next_run_time   = v_new_next_run
      WHERE j.job_id = v_job.job_id;
 
-    -- job_log_id uses column DEFAULT / sequence — do not supply it manually.
-    -- job_runtime = when the attempt occurred; execution_duration_ms = how long.
     INSERT INTO mubasher_oms.partitioning_job_table_log (
         job_id,
         job_name,
@@ -438,7 +427,7 @@ BEGIN
     status := v_status;
     job_id := v_job.job_id;
     message := COALESCE(v_message, v_error);
-    next_run_time := COALESCE(v_new_next_run, v_now + interval '1 day');
+    next_run_time := v_new_next_run;
     is_create := v_job.is_create;
     RETURN NEXT;
 END;
@@ -446,9 +435,10 @@ $function$;
 
 COMMENT ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone) IS
 'Execute one scheduled partition-job occurrence after DB revalidation. '
-'Uses exact create_any_table_partition / drop_any_table_partition signatures. '
-'Records execution_duration_ms on SUCCESS and FAIL log rows. '
-'Advances next_run_time to a future occurrence distinct from p_expected_run_time. '
+'Validates a future next_run_time distinct from p_expected_run_time BEFORE '
+'CREATE/DROP. Invalid schedule fails closed (next_run_time NULL, no worker). '
+'Does not invent +1 day or frequency fallbacks. '
+'Records execution_duration_ms on SUCCESS and FAIL worker attempts. '
 'Rejects stale expected_run_time and disabled jobs before workers run. '
 'Does not replace run_partition_job_manual. Does not call legacy polling runners.';
 

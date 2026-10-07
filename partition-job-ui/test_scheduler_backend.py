@@ -478,7 +478,8 @@ class SqlMigrationPresenceTests(unittest.TestCase):
             text,
         )
         self.assertIn("v_schedule.schedule_interval IS NOT NULL", text)
-        self.assertIn("v_now + interval '1 day'", text)
+        self.assertIn("FAILED_INVALID_SCHEDULE", text)
+        self.assertNotIn("v_now + interval '1 day'", text)
 
     def test_history_insert_omits_job_log_id_and_uses_success_fail(self) -> None:
         text = self._read_sql("realtime_scheduler_v1.sql")
@@ -489,10 +490,12 @@ class SqlMigrationPresenceTests(unittest.TestCase):
         self.assertIn("'SUCCESS'", text)
         self.assertIn("'FAIL'", text)
 
-    def test_failure_advances_next_run_and_cron_fallback(self) -> None:
+    def test_invalid_schedule_fail_closed_clears_next_run(self) -> None:
         text = self._read_sql("realtime_scheduler_v1.sql")
-        self.assertIn("fallback next_run_time = now() + 1 day", text)
-        self.assertIn(
+        self.assertIn("FAILED_INVALID_SCHEDULE", text)
+        self.assertIn("next_run_time   = NULL", text)
+        self.assertIn("Fail closed", text)
+        self.assertNotIn(
             "next_run_time   = COALESCE(v_new_next_run, v_now + interval '1 day')",
             text,
         )
@@ -506,7 +509,8 @@ class SqlMigrationPresenceTests(unittest.TestCase):
         self.assertIn("execution_duration_ms", null_block)
         self.assertIn("NULL", null_block)
         self.assertNotRegex(null_block, r"execution_duration_ms[^\n]{0,40}0")
-        self.assertIn("next_run_time   = v_now + interval '1 day'", null_block)
+        self.assertIn("next_run_time   = NULL", null_block)
+        self.assertIn("FAILED_INVALID_SCHEDULE", null_block)
         self.assertIn("UPDATE mubasher_oms.partitioning_job_table AS j", null_block)
         self.assertIn("WHERE j.job_id = v_job.job_id", null_block)
 

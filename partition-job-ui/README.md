@@ -462,11 +462,15 @@ Important properties:
 * After locking the row (`FOR UPDATE`), stale timers
   (`expected_run_time ≠ next_run_time`) and disabled jobs are rejected before
   CREATE/DROP workers run.
-* After a handled occurrence, `next_run_time` must advance to a **future**
-  timestamp distinct from that occurrence (no same-`T` tight loop).
+* After locking, next occurrence is validated **before** CREATE/DROP.
+  A valid next `N` must be future and distinct from occurrence `T`.
+* If the next occurrence cannot be validated, PartOps **fails closed**:
+  no worker runs, `next_run_time` is cleared (`NULL`), and an operator must
+  correct the schedule. PartOps does **not** invent arbitrary dates
+  (no automatic `+1 day` / frequency fallback for invalid cron results).
 * Overdue semantics: discover overdue jobs, execute the current occurrence
-  **once**, then advance to the next **future** occurrence — not an
-  uncontrolled miss-by-miss catch-up storm.
+  **once** when the next state is valid, then advance — not an uncontrolled
+  miss-by-miss catch-up storm.
 * Streamlit/Next.js UI is **not** the scheduler.
 * No Redis, Celery, Kafka, RabbitMQ, LISTEN/NOTIFY, or connection pools.
 * DB connections are open → one logical operation → close immediately.
@@ -477,8 +481,10 @@ Important properties:
 * Overdue jobs remain discoverable after downtime (`delay_seconds <= 0` → run immediately after revalidation).
 * Same-time jobs execute sequentially ordered by `next_run_time`, then `job_id`.
 * OS singleton lock prevents two backends; DB uses `FOR UPDATE` + `pg_try_advisory_xact_lock`.
-* Secondary Python circuit breaker (process-local) refuses rediscovery of an
-  occurrence already handled in this process lifetime; DB remains primary.
+* Secondary Python rapid-loop breaker is a short-lived process-local cache
+  (TTL 300s, max 512) of recently **transitioned** occurrences
+  (`EXECUTED` / `FAILED` / `FAILED_INVALID_SCHEDULE` only). Ordinary DB skips
+  are not cached; the database remains the scheduling source of truth.
 
 ### New database configuration (production-copy / sensitive)
 

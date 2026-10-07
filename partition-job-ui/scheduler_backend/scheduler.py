@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from scheduler_backend.models import SchedulerConfig, SchedulerStatus
 from scheduler_backend.queue_manager import ScheduleQueue
@@ -17,16 +18,82 @@ from scheduler_backend.scheduler_database import (
 
 logger = logging.getLogger(__name__)
 
-# Statuses that mean the DB should have left occurrence T (or T is dead).
-_TERMINAL_OCCURRENCE_STATUSES = frozenset(
+# Rapid-loop breaker: cache only when the DB committed a transition of this
+# occurrence. Ordinary skips leave the DB authoritative (do not cache).
+# NOT cached: FAILED_CONNECTION, SKIPPED_*, NOT_FOUND, connection exceptions.
+_HANDLED_OCCURRENCE_STATUSES = frozenset(
     {
-        "EXECUTED",
-        "FAILED",
-        "SKIPPED_RESCHEDULED",
-        "SKIPPED_DISABLED",
-        "NOT_FOUND",
+        "EXECUTED",  # worker ran; next_run_time advanced
+        "FAILED",  # worker failed but occurrence still advanced/logged in DB
+        "FAILED_INVALID_SCHEDULE",  # fail-closed: next_run_time cleared to NULL
     }
 )
+
+# Secondary rapid-loop breaker bounds (process-local only; DB is source of truth).
+_CIRCUIT_BREAKER_MAX_ENTRIES = 512
+_CIRCUIT_BREAKER_TTL_SECONDS = 300.0
+
+
+class RecentOccurrenceCache:
+    """Short-lived bounded cache of recently transitioned occurrences.
+
+    Rapid-loop circuit breaker only. Does not persist. Not a scheduling authority.
+    """
+
+    def __init__(
+        self,
+        max_entries: int = _CIRCUIT_BREAKER_MAX_ENTRIES,
+        ttl_seconds: float = _CIRCUIT_BREAKER_TTL_SECONDS,
+    ) -> None:
+        self._max_entries = max(1, int(max_entries))
+        self._ttl_seconds = max(1.0, float(ttl_seconds))
+        self._items: "OrderedDict[Tuple[int, datetime], Tuple[float, str]]" = (
+            OrderedDict()
+        )
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def prune(self, now_mono: Optional[float] = None) -> None:
+        now = time.monotonic() if now_mono is None else now_mono
+        expired = [
+            key
+            for key, (ts, _status) in self._items.items()
+            if (now - ts) > self._ttl_seconds
+        ]
+        for key in expired:
+            del self._items[key]
+        while len(self._items) > self._max_entries:
+            self._items.popitem(last=False)
+
+    def contains(
+        self, key: Tuple[int, datetime], now_mono: Optional[float] = None
+    ) -> bool:
+        self.prune(now_mono)
+        return key in self._items
+
+    def get_status(
+        self, key: Tuple[int, datetime], now_mono: Optional[float] = None
+    ) -> Optional[str]:
+        self.prune(now_mono)
+        item = self._items.get(key)
+        if item is None:
+            return None
+        return item[1]
+
+    def add(
+        self,
+        key: Tuple[int, datetime],
+        status: str,
+        now_mono: Optional[float] = None,
+    ) -> None:
+        now = time.monotonic() if now_mono is None else now_mono
+        self.prune(now)
+        if key in self._items:
+            del self._items[key]
+        self._items[key] = (now, status)
+        while len(self._items) > self._max_entries:
+            self._items.popitem(last=False)
 
 
 class PartitionScheduler:
@@ -39,9 +106,7 @@ class PartitionScheduler:
         self.refresh_event = asyncio.Event()
         self.shutdown_event = asyncio.Event()
         self._backoff = float(config.connect_retry_seconds)
-        # Secondary circuit breaker only: remember (job_id, expected_run_time)
-        # after the DB should already have transitioned away from that occurrence.
-        self._handled_occurrences: Dict[Tuple[int, datetime], str] = {}
+        self._handled_occurrences = RecentOccurrenceCache()
 
     def request_refresh(self) -> None:
         self.refresh_event.set()
@@ -79,18 +144,18 @@ class PartitionScheduler:
             )
             return False
 
-        # Drop any occurrence this process already handled this lifetime so a
-        # pathological DB next_run_time cannot tight-loop CREATE/DROP locally.
         filtered = []
         for job in jobs:
             key = (job.job_id, job.expected_run_time)
-            if key in self._handled_occurrences:
+            prior = self._handled_occurrences.get_status(key)
+            if prior is not None:
                 logger.critical(
-                    "Circuit breaker: excluding rediscovered occurrence "
+                    "Rapid-loop breaker: excluding rediscovered occurrence "
+                    "(local secondary cache only; DB remains authoritative) "
                     "job_id=%s expected_run_time=%s prior_result=%s refresh=%s",
                     job.job_id,
                     job.expected_run_time,
-                    self._handled_occurrences[key],
+                    prior,
                     reason,
                 )
                 continue
@@ -100,7 +165,7 @@ class PartitionScheduler:
         self._update_status_from_queue()
         self.status.last_refresh_at = datetime.now(timezone.utc).replace(tzinfo=None)
         self.status.last_refresh_result = f"ok:{reason}:{len(filtered)}"
-        self.status.extra["circuit_breaker_suppressed"] = len(self._handled_occurrences)
+        self.status.extra["circuit_breaker_entries"] = len(self._handled_occurrences)
         self._backoff = float(self.config.connect_retry_seconds)
         logger.info(
             "Queue refreshed (%s): %s upcoming job(s); next=%s @ %s",
@@ -113,13 +178,15 @@ class PartitionScheduler:
 
     async def _execute_one(self, job_id: int, expected: datetime) -> None:
         key = (job_id, expected)
-        if key in self._handled_occurrences:
+        prior = self._handled_occurrences.get_status(key)
+        if prior is not None:
             logger.critical(
-                "Circuit breaker: refusing re-execution job_id=%s "
-                "expected_run_time=%s prior_result=%s",
+                "Rapid-loop breaker: refusing duplicate occurrence "
+                "(no worker, no DB mutation; local secondary cache only) "
+                "job_id=%s expected_run_time=%s prior_result=%s",
                 job_id,
                 expected,
-                self._handled_occurrences[key],
+                prior,
             )
             self.status.last_execution_job_id = job_id
             self.status.last_execution_result = "SKIPPED_CIRCUIT_BREAKER"
@@ -147,7 +214,7 @@ class PartitionScheduler:
                 self._backoff * 2.0,
                 float(self.config.max_connect_retry_seconds),
             )
-            # Do not suppress: transaction likely rolled back; occurrence still open.
+            # Do not cache: transaction likely rolled back; occurrence still open.
             return
 
         status = str(result.get("status") or "FAILED")
@@ -164,13 +231,9 @@ class PartitionScheduler:
             new_next,
         )
 
-        if status in _TERMINAL_OCCURRENCE_STATUSES:
-            self._handled_occurrences[key] = status
-            if (
-                status in ("EXECUTED", "FAILED")
-                and new_next is not None
-                and new_next == expected
-            ):
+        if status in _HANDLED_OCCURRENCE_STATUSES:
+            self._handled_occurrences.add(key, status)
+            if status in ("EXECUTED", "FAILED") and new_next == expected:
                 logger.critical(
                     "Occurrence did not advance after %s: job_id=%s "
                     "expected_run_time=%s returned_next_run_time=%s "
@@ -184,7 +247,6 @@ class PartitionScheduler:
     async def run(self) -> None:
         self.status.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
         self.status.scheduler_active = True
-        # Read-only status metadata for the UI (does not affect scheduling).
         self.status.extra["lookahead_seconds"] = float(self.config.lookahead_seconds)
         self.status.extra["reconcile_seconds"] = float(self.config.reconcile_seconds)
         self.status.extra["bind"] = f"{self.config.bind_host}:{self.config.bind_port}"
@@ -195,14 +257,12 @@ class PartitionScheduler:
         while not self.shutdown_event.is_set():
             now = time.monotonic()
 
-            # Execute all currently due jobs sequentially (deterministic order).
             while True:
                 due = self.queue.pop_due(now)
                 if due is None:
                     break
                 job_id, expected = due
                 await self._execute_one(job_id, expected)
-                # After each execution, refresh so the new next_run_time is loaded.
                 await self.refresh_queue("post-execution")
                 now = time.monotonic()
                 next_reconcile = now + float(self.config.reconcile_seconds)
@@ -224,7 +284,6 @@ class PartitionScheduler:
             wait_candidates = [next_reconcile - now, float(self.config.reconcile_seconds)]
             if peeked is not None:
                 wait_candidates.append(max(0.0, peeked[0] - now))
-            # If DB was unavailable, wait at least the backoff interval.
             if self.status.last_refresh_result.startswith("error:"):
                 wait_candidates.append(self._backoff)
 

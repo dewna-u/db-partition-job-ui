@@ -29,13 +29,14 @@ Apply in a controlled DBA window, in order:
    This is not “duration-only”: the live database may not have either function yet.
 
 5. `20261007_01_run_partition_job_scheduled_occurrence_safety.sql`
-   Phase 0 safety: `CREATE OR REPLACE` of
-   `run_partition_job_scheduled(numeric, timestamp without time zone)` so that
-   after an attempt, `next_run_time` must be a **future** value distinct from
-   `p_expected_run_time`. Prevents same-occurrence tight loops / overdue
-   catch-up storms. Body mirrors `../realtime_scheduler_v1.sql`.
-   Also deploy updated `scheduler_backend` Python (secondary circuit breaker)
-   before restarting the scheduler.
+   Phase 0 safety (hardened): `CREATE OR REPLACE` of
+   `run_partition_job_scheduled(numeric, timestamp without time zone)`.
+   Validates a future next occurrence **before** CREATE/DROP. Invalid helper
+   results **fail closed** (`FAILED_INVALID_SCHEDULE`, `next_run_time = NULL`,
+   no worker). Does **not** invent `+1 day` or frequency fallbacks.
+   Body must match `../realtime_scheduler_v1.sql`. Also deploy updated
+   `scheduler_backend` Python (bounded TTL circuit breaker) before restarting
+   the scheduler.
 
 Until (1) is applied, the API still works: job/log queries fall back to
 legacy SELECTs without duration columns, and duration UI shows "—".

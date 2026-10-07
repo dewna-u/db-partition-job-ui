@@ -520,9 +520,10 @@ If journal shows the same `job_id` + `expected_run_time` executing repeatedly:
      'mubasher_oms.get_upcoming_partition_jobs(interval)'
    );
    ```
-6. Verify deployed SQL includes occurrence-advancement safety (non-future /
-   same-as-`p_expected_run_time` rejection) and that Python includes the
-   circuit breaker (`scheduler_backend/scheduler.py`).
+6. Verify deployed SQL includes fail-closed occurrence safety and that Python
+   includes the short-lived rapid-loop breaker in
+   `scheduler_backend/scheduler.py` (TTL 300s; caches EXECUTED / FAILED /
+   FAILED_INVALID_SCHEDULE only — not ordinary SKIPPED_* / NOT_FOUND).
 7. Restart the scheduler **only after** root cause is understood and corrected
    SQL + Python are both live.
 
@@ -534,9 +535,16 @@ Before `systemctl start partition-job-scheduler.service`:
 - [ ] `.env.realtime` is `enterprisedb:enterprisedb` mode `600`
 - [ ] API `.env` is `partitionui:partitionui` mode `600` (API must not read `.env.realtime`)
 - [ ] Both realtime functions resolve via `to_regprocedure`
-- [ ] Phase 0 occurrence-safety SQL is deployed (or equivalent body)
-- [ ] Deployed Python includes circuit breaker / logging of `expected_run_time`
-- [ ] No known job is intentionally left with a pathological non-advancing schedule
+- [ ] `mubasher_oms.cron_to_interval_or_next_run(text)` resolves via
+      `to_regprocedure` (source not currently versioned in this repo — review
+      the **live** definition during controlled deploy; see ISSUE-003)
+- [ ] Phase 0 fail-closed occurrence-safety SQL is deployed (body matches
+      `sql/realtime_scheduler_v1.sql`; no invented `+1 day` fallback)
+- [ ] Deployed Python includes rapid-loop breaker (TTL 300s, max 512;
+      caches only EXECUTED / FAILED / FAILED_INVALID_SCHEDULE) +
+      `expected_run_time` logging
+- [ ] Jobs with `next_run_time IS NULL` after fail-closed are reviewed by an
+      operator before re-enabling a schedule
 - [ ] Watch journal after start for first executions and any CRITICAL breaker lines
 
 Manual API start (for debugging):
