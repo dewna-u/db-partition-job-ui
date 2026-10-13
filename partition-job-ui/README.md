@@ -612,10 +612,43 @@ PartOps (API + scheduler)
 Key metrics: `partops.scheduler.heartbeat`, `queue_depth`, `active_jobs`,
 `max_concurrent_jobs`, `available_slots`, `overdue_jobs`,
 `partops.job.execution`, `partops.job.duration_ms`,
+`partops.jobs.failed_count`,
 `partops.db.connection_failure`, `partops.secrets_manager.*`,
 `partops.api.request` / `partops.api.error`.
 
+Metric semantics (do not confuse):
+
+* `partops.job.execution` — **counter** of scheduled execution **events**
+  (attempts/outcomes). Useful for troubleshooting; a single bad job can emit
+  many failure events.
+* `partops.jobs.failed_count` — **gauge** of the current number of **enabled**
+  rows in `partitioning_job_table` with `last_run_status = 'FAIL'`.
+  Disabled FAIL rows are excluded. Prefer this for “Failed Partition Jobs” KPIs
+  (`max:partops.jobs.failed_count{…}`).
+
 See RUNBOOK §10.4 for Agent setup, dashboard, and monitor recommendations.
+
+### Phase 4 — Edit / Enable / Disable (secure update)
+
+Configuration changes persist only through:
+
+```text
+UI → FastAPI PATCH /api/jobs/{id}
+   → mubasher_oms.update_data_to_partition_job_table(...)
+      (SECURITY DEFINER, owner mubasher_oms, fixed search_path)
+   → partitioning_job_table
+```
+
+* `partition_job_ui` needs **EXECUTE** on the function — not broad table `UPDATE`.
+* **Disable:** sets `is_enabled=false`; keeps `job_id`, history, logs,
+  `last_run_time`, `last_run_status`, and `next_run_time`. Stops **future**
+  scheduled runs (`SKIPPED_DISABLED`). Does not kill an already-running DDL
+  transaction.
+* **Re-enable / schedule edit:** database recalculates **one** future
+  `next_run_time` via `cron_to_interval_or_next_run` when the stored next is
+  stale/NULL or the schedule changes. Invalid schedules fail closed (rollback).
+* After a successful save the API returns the refreshed job row; the Jobs page
+  reloads so Enabled/Disabled and next run update without a fake success.
 
 ### New database configuration (production-copy / sensitive)
 

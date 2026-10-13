@@ -85,47 +85,56 @@ Remaining Risk:
     Cron helper still not versioned (ISSUE-003).
 
 
-## ISSUE-002 — Edit / Enable-Disable not covered in Phase 0
+## ISSUE-002 — Edit / Enable-Disable persistence (privilege + update security)
 
 Severity:
-    Medium (deferred)
+    High (operations)
 
 Status:
-    Open
+    Fixed in source — production verification pending (Phase 4)
 
 Component:
-    API / Jobs Edit path
+    API / Jobs Edit path /
+    `mubasher_oms.update_data_to_partition_job_table`
 
 Detected:
-    Phase 0 scope explicitly excluded Edit/Enable-Disable feature work.
+    Operators reported Enable → Disable (and Edit) not persisting correctly.
+    Deferred through Phases 0–3; addressed in Phase 4.
 
 Description:
-    Any remaining Edit or Enable/Disable product bugs are out of scope for
-    Phase 0 and should be addressed in a later phase. Disabled-job execution
-    safety at scheduled-run time remains enforced by
-    `SKIPPED_DISABLED` in `run_partition_job_scheduled`.
+    UI Edit / Enable / Disable call `PATCH /api/jobs/{id}` →
+    `update_data_to_partition_job_table(...)`. Updates often failed to persist
+    under the least-privilege app role.
 
-Evidence:
-    Phase 0 requirements; existing `SKIPPED_DISABLED` path in SQL.
+Root Cause (confirmed from repository SQL):
+    Prior migration `20260929_02_update_data_to_partition_job_table.sql`
+    defined the function as **SECURITY INVOKER** with:
+    - no `OWNER TO mubasher_oms`
+    - `GRANT EXECUTE … TO partition_job_ui` **commented out**
+    - no fixed `search_path`
+    - no `SELECT … FOR UPDATE`
+    - trusted client `p_next_run_time` without fail-closed re-enable logic
 
-Impact:
-    Operators may still see Edit UX issues; scheduling safety for disabled rows
-    at execution time is separate.
-
-Root Cause:
-    Deferred by phase scope.
+    Under SECURITY INVOKER, `partition_job_ui` must hold direct `UPDATE` on
+    `partitioning_job_table` for the function body to succeed. The intended
+    model is EXECUTE-only on a SECURITY DEFINER function owned by
+    `mubasher_oms` — not broad table UPDATE.
 
 Fix:
-    Track for next feature phase.
+    Migration `20261013_02_secure_update_partition_job.sql` + API returns
+    refreshed job row; Jobs page refreshes selected row after save.
+
+Remaining limitation (documented, not a bug):
+    Disable prevents future scheduled executions (`SKIPPED_DISABLED`).
+    It does **not** forcibly terminate a DDL worker that has already entered
+    its DB transaction.
 
 Tests:
-    Existing Edit API tests remain green; no Phase 0 Edit changes.
+    `test_phase4_secure_update.py` + existing Edit API tests.
 
 Deployment Notes:
-    None for Phase 0.
-
-Remaining Risk:
-    Unrelated Edit defects may still exist.
+    Apply Phase 4 SQL; restart API; do not grant table UPDATE to
+    `partition_job_ui`.
 
 
 ## ISSUE-003 — Scheduler depends on non-version-controlled cron helper

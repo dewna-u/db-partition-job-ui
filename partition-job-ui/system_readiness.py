@@ -509,7 +509,11 @@ def check_required_functions() -> List[Dict[str, Any]]:
                                 category,
                                 STATUS_WARNING,
                                 f"{identity} is not deployed (optional for some flows).",
-                                remediation_hint="Apply 20260929_02_update_data_to_partition_job_table.sql for Edit.",
+                                remediation_hint=(
+                                    "Apply 20260929_02_update_data_to_partition_job_table.sql "
+                                    "then Phase 4 20261013_02_secure_update_partition_job.sql "
+                                    "for Edit/Enable/Disable."
+                                ),
                             )
                         )
     except DatabaseError as exc:

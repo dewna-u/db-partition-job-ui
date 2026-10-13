@@ -1629,6 +1629,16 @@ def update_partition_job(job_id: Any, data: dict) -> Any:
             sqlstate = getattr(exc, "sqlstate", None) or ""
             if sqlstate in ("P0002", "02000") or "not found" in str(exc).lower():
                 raise DatabaseError(f"Job {job_id_int} not found.") from None
+            # 22023 invalid_parameter_value — validation / fail-closed schedule.
+            if sqlstate == "22023":
+                primary = getattr(getattr(exc, "diag", None), "message_primary", None)
+                text = (primary or str(exc) or "").strip().split("\n")[0][:400]
+                if not text or "password" in text.lower():
+                    text = (
+                        "The job update was rejected (invalid configuration or "
+                        "schedule). Previous values were left unchanged."
+                    )
+                raise DatabaseError(text) from None
             raise _map_psycopg_error(exc) from None
 
 

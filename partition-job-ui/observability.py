@@ -347,6 +347,11 @@ def emit_scheduler_execution_exception() -> None:
     increment("scheduler.execution_exception")
 
 
+def emit_jobs_failed_count(count: int) -> None:
+    """Gauge: current enabled jobs with last_run_status='FAIL' (not attempt count)."""
+    gauge("jobs.failed_count", int(count))
+
+
 def emit_job_execution(
     *,
     status: Optional[str],

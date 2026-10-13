@@ -33,10 +33,11 @@ export default function JobsPage() {
     try {
       const res = await api.jobs();
       setJobs(res.jobs || []);
-      if (selected) {
-        const refreshed = (res.jobs || []).find((j) => j.job_id === selected.job_id);
-        if (refreshed) setSelected(refreshed);
-      }
+      setSelected((prev) => {
+        if (!prev) return prev;
+        const refreshed = (res.jobs || []).find((j) => j.job_id === prev.job_id);
+        return refreshed || prev;
+      });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load jobs");
     }
@@ -44,7 +45,6 @@ export default function JobsPage() {
 
   useEffect(() => {
     void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const statuses = useMemo(

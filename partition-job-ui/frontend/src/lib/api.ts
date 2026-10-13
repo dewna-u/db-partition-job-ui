@@ -58,6 +58,7 @@ export const api = {
     request<{
       result: unknown;
       job_id: number;
+      job?: import("./types").PartitionJob | null;
       message: string;
       refresh_ok: boolean;
       refresh_message: string;

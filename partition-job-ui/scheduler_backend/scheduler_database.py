@@ -207,6 +207,35 @@ def open_connection(purpose: str) -> Generator[Connection, None, None]:
                 logger.debug("DB connection closed for %s", purpose)
 
 
+def count_failed_jobs(config: SchedulerConfig) -> int:
+    """Count enabled job rows currently in FAIL state (configuration table).
+
+    Equivalent to::
+
+        SELECT COUNT(*)
+        FROM {schema}.partitioning_job_table
+        WHERE is_enabled IS TRUE
+          AND last_run_status = 'FAIL'
+
+    Disabled rows, SUCCESS, and NULL ``last_run_status`` are excluded.
+    Does not query the log table and does not count execution attempts.
+    """
+    table = _identifier("PARTITION_JOB_TABLE", "partitioning_job_table")
+    sql = (
+        "SELECT COUNT(*)::bigint AS failed_count "
+        "FROM {schema}.{table} AS j "
+        "WHERE j.is_enabled IS TRUE "
+        "  AND j.last_run_status = 'FAIL'"
+    ).format(schema=config.schema, table=table)
+    with open_connection("failed-job count") as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql)
+            row = cur.fetchone()
+            if not row or row.get("failed_count") is None:
+                return 0
+            return int(row["failed_count"])
+
+
 def fetch_upcoming_jobs(config: SchedulerConfig) -> list[ScheduledJob]:
     """
     Retrieve upcoming (and overdue) jobs, then close the connection.

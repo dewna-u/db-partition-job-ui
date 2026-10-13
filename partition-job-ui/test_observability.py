@@ -16,6 +16,7 @@ from observability import (
     emit_api_request,
     emit_db_connection_failure,
     emit_job_execution,
+    emit_jobs_failed_count,
     emit_scheduler_concurrency,
     emit_scheduler_heartbeat,
     emit_secrets_refresh,
@@ -27,6 +28,7 @@ from observability import (
     normalize_operation,
     observability_status,
 )
+from scheduler_backend import scheduler_database
 from scheduler_backend.models import ScheduledJob, SchedulerConfig
 from scheduler_backend.scheduler import PartitionScheduler
 
@@ -154,6 +156,9 @@ class SchedulerMetricsIntegrationTests(unittest.TestCase):
         ), patch(
             "scheduler_backend.scheduler.fetch_upcoming_jobs",
             side_effect=fake_fetch,
+        ), patch(
+            "scheduler_backend.scheduler.count_failed_jobs",
+            return_value=0,
         ), patch("observability._send", side_effect=capture_send):
             ok = asyncio.run(scheduler.refresh_queue("startup"))
 
@@ -165,6 +170,7 @@ class SchedulerMetricsIntegrationTests(unittest.TestCase):
         self.assertIn("partops.scheduler.queue_depth:", joined)
         self.assertIn("partops.scheduler.available_slots:", joined)
         self.assertIn("partops.scheduler.overdue_jobs:1|g", joined)
+        self.assertIn("partops.jobs.failed_count:0|g", joined)
 
     def test_job_execution_counter_and_no_high_cardinality_tags(self) -> None:
         config = SchedulerConfig(max_concurrent_jobs=1, reconcile_seconds=60)
@@ -254,6 +260,119 @@ class SchedulerMetricsIntegrationTests(unittest.TestCase):
             ):
                 asyncio.run(scheduler._execute_one(9, when))
         self.assertEqual(scheduler.status.last_execution_result, "SKIPPED_TARGET_LOCKED")
+
+
+class FailedJobsGaugeTests(unittest.TestCase):
+    def test_gauge_format_not_counter(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"PARTOPS_DATADOG_ENABLED": "true", "PARTOPS_ENVIRONMENT": "development"},
+            clear=False,
+        ):
+            text = format_gauge_for_tests("jobs.failed_count", 2)
+        self.assertEqual(
+            text.split("|#")[0], "partops.jobs.failed_count:2|g"
+        )
+        self.assertNotIn("|c", text.split("|#")[0])
+
+    def test_count_failed_jobs_sql_filters(self) -> None:
+        source = inspect.getsource(scheduler_database.count_failed_jobs)
+        self.assertIn("is_enabled IS TRUE", source)
+        self.assertIn("last_run_status = 'FAIL'", source)
+        self.assertIn("COUNT(*)", source)
+        self.assertNotIn("partitioning_job_table_log", source)
+        self.assertIn("gauge", inspect.getsource(emit_jobs_failed_count))
+
+    def _refresh_with_failed_count(self, failed_count: int) -> list[str]:
+        config = SchedulerConfig(reconcile_seconds=60)
+        scheduler = PartitionScheduler(config)
+        when = datetime(2026, 10, 13, 16, 0, 0)
+        sent: list[str] = []
+
+        def fake_fetch(cfg):
+            return [ScheduledJob(1, when, 0.0, "a", True)]
+
+        with patch.dict(
+            os.environ, {"PARTOPS_DATADOG_ENABLED": "true"}, clear=False
+        ), patch(
+            "scheduler_backend.scheduler.fetch_upcoming_jobs",
+            side_effect=fake_fetch,
+        ), patch(
+            "scheduler_backend.scheduler.count_failed_jobs",
+            return_value=failed_count,
+        ), patch(
+            "observability._send",
+            side_effect=lambda p: sent.append(p.decode("utf-8")),
+        ):
+            ok = asyncio.run(scheduler.refresh_queue("startup"))
+        self.assertTrue(ok)
+        return sent
+
+    def test_zero_enabled_failed_jobs(self) -> None:
+        sent = self._refresh_with_failed_count(0)
+        self.assertTrue(any("partops.jobs.failed_count:0|g" in s for s in sent))
+
+    def test_one_enabled_failed_job(self) -> None:
+        sent = self._refresh_with_failed_count(1)
+        self.assertTrue(any("partops.jobs.failed_count:1|g" in s for s in sent))
+
+    def test_two_enabled_failed_jobs(self) -> None:
+        sent = self._refresh_with_failed_count(2)
+        self.assertTrue(any("partops.jobs.failed_count:2|g" in s for s in sent))
+
+    def test_count_helper_excludes_disabled_success_null(self) -> None:
+        """SQL contract: only enabled FAIL rows; not disabled/SUCCESS/NULL."""
+        source = inspect.getsource(scheduler_database.count_failed_jobs)
+        sql_start = source.index('sql = (')
+        sql_block = source[sql_start:]
+        self.assertIn("j.is_enabled IS TRUE", sql_block)
+        self.assertIn("j.last_run_status = 'FAIL'", sql_block)
+        # Equality to FAIL excludes NULL and SUCCESS without needing OR clauses.
+        self.assertNotIn("SUCCESS", sql_block)
+        self.assertNotIn("is_enabled IS FALSE", sql_block)
+        self.assertNotIn("IS NULL", sql_block)
+
+    def test_count_query_failure_does_not_crash_or_emit_zero(self) -> None:
+        config = SchedulerConfig(reconcile_seconds=60)
+        scheduler = PartitionScheduler(config)
+        when = datetime(2026, 10, 13, 16, 5, 0)
+        sent: list[str] = []
+
+        def fake_fetch(cfg):
+            return [ScheduledJob(1, when, 0.0, "a", True)]
+
+        with patch.dict(
+            os.environ, {"PARTOPS_DATADOG_ENABLED": "true"}, clear=False
+        ), patch(
+            "scheduler_backend.scheduler.fetch_upcoming_jobs",
+            side_effect=fake_fetch,
+        ), patch(
+            "scheduler_backend.scheduler.count_failed_jobs",
+            side_effect=RuntimeError("count unavailable"),
+        ), patch(
+            "observability._send",
+            side_effect=lambda p: sent.append(p.decode("utf-8")),
+        ):
+            ok = asyncio.run(scheduler.refresh_queue("startup"))
+
+        self.assertTrue(ok)
+        self.assertNotIn("failed_jobs_count", scheduler.status.extra)
+        self.assertFalse(any("jobs.failed_count" in s for s in sent))
+        # Refresh still emitted heartbeat (scheduling path intact).
+        self.assertTrue(any("scheduler.heartbeat" in s for s in sent))
+
+    def test_job_execution_metric_unchanged(self) -> None:
+        sent = []
+        with patch.dict(os.environ, {"PARTOPS_DATADOG_ENABLED": "true"}, clear=False):
+            with patch(
+                "observability._send",
+                side_effect=lambda p: sent.append(p.decode("utf-8")),
+            ):
+                emit_job_execution(status="FAILED", is_create=False)
+        joined = "\n".join(sent)
+        self.assertIn("partops.job.execution:1|c", joined)
+        self.assertIn("status:failed", joined)
+        self.assertNotIn("jobs.failed_count", joined)
 
 
 class DbAndSecretsMetricsTests(unittest.TestCase):

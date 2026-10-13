@@ -475,3 +475,101 @@ Rollback:
 
 Notes:
     No commit/push; no production server/DB/AWS/Agent install; no Edit work.
+
+
+## CHANGE-009 — Gauge for current enabled failed jobs
+
+Date:
+    2026-10-13
+
+Reason:
+    Datadog “Failed Partition Jobs” must not use `partops.job.execution`
+    (execution-attempt counter). Add a true current-state gauge of enabled
+    job rows with `last_run_status = 'FAIL'`.
+
+Related Issues:
+    None (observability correction)
+
+Files Changed:
+    - `observability.py` (`emit_jobs_failed_count`)
+    - `scheduler_backend/scheduler_database.py` (`count_failed_jobs`)
+    - `scheduler_backend/scheduler.py` (emit during successful refresh)
+    - `test_observability.py`
+    - `README.md`
+    - `RUNBOOK.md`
+    - `changes.md`
+
+Metric:
+    `partops.jobs.failed_count` — DogStatsD **gauge**
+    SQL: `COUNT(*)` from `{schema}.partitioning_job_table`
+    where `is_enabled IS TRUE AND last_run_status = 'FAIL'`.
+    Disabled FAIL / SUCCESS / NULL status excluded. Not from log table.
+
+Behaviour:
+    Emitted on successful scheduler refresh/reconcile.
+    If the COUNT query fails: log `event=failed_jobs_count_failed`, do not
+    emit a fake zero, do not break refresh/scheduling.
+    `partops.job.execution` unchanged (still useful for attempt history).
+
+Tests:
+    Failed-jobs gauge cases in `test_observability.py` + full suite.
+
+Notes:
+    No commit/push; no Datadog dashboard/API changes from Cursor.
+
+
+## CHANGE-010 — Phase 4 secure Edit / Enable / Disable
+
+Date:
+    2026-10-13
+
+Reason:
+    Edit/Enable/Disable failed to persist under least-privilege because
+    `update_data_to_partition_job_table` was SECURITY INVOKER without hardened
+    owner/EXECUTE grants (ISSUE-002).
+
+Related Issues:
+    ISSUE-002
+
+Files Changed:
+    - `sql/migrations/20261013_02_secure_update_partition_job.sql` (new)
+    - `sql/migrations/README.md`
+    - `api/routers/jobs.py` (return refreshed job after update)
+    - `database.py` (map SQLSTATE 22023 validation failures)
+    - `system_readiness.py` (remediation hint)
+    - `frontend/src/app/jobs/page.tsx` (refresh selected after save)
+    - `frontend/src/lib/api.ts`
+    - `test_phase4_secure_update.py` (new)
+    - `issues.md`, `changes.md`, `README.md`, `RUNBOOK.md`
+
+Root Cause:
+    SECURITY INVOKER + missing EXECUTE grant / no DEFINER owner path required
+    direct table UPDATE for `partition_job_ui` (or updates failed).
+
+Database security:
+    SECURITY DEFINER; OWNER mubasher_oms;
+    `SET search_path = pg_catalog, mubasher_oms, pg_temp`;
+    REVOKE ALL FROM PUBLIC; GRANT EXECUTE TO partition_job_ui;
+    no table UPDATE grant.
+
+Semantics:
+    Disable: is_enabled=false; preserves next_run_time, last_run_*, history.
+    Re-enable / schedule edit: one future next_run_time via
+    cron_to_interval_or_next_run; fail closed (rollback) if invalid.
+    Row locked with FOR UPDATE vs scheduler.
+
+API / UI:
+    PATCH still calls the DB function; returns `job` after success;
+    scheduler refresh failure does not roll back DB; Jobs page reloads
+    selected row so Enabled/Disabled and next_run_time update in UI.
+
+Tests:
+    `test_phase4_secure_update.py` + full suite.
+
+Deployment / rollback:
+    See RUNBOOK §10.5. Backup with pg_get_functiondef before apply;
+    restore prior definition on rollback (do not grant table UPDATE).
+
+Notes:
+    No commit/push; no prod DB/server access; Datadog Agent unchanged;
+    partops.jobs.failed_count preserved.

@@ -220,10 +220,16 @@ def update_job(job_id: int, body: JobUpdateBody):
     # Refresh after successful commit/close inside update_partition_job.
     # A refresh failure must not undo the DB update.
     refresh_ok, refresh_message = notify_scheduler_refresh()
+    # Re-read so UI shows DB-authoritative next_run_time / is_enabled.
+    try:
+        updated_job = get_partition_job(job_id)
+    except DatabaseError:
+        updated_job = None
     return ok(
         {
             "result": result,
             "job_id": job_id,
+            "job": updated_job,
             "refresh_ok": refresh_ok,
             "refresh_message": refresh_message,
             "message": "Job updated successfully.",

@@ -11,6 +11,7 @@ from typing import Optional, Set, Tuple
 
 from observability import (
     emit_job_execution,
+    emit_jobs_failed_count,
     emit_scheduler_concurrency,
     emit_scheduler_execution_exception,
     emit_scheduler_heartbeat,
@@ -19,6 +20,7 @@ from observability import (
 from scheduler_backend.models import SchedulerConfig, SchedulerStatus
 from scheduler_backend.queue_manager import ScheduleQueue
 from scheduler_backend.scheduler_database import (
+    count_failed_jobs,
     execute_scheduled_job,
     fetch_upcoming_jobs,
 )
@@ -223,12 +225,25 @@ class PartitionScheduler:
         self._backoff = float(self.config.connect_retry_seconds)
         # Heartbeat on successful reconcile/refresh (existing cycle; no extra loop).
         emit_scheduler_heartbeat()
+        # Current enabled FAIL job rows (gauge). Never invent 0 on COUNT failure.
+        try:
+            failed_count = await asyncio.to_thread(count_failed_jobs, self.config)
+        except Exception:  # noqa: BLE001 — do not break refresh/scheduling
+            logger.exception(
+                "event=failed_jobs_count_failed reason=%s",
+                reason,
+            )
+        else:
+            self.status.extra["failed_jobs_count"] = int(failed_count)
+            emit_jobs_failed_count(int(failed_count))
         logger.info(
             "event=scheduler_refresh_ok reason=%s upcoming=%s overdue=%s "
-            "next_job_id=%s next_expected_run_time=%s active=%s max=%s",
+            "failed_jobs=%s next_job_id=%s next_expected_run_time=%s "
+            "active=%s max=%s",
             reason,
             len(filtered),
             overdue_count,
+            self.status.extra.get("failed_jobs_count"),
             self.status.next_job_id,
             self.status.next_expected_run_time,
             self._active_count,

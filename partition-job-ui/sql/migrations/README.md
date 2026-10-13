@@ -49,6 +49,15 @@ Apply in a controlled DBA window, in order:
    Deploy with scheduler Python concurrency changes
    (`PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS`, default `1`).
 
+7. `20261013_02_secure_update_partition_job.sql`
+   Phase 4: `CREATE OR REPLACE` of
+   `update_data_to_partition_job_table(...)` as **SECURITY DEFINER**,
+   `OWNER TO mubasher_oms`, fixed `search_path`, `REVOKE` PUBLIC,
+   `GRANT EXECUTE` to `partition_job_ui` only. Row `FOR UPDATE`. Disable
+   preserves `next_run_time` / history columns. Re-enable and schedule edits
+   recalculate one future `next_run_time` via `cron_to_interval_or_next_run`
+   (fail closed). Does **not** grant table `UPDATE` to `partition_job_ui`.
+
 Until (1) is applied, the API still works: job/log queries fall back to
 legacy SELECTs without duration columns, and duration UI shows "—".
 

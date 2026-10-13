@@ -688,7 +688,9 @@ PartOps continues to operate if the Agent is stopped or UDP send fails.
 - Scheduler heartbeat
 - Queue depth / overdue jobs
 - Active jobs / max concurrency / available slots
-- Job executions by status
+- **Failed jobs (current):** `max:partops.jobs.failed_count{…}`
+  (enabled rows with `last_run_status='FAIL'` — not attempt count)
+- Job execution events by status (`partops.job.execution` — troubleshooting)
 - CREATE vs DROP counts (`operation` tag)
 - Job duration p50 / p95 / p99 (`partops.job.duration_ms`)
 - DB connection failures (by `component`)
@@ -696,6 +698,10 @@ PartOps continues to operate if the Agent is stopped or UDP send fails.
 - API request / error (`status_class`)
 - systemd / HTTP health (Agent checks)
 - EC2 CPU / memory / disk
+
+Note: do **not** use `sum`/`count` of `partops.job.execution{status:failed*}` as
+the primary “Failed Partition Jobs” KPI — that counts attempts. Use
+`partops.jobs.failed_count` instead.
 
 #### Recommended monitors (starting points — tune with ops evidence)
 
@@ -707,8 +713,8 @@ PartOps continues to operate if the Agent is stopped or UDP send fails.
 | 4 | UI service down | systemd / process check |
 | 5 | API `/health` failing | Agent HTTP check |
 | 6 | Scheduler `/health` failing | Agent HTTP check `127.0.0.1:8765/health` |
-| 7 | Scheduled job failures rising | `status:failed*` counters |
-| 8 | Consecutive job failures | windowed failure rate |
+| 7 | Enabled jobs currently FAIL | `max:partops.jobs.failed_count` above threshold |
+| 8 | Execution failure event rate | `partops.job.execution{status:failed*}` (secondary) |
 | 9 | High job duration | p95 `partops.job.duration_ms` |
 | 10 | Queue depth increasing | `partops.scheduler.queue_depth` |
 | 11 | Overdue/due jobs above threshold | `partops.scheduler.overdue_jobs` |
@@ -718,6 +724,40 @@ PartOps continues to operate if the Agent is stopped or UDP send fails.
 | 15–17 | Host CPU / memory / disk | Agent host metrics |
 
 Do not set aggressive production thresholds without operational evidence.
+
+### 10.5 Phase 4 — secure Edit / Enable / Disable deploy order
+
+Do **not** grant `UPDATE` on `partitioning_job_table` to `partition_job_ui`.
+
+1. `git pull` (intended revision).
+2. Review
+   `sql/migrations/20261013_02_secure_update_partition_job.sql`.
+3. Back up the live function:
+   ```sql
+   SELECT pg_get_functiondef(
+     'mubasher_oms.update_data_to_partition_job_table(numeric,character varying,boolean,character varying,character varying,jsonb,character varying,interval,timestamp without time zone,character varying,numeric,boolean,interval)'::regprocedure
+   );
+   ```
+4. Inspect current owner / security / grants (`pg_proc`, `aclexplode`).
+5. Apply the Phase 4 migration in a DBA window.
+6. Verify:
+   - `prosecdef` = true (SECURITY DEFINER)
+   - owner = `mubasher_oms`
+   - fixed `search_path` includes `pg_catalog, mubasher_oms, pg_temp`
+   - PUBLIC has no EXECUTE
+   - `partition_job_ui` has EXECUTE
+7. Restart `partition-job-api.service` (UI if needed).
+8. UI: edit a harmless field on an approved non-critical job → Save → confirm
+   DB + UI.
+9. Disable that approved job → confirm `is_enabled=false`, history retained,
+   `next_run_time` retained.
+10. Re-enable → confirm a **future** `next_run_time`.
+11. When the scheduler is running later: confirm refresh after edit and that a
+    queued occurrence for a disabled job returns `SKIPPED_DISABLED`.
+
+Rollback: restore the previous function body from the backup
+(`CREATE OR REPLACE` / prior definition). Do **not** “fix” by granting
+table UPDATE to `partition_job_ui`.
 
 Manual API start (for debugging):
 
