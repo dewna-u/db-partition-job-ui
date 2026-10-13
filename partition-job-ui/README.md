@@ -255,9 +255,38 @@ Replace at least:
 |---|---|
 | `DB_NAME` | `your_database` |
 | `DB_USER` | keep or change `partition_job_ui` |
-| `DB_PASSWORD` | `replace_with_strong_password` |
+| `DB_PASSWORD` | `replace_with_strong_password` (env provider) |
 | `DB_HOST` / `DB_PORT` | if not local defaults |
 | `PGAGENT_DB_*` | only if pgAgent is in another database |
+| `PARTITION_DB_SECRET_PROVIDER` | `env` (default) or `aws` |
+
+### Database credential providers
+
+| Provider | Use | Credentials |
+|---|---|---|
+| `env` (default) | Local / rollback / first deploy | `DB_USER` + `DB_PASSWORD` |
+| `aws` | Production (recommended) | AWS Secrets Manager JSON via EC2 IAM role |
+
+AWS mode architecture:
+
+```text
+EC2 IAM instance role
+        ↓
+boto3 default credential chain
+        ↓
+Secrets Manager GetSecretValue
+        ↓
+JSON { "username"?, "password" }
+        ↓
+in-process cache (TTL, default 300s)
+        ↓
+psycopg connection
+```
+
+AWS mode variables: `PARTITION_DB_SECRET_ID`, optional `AWS_REGION`,
+`PARTITION_DB_SECRET_CACHE_TTL_SECONDS`. No AWS access keys in PartOps config.
+AWS mode **never** falls back to `DB_PASSWORD`. After verification, remove
+`DB_PASSWORD` from `.env` / `.env.realtime`.
 
 Never commit `.env`. It is listed in `.gitignore`.
 

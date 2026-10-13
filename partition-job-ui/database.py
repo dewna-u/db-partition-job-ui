@@ -14,6 +14,12 @@ from psycopg.errors import UndefinedColumn
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from db_credentials import (
+    DatabaseCredentialError,
+    invalidate_database_secret_cache,
+    is_authentication_error,
+    resolve_database_credentials,
+)
 from job_autofill import (
     INVOCATION_CALL,
     PROKIND_FUNCTION,
@@ -577,12 +583,17 @@ def _main_db_kwargs() -> dict[str, Any]:
             "Invalid database configuration. DB_PORT and DB_CONNECT_TIMEOUT must be integers."
         ) from exc
 
+    try:
+        creds = resolve_database_credentials()
+    except DatabaseCredentialError as exc:
+        raise DatabaseError(str(exc)) from None
+
     return {
         "host": os.getenv("DB_HOST", "127.0.0.1").strip() or "127.0.0.1",
         "port": port,
         "dbname": _require_env("DB_NAME"),
-        "user": _require_env("DB_USER"),
-        "password": _require_env("DB_PASSWORD"),
+        "user": creds["user"],
+        "password": creds["password"],
         "sslmode": os.getenv("DB_SSLMODE", "prefer").strip() or "prefer",
         "connect_timeout": connect_timeout,
         "application_name": APPLICATION_NAME,
@@ -797,17 +808,43 @@ def _map_psycopg_error(exc: PsycopgError) -> DatabaseError:
     )
 
 
+def _connect_psycopg_with_auth_retry(kwargs_factory: Any) -> Connection:
+    """Connect once; on auth failure invalidate AWS secret cache and retry once."""
+    from psycopg import connect
+
+    kwargs = kwargs_factory() if callable(kwargs_factory) else kwargs_factory
+    try:
+        return connect(**kwargs)
+    except PsycopgError as exc:
+        if not is_authentication_error(exc):
+            raise
+        logger.warning(
+            "Database authentication failed; invalidating credential cache and retrying once"
+        )
+        invalidate_database_secret_cache()
+        if callable(kwargs_factory):
+            kwargs = kwargs_factory()
+        else:
+            raise
+        return connect(**kwargs)
+
+
 @contextmanager
-def _connection(kwargs: dict[str, Any]) -> Generator[Connection, None, None]:
-    """Open a short-lived connection and always close it."""
+def _connection(kwargs_factory: Any) -> Generator[Connection, None, None]:
+    """Open a short-lived connection and always close it.
+
+    ``kwargs_factory`` may be a dict (tests/legacy) or a zero-arg callable that
+    returns connection kwargs. Callables enable a single secret-cache refresh
+    retry after authentication failures.
+    """
     conn: Optional[Connection] = None
     try:
-        from psycopg import connect
-
-        conn = connect(**kwargs)
+        conn = _connect_psycopg_with_auth_retry(kwargs_factory)
         yield conn
     except PsycopgError as exc:
         raise _map_psycopg_error(exc) from None
+    except DatabaseCredentialError as exc:
+        raise DatabaseError(str(exc)) from None
     except OSError:
         logger.exception("OS-level database connection failure")
         raise DatabaseError(
@@ -823,7 +860,7 @@ def _connection(kwargs: dict[str, Any]) -> Generator[Connection, None, None]:
 
 def pgagent_table_exists() -> bool:
     """Return True if pgagent.pga_job exists in the configured pgAgent database."""
-    with _connection(_pgagent_db_kwargs()) as conn:
+    with _connection(_pgagent_db_kwargs) as conn:
         with conn.cursor() as cur:
             cur.execute(_PGAGENT_EXISTS_SQL)
             row = cur.fetchone()
@@ -837,7 +874,7 @@ def get_pgagent_jobs() -> list[dict]:
     Raises PgAgentNotInstalledError if pgagent.pga_job is missing.
     Opens a short-lived connection and closes it afterward.
     """
-    with _connection(_pgagent_db_kwargs()) as conn:
+    with _connection(_pgagent_db_kwargs) as conn:
         with conn.cursor() as cur:
             cur.execute(_PGAGENT_EXISTS_SQL)
             exists_row = cur.fetchone()
@@ -879,7 +916,7 @@ def create_partition_job(data: dict) -> Any:
 
     statement = build_create_partition_job_sql()
 
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -1122,7 +1159,7 @@ def _inspect_called_routine(
     resolved: Optional[dict] = None
 
     try:
-        with _connection(_main_db_kwargs()) as conn:
+        with _connection(_main_db_kwargs) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 candidates, kind_warning = _routine_candidates(cur, routine)
                 if kind_warning:
@@ -1234,7 +1271,7 @@ def get_pgagent_job_details(
     warnings: list[str] = []
     autofill: dict[str, Any] = {}
 
-    with _connection(_pgagent_db_kwargs()) as conn:
+    with _connection(_pgagent_db_kwargs) as conn:
         with conn.cursor() as cur:
             cur.execute(_PGAGENT_DETAIL_OBJECTS_SQL)
             exists_row = cur.fetchone()
@@ -1465,7 +1502,7 @@ def _validate_job_id(job_id: Any) -> int:
 
 def get_partition_jobs() -> list[dict]:
     """Return every parameterised configuration row. Read-only."""
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
                 try:
@@ -1485,7 +1522,7 @@ def get_partition_jobs() -> list[dict]:
 def get_partition_job(job_id: Any) -> Optional[dict]:
     """Return one parameterised configuration row, or None. Read-only."""
     job_id_int = _validate_job_id(job_id)
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
                 try:
@@ -1518,7 +1555,7 @@ def get_partition_job_logs(limit: int = 100) -> list[dict]:
         row_limit = 100
     row_limit = max(1, min(row_limit, 1000))
 
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
                 try:
@@ -1564,7 +1601,7 @@ def update_partition_job(job_id: Any, data: dict) -> Any:
     }
     statement = build_update_partition_job_sql()
 
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -1605,7 +1642,7 @@ def run_partition_job_manual(job_id: Any) -> Any:
     result: Optional[dict] = None
     failure_message: Optional[str] = None
 
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -1657,7 +1694,7 @@ def get_generic_partition_schedulers() -> dict[str, Any]:
     }
     found: dict[str, Any] = {"create_scheduler": None, "drop_scheduler": None}
 
-    with _connection(_pgagent_db_kwargs()) as conn:
+    with _connection(_pgagent_db_kwargs) as conn:
         with conn.cursor() as cur:
             cur.execute(_PGAGENT_EXISTS_SQL)
             exists_row = cur.fetchone()
@@ -1728,7 +1765,7 @@ def get_database_readiness() -> dict[str, Any]:
         "sequence_name": f"{schema}.{partition_job_sequence_name()}",
     }
 
-    with _connection(_main_db_kwargs()) as conn:
+    with _connection(_main_db_kwargs) as conn:
         try:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(_DATABASE_READINESS_SQL, params)

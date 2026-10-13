@@ -111,9 +111,10 @@ chown partitionui:partitionui .env
 vi .env
 ```
 
-Minimum required values:
+Minimum required values (env credential provider — default / first rollout):
 
 ```bash
+PARTITION_DB_SECRET_PROVIDER=env
 DB_HOST=127.0.0.1
 DB_PORT=5444
 DB_NAME=<your_database>
@@ -121,6 +122,20 @@ DB_USER=partition_job_ui
 DB_PASSWORD=<secret>
 DB_SSLMODE=prefer
 DB_CONNECT_TIMEOUT=5
+```
+
+AWS Secrets Manager provider (after IAM + secret exist):
+
+```bash
+PARTITION_DB_SECRET_PROVIDER=aws
+PARTITION_DB_SECRET_ID=partops/example/db-credentials
+AWS_REGION=<aws-region>
+PARTITION_DB_SECRET_CACHE_TTL_SECONDS=300
+DB_HOST=127.0.0.1
+DB_PORT=5444
+DB_NAME=<your_database>
+DB_USER=partition_job_ui
+# DB_PASSWORD — omit after AWS mode is verified (never used as AWS fallback)
 ```
 
 Optional pgAgent DB (leave blank to reuse main DB):
@@ -143,6 +158,30 @@ PARTITION_SCHEDULER_REFRESH_TIMEOUT_SECONDS=2
 ```
 
 Never commit `.env`.
+
+### 3.1b AWS Secrets Manager rollout (production)
+
+Do **not** switch to AWS mode until the secret and IAM role exist.
+
+1. Create a Secrets Manager secret whose `SecretString` is JSON:
+   `{"username":"...","password":"..."}` (`password` required; `username` optional).
+2. Grant the EC2 instance role `secretsmanager:GetSecretValue` on that secret.
+3. Deploy PartOps source that includes `db_credentials.py` / boto3.
+4. Keep `PARTITION_DB_SECRET_PROVIDER=env` initially; verify API/scheduler healthy.
+5. Set `PARTITION_DB_SECRET_PROVIDER=aws`, `PARTITION_DB_SECRET_ID=...`, and
+   `AWS_REGION` in `.env` and `.env.realtime` (same provider settings on both
+   processes as appropriate).
+6. Restart `partition-job-api.service` and `partition-job-scheduler.service`.
+7. Verify `/api/health`, readiness credential provider = aws, and a DB-backed page/job.
+8. Remove `DB_PASSWORD` from `.env` / `.env.realtime` (mode 600); restart; verify again.
+
+Rollback:
+
+1. Set `PARTITION_DB_SECRET_PROVIDER=env`.
+2. Restore `DB_PASSWORD` securely (never commit).
+3. Restart API and scheduler; verify.
+
+AWS mode **never** falls back to `DB_PASSWORD` on Secrets Manager failure.
 
 ### 3.2 Scheduler — `.env.realtime` (if running realtime scheduler)
 

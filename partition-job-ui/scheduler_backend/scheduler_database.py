@@ -17,6 +17,12 @@ from dotenv import load_dotenv
 from psycopg import Connection, Error as PsycopgError, connect
 from psycopg.rows import dict_row
 
+from db_credentials import (
+    DatabaseCredentialError,
+    invalidate_database_secret_cache,
+    is_authentication_error,
+    resolve_database_credentials,
+)
 from scheduler_backend.models import ScheduledJob, SchedulerConfig
 from scheduler_backend.db_safety import (
     assert_expected_database,
@@ -86,15 +92,31 @@ def load_scheduler_config() -> SchedulerConfig:
 
 def _db_kwargs() -> dict[str, Any]:
     _load_env()
+    creds = resolve_database_credentials()
     return {
         "host": _require("DB_HOST"),
         "port": int(os.getenv("DB_PORT", "5432")),
         "dbname": _require("DB_NAME"),
-        "user": _require("DB_USER"),
-        "password": _require("DB_PASSWORD"),
+        "user": creds["user"],
+        "password": creds["password"],
         "sslmode": (os.getenv("DB_SSLMODE") or "prefer").strip() or "prefer",
         "connect_timeout": int(os.getenv("DB_CONNECT_TIMEOUT", "5")),
     }
+
+
+def _connect_with_auth_retry() -> Connection:
+    """Connect using resolved credentials; refresh AWS secret once on auth failure."""
+    try:
+        return connect(**_db_kwargs())
+    except PsycopgError as exc:
+        if not is_authentication_error(exc):
+            raise
+        logger.warning(
+            "Scheduler DB authentication failed; invalidating credential cache "
+            "and retrying once"
+        )
+        invalidate_database_secret_cache()
+        return connect(**_db_kwargs())
 
 
 @contextmanager
@@ -111,7 +133,11 @@ def open_connection(purpose: str) -> Generator[Connection, None, None]:
     logger.debug("Opening DB connection for %s", purpose)
     conn: Optional[Connection] = None
     try:
-        conn = connect(**_db_kwargs())
+        try:
+            conn = _connect_with_auth_retry()
+        except DatabaseCredentialError:
+            logger.exception("Scheduler database credential resolution failed")
+            raise
         assert_expected_database(read_current_database(conn))
         # End the implicit transaction from the identity SELECT.
         conn.commit()

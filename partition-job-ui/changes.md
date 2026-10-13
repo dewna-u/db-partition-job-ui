@@ -286,3 +286,56 @@ Database Changes:
 Notes:
     LOCALHOST only. No production DB/server access. No commit/push.
     Resume: set `PARTOPS_LOCAL_PG_ADMIN_PASSWORD` and re-run bootstrap script.
+
+
+## CHANGE-006 — AWS Secrets Manager database credential integration
+
+Date:
+    2026-10-13
+
+Reason:
+    Remove the need to store `DB_PASSWORD` in production `.env` /
+    `.env.realtime` by resolving credentials from AWS Secrets Manager via the
+    EC2 IAM instance role, while keeping an `env` provider for local/rollback.
+
+Related Issues:
+    None (security enhancement)
+
+Files Changed:
+    - `db_credentials.py` (new)
+    - `database.py`
+    - `scheduler_backend/scheduler_database.py`
+    - `system_readiness.py`
+    - `test_db_credentials.py` (new)
+    - `requirements.txt` (+ boto3)
+    - `.env.example`
+    - `.env.realtime.example`
+    - `README.md`
+    - `RUNBOOK.md`
+    - `changes.md`
+
+Dependency Changes:
+    - `boto3>=1.34,<2.0` (lazy import; unused when provider=env)
+
+Environment Variables:
+    - `PARTITION_DB_SECRET_PROVIDER` — `env` (default) or `aws`
+    - `PARTITION_DB_SECRET_ID` — required in aws mode
+    - `AWS_REGION` / `AWS_DEFAULT_REGION` — optional region hint
+    - `PARTITION_DB_SECRET_CACHE_TTL_SECONDS` — default 300
+
+Behavioural Impact:
+    - Shared resolver; no dotenv loading inside `db_credentials.py`.
+    - AWS mode fail-closed (no silent `DB_PASSWORD` fallback).
+    - In-process TTL cache; invalidate + single retry on auth SQLSTATE.
+    - Phase 0 scheduler transaction boundary unchanged.
+
+Deployment Requirements (NOT executed here):
+    1. Deploy source + `pip install -r requirements.txt`.
+    2. Keep provider=env until secret/IAM ready.
+    3. Switch to aws; restart; verify; remove `DB_PASSWORD`.
+
+Rollback:
+    Set provider=env, restore `DB_PASSWORD`, restart.
+
+Notes:
+    No commit/push; no production server/DB/AWS secret/IAM changes in this turn.

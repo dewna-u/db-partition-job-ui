@@ -31,6 +31,7 @@ from database import (
     partition_job_table_name,
     partition_job_update_function_identity,
 )
+from db_credentials import credential_provider_status, secret_provider
 from scheduler_client import fetch_scheduler_status, scheduler_status_url
 
 logger = logging.getLogger(__name__)
@@ -231,7 +232,11 @@ def check_database_connection() -> Dict[str, Any]:
             STATUS_FAILED,
             "Database environment is not configured.",
             details={"error": exc.message},
-            remediation_hint="Set DB_HOST, DB_PORT, DB_NAME, DB_USER, and DB_PASSWORD in .env.",
+            remediation_hint=(
+                "Configure DB_HOST/DB_PORT/DB_NAME and either "
+                "PARTITION_DB_SECRET_PROVIDER=env with DB_USER/DB_PASSWORD, or "
+                "PARTITION_DB_SECRET_PROVIDER=aws with PARTITION_DB_SECRET_ID."
+            ),
         )
 
     safe_kwargs = {
@@ -284,7 +289,7 @@ def check_required_tables() -> List[Dict[str, Any]]:
     checks: List[Dict[str, Any]] = []
 
     try:
-        with _connection(_main_db_kwargs()) as conn:
+        with _connection(_main_db_kwargs) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
@@ -457,7 +462,7 @@ def check_required_functions() -> List[Dict[str, Any]]:
 
     checks: List[Dict[str, Any]] = []
     try:
-        with _connection(_main_db_kwargs()) as conn:
+        with _connection(_main_db_kwargs) as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 for key, label, fn, argtypes in required:
                     identity = _regprocedure(schema, fn, argtypes)
@@ -767,7 +772,80 @@ def check_runtime_configuration() -> List[Dict[str, Any]]:
     category = "configuration"
     checks: List[Dict[str, Any]] = []
 
-    required_vars = ("DB_NAME", "DB_USER", "DB_PASSWORD")
+    # Credential provider status never calls Secrets Manager.
+    try:
+        provider = secret_provider()
+    except Exception as exc:  # noqa: BLE001
+        provider = "invalid"
+        checks.append(
+            _check(
+                "credential_provider",
+                "Credential provider",
+                category,
+                STATUS_FAILED,
+                str(exc),
+            )
+        )
+    else:
+        status = credential_provider_status()
+        checks.append(
+            _check(
+                "credential_provider",
+                "Credential provider",
+                category,
+                STATUS_READY
+                if status.get("credential_configuration") == "ready"
+                else STATUS_FAILED,
+                "provider={0}; configuration={1}".format(
+                    status.get("credential_provider"),
+                    status.get("credential_configuration"),
+                ),
+                details={
+                    k: v
+                    for k, v in status.items()
+                    if k
+                    not in (
+                        "error",
+                    )
+                },
+                remediation_hint=(
+                    None
+                    if status.get("credential_configuration") == "ready"
+                    else "Configure env credentials or AWS Secrets Manager variables."
+                ),
+            )
+        )
+
+    required_vars = ["DB_NAME"]
+    if provider == "env":
+        required_vars.extend(["DB_USER", "DB_PASSWORD"])
+    elif provider == "aws":
+        # Username may come from secret; DB_USER is optional fallback.
+        required_vars.append("PARTITION_DB_SECRET_ID")
+        if _env_configured("DB_USER"):
+            checks.append(
+                _check(
+                    "env_db_user",
+                    "DB_USER",
+                    category,
+                    STATUS_READY,
+                    "Set (fallback if secret omits username)",
+                )
+            )
+        checks.append(
+            _check(
+                "env_db_password",
+                "DB_PASSWORD",
+                category,
+                STATUS_READY if not _env_configured("DB_PASSWORD") else STATUS_WARNING,
+                (
+                    "Not required in AWS mode (omit after Secrets Manager verification)"
+                    if not _env_configured("DB_PASSWORD")
+                    else "Still present — remove after AWS mode is verified"
+                ),
+            )
+        )
+
     for name in required_vars:
         if name == "DB_PASSWORD":
             present = _env_configured(name)
@@ -817,7 +895,7 @@ def check_runtime_configuration() -> List[Dict[str, Any]]:
 def check_legacy_conflicts() -> List[Dict[str, Any]]:
     category = "legacy"
     try:
-        with _connection(_pgagent_db_kwargs()) as conn:
+        with _connection(_pgagent_db_kwargs) as conn:
             with conn.cursor() as cur:
                 cur.execute(_PGAGENT_EXISTS_SQL)
                 exists_row = cur.fetchone()
@@ -886,7 +964,7 @@ def check_legacy_conflicts() -> List[Dict[str, Any]]:
 def check_pgagent_access() -> List[Dict[str, Any]]:
     category = "legacy"
     try:
-        with _connection(_pgagent_db_kwargs()) as conn:
+        with _connection(_pgagent_db_kwargs) as conn:
             with conn.cursor() as cur:
                 cur.execute(_PGAGENT_EXISTS_SQL)
                 exists_row = cur.fetchone()
