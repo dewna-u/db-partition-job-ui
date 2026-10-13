@@ -403,17 +403,48 @@ Do not share one `.env` across environments — each server has its own secrets.
 
 ## Local development (Windows / workstation)
 
-See `WEB.md` for the current Next.js + FastAPI workflow.
+Laptop workflow: edit → run → test locally. Do **not** point the local
+scheduler at production / production-copy databases (`172.20.224.68`,
+`ukbodev`, or any other real GTN DB) unless explicitly approved.
 
-```bash
+Ports (same as PartOps architecture; never use 8000 for PartOps):
+
+| Service | URL |
+|---|---|
+| UI (Next.js) | `http://localhost:8501` |
+| API (FastAPI) | `http://127.0.0.1:8001` |
+| Scheduler control | `http://127.0.0.1:8765` (only with a safe local DB) |
+
+```powershell
 python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-copy .env.example .env
-# Edit .env with real connection settings
-.venv\Scripts\uvicorn api.main:app --reload --host 127.0.0.1 --port 8001
-# In another terminal:
-cd frontend && npm install && npm run dev
+.\.venv\Scripts\pip install -r requirements.txt
+# Optional: copy .env.example -> .env with SAFE local/test DB settings only
+# Optional: copy .env.realtime.example -> .env.realtime for local scheduler
+# Ensure Node.js is on PATH (e.g. C:\Program Files\nodejs)
+
+# Terminal 1 — API
+.\.venv\Scripts\python.exe -m uvicorn api.main:app --reload --host 127.0.0.1 --port 8001
+
+# Terminal 2 — UI (API origin defaults to http://127.0.0.1:8001 via next.config)
+cd frontend
+npm ci
+npm run dev -- -H 127.0.0.1 -p 8501
+
+# Terminal 3 — Scheduler (ONLY after safe local DB is confirmed)
+# .\.venv\Scripts\python.exe -m scheduler_backend.main --log-level INFO
 ```
+
+Convenience launcher (API + UI; scheduler opt-in after safety checks):
+
+```powershell
+.\scripts\dev-local.ps1
+# .\scripts\dev-local.ps1 -IncludeScheduler   # localhost DB only
+```
+
+Verify: `curl http://127.0.0.1:8001/api/health` and open `http://localhost:8501`.
+Unit tests: `.\.venv\Scripts\python.exe -m unittest discover -s . -p "test_*.py" -v`
+
+See also `WEB.md` / `RUNBOOK.md`.
 
 ---
 

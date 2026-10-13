@@ -222,3 +222,67 @@ Rollback:
 Notes:
     No server pull, no migration execution, no service restart, no commit/push
     from this agent turn.
+
+
+## CHANGE-004 — Local laptop development workflow support
+
+Date:
+    2026-10-09
+
+Reason:
+    Enable continuous local edit/run/test on the developer laptop without
+    touching the production server or production databases.
+
+Related Issues:
+    None (workflow support)
+
+Files Changed:
+    - `scripts/dev-local.ps1` (new)
+    - `requirements.txt` (add httpx for TestClient)
+    - `api/main.py` (CORS origins for :8501)
+    - `frontend/.env.local` (local comment; gitignored)
+    - `README.md`
+    - `RUNBOOK.md`
+    - `changes.md`
+
+Database Changes:
+    None.
+
+Behavioural Impact:
+    - Documented local ports 8501 / 8001 / 8765.
+    - Launcher starts API + UI; scheduler only with `-IncludeScheduler` after
+      localhost DB safety checks (refuses 172.20.224.68 / ukbodev).
+    - No production credentials added.
+
+Notes:
+    Scheduler not started in this change set — no safe configured local
+    PartOps DB credentials/schema verified yet.
+    No commit/push; no production server access.
+
+
+## CHANGE-005 — Local partops_dev bootstrap preparation (blocked on auth)
+
+Date:
+    2026-10-09
+
+Reason:
+    Prepare localhost-only DB bootstrap for continuous development. Actual
+    CREATE DATABASE could not run: local Postgres requires a password and none
+    was available. Missing non-versioned framework function bodies also block
+    a complete scheduler stack without inventing SQL.
+
+Related Issues:
+    ISSUE-004, ISSUE-003
+
+Files Changed:
+    - `sql/local_dev/README.md` (new)
+    - `scripts/bootstrap-local-partops-dev.ps1` (new)
+    - `issues.md`
+    - `changes.md`
+
+Database Changes:
+    None applied (auth blocked).
+
+Notes:
+    LOCALHOST only. No production DB/server access. No commit/push.
+    Resume: set `PARTOPS_LOCAL_PG_ADMIN_PASSWORD` and re-run bootstrap script.

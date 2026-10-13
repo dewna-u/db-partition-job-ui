@@ -640,3 +640,41 @@ ls -la api/main.py frontend/package.json frontend/.next .venv/bin/python .env .e
 ```
 
 and escalate with that output.
+
+---
+
+## 15. Local laptop development (no production DB)
+
+Use this when developing on a workstation (Cursor on laptop). Production
+server `systemctl` steps above do **not** apply.
+
+### Safety
+
+- Never point local `.env` / `.env.realtime` at `172.20.224.68`, `ukbodev`,
+  or other real GTN databases unless explicitly approved.
+- Do not start the scheduler until `DB_HOST` is localhost and PartOps schema
+  objects exist in a dedicated local/test database.
+- API `GET /api/health` does not require a database.
+
+### Start
+
+```powershell
+cd <repo>\partition-job-ui
+.\.venv\Scripts\python.exe -m uvicorn api.main:app --reload --host 127.0.0.1 --port 8001
+# other terminal (Node on PATH):
+cd frontend
+npm ci
+npm run dev -- -H 127.0.0.1 -p 8501
+# or: .\scripts\dev-local.ps1
+```
+
+### Verify
+
+```powershell
+curl http://127.0.0.1:8001/api/health
+curl -o NUL -w "%{http_code}" http://127.0.0.1:8501/
+```
+
+### Stop
+
+Close the terminal windows or stop the PIDs printed by `scripts/dev-local.ps1`.

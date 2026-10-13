@@ -177,3 +177,59 @@ Deployment Notes:
 
 Remaining Risk:
     Helper behaviour drift between environments until versioned.
+
+
+## ISSUE-004 — Local partops_dev bootstrap blocked (auth + missing function bodies)
+
+Severity:
+    High (blocks continuous localhost scheduler development)
+
+Status:
+    Open — waiting on local Postgres password + missing function sources
+
+Component:
+    Local development / `sql/local_dev` / `scripts/bootstrap-local-partops-dev.ps1`
+
+Detected:
+    2026-10-09 laptop bootstrap attempt.
+
+Description:
+    Local PostgreSQL 16 is running on `127.0.0.1:5432` with
+    `scram-sha-256` authentication. No local admin password / `.pgpass` is
+    available to the agent, so `partops_dev` could not be created yet.
+
+    Separately, even after auth succeeds, these framework functions still have
+    **no version-controlled CREATE bodies** in the repo (same gap as ISSUE-003
+    plus workers/insert):
+
+    - `cron_to_interval_or_next_run(text)`
+    - `create_any_table_partition(...)`
+    - `drop_any_table_partition(...)`
+    - `insert_data_to_partition_job_table(...)`
+
+    Local bootstrap must not invent production-authoritative bodies. Phase 0
+    live inspection proved cron helper behaviour for one Job 33 expression but
+    did not capture its source into Git.
+
+Evidence:
+    - `psql -w -h 127.0.0.1 ...` → `fe_sendauth: no password supplied`
+    - `pg_hba.conf` uses `scram-sha-256` for localhost
+    - `sql/bootstrap_partition_job_framework.sql` documents missing imports
+
+Impact:
+    API/UI can run without DB; scheduler and DB-backed API routes cannot be
+    exercised end-to-end on the laptop until bootstrap completes.
+
+Fix (operator):
+    1. Provide LOCAL PostgreSQL admin password via session env
+       `PARTOPS_LOCAL_PG_ADMIN_PASSWORD` (never commit).
+    2. Run `.\scripts\bootstrap-local-partops-dev.ps1`.
+    3. Supply CREATE FUNCTION bodies from a safe capture **or** explicitly
+       approve clearly marked LOCAL-ONLY stubs (not for production).
+
+Deployment Notes:
+    N/A — laptop only.
+
+Remaining Risk:
+    Using company DB credentials or inventing cron/worker bodies would
+    undermine safety; both are refused by design.
