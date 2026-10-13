@@ -339,3 +339,69 @@ Rollback:
 
 Notes:
     No commit/push; no production server/DB/AWS secret/IAM changes in this turn.
+
+
+## CHANGE-007 — Controlled parallel scheduled job execution (Phase 2)
+
+Date:
+    2026-10-13
+
+Reason:
+    Allow multiple different scheduled partition jobs to execute simultaneously
+    with a manually configurable concurrency limit, while serializing same-target
+    CREATE/DROP via PostgreSQL advisory locks and keeping the event loop
+    responsive.
+
+Related Issues:
+    ISSUE-005 (manual vs scheduled target lock — documented, not fixed here)
+
+Files Changed:
+    - `scheduler_backend/scheduler.py`
+    - `scheduler_backend/scheduler_database.py`
+    - `scheduler_backend/models.py`
+    - `sql/realtime_scheduler_v1.sql`
+    - `sql/migrations/20261013_01_scheduled_target_advisory_lock.sql` (new)
+    - `sql/migrations/README.md`
+    - `.env.realtime.example`
+    - `test_scheduler_phase2_concurrency.py` (new)
+    - `test_scheduler_phase0_safety.py` (SKIPPED_TARGET_LOCKED uncached)
+    - `README.md`
+    - `RUNBOOK.md`
+    - `issues.md`
+    - `changes.md`
+
+Environment Variables:
+    - `PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS` — default `1` when unset;
+      reject `0` / negative / float / empty / non-integer (no silent coerce).
+
+Architecture:
+    - Asyncio scheduler loop + `asyncio.Semaphore(N)`.
+    - Blocking `execute_scheduled_job` via `asyncio.to_thread` (Python 3.9).
+    - One short-lived DB connection per active job; no pool; no shared conn.
+    - Active tasks tracked; exceptions retrieved; coalesced post-exec refresh.
+    - Bounded graceful drain on shutdown.
+
+Database Changes:
+    `CREATE OR REPLACE FUNCTION mubasher_oms.run_partition_job_scheduled(...)`
+    — preserve signature/SECURITY. Add target advisory lock namespace
+    `87421032` after job lock + validation; return `SKIPPED_TARGET_LOCKED`
+    when unavailable (non-blocking; next_run_time unchanged).
+    `CREATE OR REPLACE` preserves owner and existing EXECUTE grants (no DROP).
+
+Status Endpoint:
+    `max_concurrent_jobs`, `active_job_count`, `queued_job_count`,
+    `available_slots`.
+
+Tests:
+    `test_scheduler_phase2_concurrency.py` plus full suite
+    `python -m unittest discover -s . -p "test_*.py" -v`.
+
+Deployment (operator — not executed here):
+    See RUNBOOK §10.3. First production value must be `1`.
+
+Rollback:
+    Set `PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS=1` and restart scheduler
+    (serial behaviour without reverting source).
+
+Notes:
+    No commit/push; no production server/DB/AWS/Datadog/Edit work; no pool.

@@ -283,6 +283,35 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Target-table transaction advisory lock (namespace 87421032 — distinct from
+    -- job-id lock 87421031). Serializes CREATE/DROP against the same
+    -- (table_schema, table_name) across different job_ids. Non-blocking:
+    -- SKIPPED_TARGET_LOCKED so the occurrence remains eligible for later
+    -- reconciliation. Lock order: job advisory → FOR UPDATE → validate →
+    -- target advisory → schedule calc → worker.
+    v_lock_ok := pg_try_advisory_xact_lock(
+        87421032,
+        (abs(hashtext(
+            'partition_job_target:'
+            || COALESCE(v_job.table_schema, '')
+            || '.'
+            || COALESCE(v_job.table_name, '')
+        )) % 2147483647)::integer
+    );
+    IF NOT v_lock_ok THEN
+        status := 'SKIPPED_TARGET_LOCKED';
+        job_id := v_job.job_id;
+        message := format(
+            'Another transaction is already operating on target %s.%s.',
+            COALESCE(v_job.table_schema, ''),
+            COALESCE(v_job.table_name, '')
+        );
+        next_run_time := v_job.next_run_time;
+        is_create := v_job.is_create;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
     -- Calculate and VALIDATE the next occurrence BEFORE any CREATE/DROP worker.
     -- Overdue semantics: execute occurrence T at most once, then require a
     -- future next N. PartOps does not invent arbitrary dates (+1 day / frequency)
@@ -435,6 +464,9 @@ $function$;
 
 COMMENT ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone) IS
 'Execute one scheduled partition-job occurrence after DB revalidation. '
+'Job-id advisory lock (87421031) then target-table advisory lock (87421032). '
+'Same (table_schema, table_name) cannot run CREATE/DROP concurrently '
+'(SKIPPED_TARGET_LOCKED; non-blocking; occurrence left eligible). '
 'Validates a future next_run_time distinct from p_expected_run_time BEFORE '
 'CREATE/DROP. Invalid schedule fails closed (next_run_time NULL, no worker). '
 'Does not invent +1 day or frequency fallbacks. '

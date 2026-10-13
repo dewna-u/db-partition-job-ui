@@ -57,6 +57,36 @@ def _identifier(name: str, default: str) -> str:
     return value
 
 
+def parse_max_concurrent_jobs(raw: Optional[str]) -> int:
+    """Parse PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS (default 1; reject invalid).
+
+    Absent / unset → 1 (serial). Empty, 0, negative, float, or non-integer text
+    raise RuntimeError — never silently coerced.
+    """
+    if raw is None:
+        return 1
+    text = str(raw).strip()
+    if text == "":
+        raise RuntimeError(
+            "PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS must be a positive integer "
+            "(got empty value)."
+        )
+    # Reject floats, signs, and non-digit text — do not coerce silently.
+    if not text.isdigit():
+        raise RuntimeError(
+            "PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS must be a positive integer "
+            "(got {!r}).".format(raw)
+        )
+    value = int(text)
+    if value < 1:
+        raise RuntimeError(
+            "PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS must be >= 1 (got {}).".format(
+                value
+            )
+        )
+    return value
+
+
 def load_scheduler_config() -> SchedulerConfig:
     _load_env()
     return SchedulerConfig(
@@ -79,6 +109,9 @@ def load_scheduler_config() -> SchedulerConfig:
         ),
         max_connect_retry_seconds=float(
             os.getenv("PARTITION_SCHEDULER_MAX_CONNECT_RETRY_SECONDS", "60")
+        ),
+        max_concurrent_jobs=parse_max_concurrent_jobs(
+            os.getenv("PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS")
         ),
         schema=_identifier("PARTITION_JOB_SCHEMA", "mubasher_oms"),
         upcoming_function=_identifier(

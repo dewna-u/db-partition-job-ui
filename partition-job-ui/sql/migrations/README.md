@@ -38,6 +38,17 @@ Apply in a controlled DBA window, in order:
    `scheduler_backend` Python (bounded TTL circuit breaker) before restarting
    the scheduler.
 
+6. `20261013_01_scheduled_target_advisory_lock.sql`
+   Phase 2: `CREATE OR REPLACE` of the same
+   `run_partition_job_scheduled(numeric, timestamp without time zone)`.
+   Adds target-table transaction advisory lock (namespace `87421032`) after
+   job-id lock / row validation. Same `(table_schema, table_name)` cannot run
+   CREATE/DROP concurrently (`SKIPPED_TARGET_LOCKED`, non-blocking).
+   `CREATE OR REPLACE` preserves function owner and existing `EXECUTE` grants
+   (no `DROP FUNCTION`). Body must match `../realtime_scheduler_v1.sql`.
+   Deploy with scheduler Python concurrency changes
+   (`PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS`, default `1`).
+
 Until (1) is applied, the API still works: job/log queries fall back to
 legacy SELECTs without duration columns, and duration UI shows "—".
 

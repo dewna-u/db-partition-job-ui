@@ -547,13 +547,42 @@ Important properties:
 * Periodic reconciliation (`PARTITION_SCHEDULER_RECONCILE_SECONDS`) catches direct SQL edits.
 * Lookahead window: `PARTITION_SCHEDULER_LOOKAHEAD_SECONDS` (default 120).
 * Overdue jobs remain discoverable after downtime (`delay_seconds <= 0` → run immediately after revalidation).
-* Same-time jobs execute sequentially ordered by `next_run_time`, then `job_id`.
-* OS singleton lock prevents two backends; DB uses `FOR UPDATE` + `pg_try_advisory_xact_lock`.
+* Same-time jobs are ordered by `next_run_time`, then `job_id`, then executed
+  under a bounded concurrency limit (see Phase 2 below).
+* OS singleton lock prevents two backends; DB uses `FOR UPDATE` + two
+  transaction advisory locks (per-job and per-target-table).
 * Secondary Python rapid-loop breaker is a short-lived process-local cache
   (TTL 300s, max 512) of recently **committed** occurrence transitions
   (`EXECUTED` / SQL `FAILED` / `FAILED_INVALID_SCHEDULE` only).
-  `FAILED_DATABASE`, `FAILED_CONNECTION`, ordinary skips, and exceptions are
-  not cached; the database remains the scheduling source of truth.
+  `FAILED_DATABASE`, `FAILED_CONNECTION`, ordinary skips (including
+  `SKIPPED_TARGET_LOCKED`), and exceptions are not cached; the database
+  remains the scheduling source of truth.
+
+### Phase 2 — controlled parallel scheduled execution
+
+```text
+Scheduler (asyncio event loop)
+        ↓
+asyncio.Semaphore (PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS, default 1)
+        ├── Job A → asyncio.to_thread → short-lived DB connection A
+        ├── Job B → asyncio.to_thread → short-lived DB connection B
+        └── Job C → asyncio.to_thread → short-lived DB connection C
+                       (Job D waits for a free slot)
+```
+
+* Default concurrency is **1** (serial behaviour unchanged when unset).
+* Blocking psycopg work never runs on the event loop (`asyncio.to_thread`).
+* Each active job opens its own short-lived connection; connections are never
+  shared between parallel jobs. No connection pool in this phase.
+* Different target tables may run concurrently (up to N).
+* Same `(table_schema, table_name)` is serialized in PostgreSQL via
+  `pg_try_advisory_xact_lock(87421032, …)`. If the target lock is busy, SQL
+  returns `SKIPPED_TARGET_LOCKED` (non-blocking; occurrence stays eligible).
+* Per-job lock namespace remains `87421031` (`SKIPPED_LOCKED`).
+* Status fields: `max_concurrent_jobs`, `active_job_count`, `queued_job_count`,
+  `available_slots`. Active jobs are healthy.
+* Rollout recommendation: deploy with `1`, verify, then `2`, then `3` only if
+  DB capacity allows. Do not default production to `3`.
 
 ### New database configuration (production-copy / sensitive)
 

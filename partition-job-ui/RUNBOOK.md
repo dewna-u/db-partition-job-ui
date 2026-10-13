@@ -200,6 +200,7 @@ Required concepts in `.env.realtime`:
 REALTIME_DB_EXPECTED_NAME=<database>
 PARTITION_SCHEDULER_BIND_HOST=127.0.0.1
 PARTITION_SCHEDULER_BIND_PORT=8765
+PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS=1
 ```
 
 The scheduler process loads **only** `.env.realtime` (never UI `.env`).
@@ -580,6 +581,13 @@ Before `systemctl start partition-job-scheduler.service`:
       the **live** definition during controlled deploy; see ISSUE-003)
 - [ ] Phase 0 fail-closed occurrence-safety SQL is deployed (body matches
       `sql/realtime_scheduler_v1.sql`; no invented `+1 day` fallback)
+- [ ] Phase 2 target-table advisory lock SQL is deployed when enabling
+      concurrency > 1 (migration
+      `20261013_01_scheduled_target_advisory_lock.sql`; body matches
+      `sql/realtime_scheduler_v1.sql`; contains `87421032` /
+      `SKIPPED_TARGET_LOCKED`)
+- [ ] `.env.realtime` has `PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS=1` on first
+      Phase 2 deploy (serial). Increase to `2` only after verification.
 - [ ] Deployed Python includes transaction-boundary fix:
       identity check then `conn.commit()` before yield so no open transaction
       remains when business `conn.transaction()` begins
@@ -593,6 +601,47 @@ Before `systemctl start partition-job-scheduler.service`:
       operator before re-enabling a schedule
 - [ ] Start scheduler only after the above; watch journal for first executions
       and any rapid-loop breaker CRITICAL lines
+
+### 10.3 Phase 2 — controlled parallel execution deploy order
+
+Server-side steps (operator). Do **not** jump to concurrency `3` on day one.
+
+1. `git pull` (intended revision).
+2. Review
+   `sql/migrations/20261013_01_scheduled_target_advisory_lock.sql`.
+3. Back up the current live definition of
+   `mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone)`
+   (e.g. `pg_get_functiondef`).
+4. Apply the Phase 2 SQL migration in a DBA window
+   (`BEGIN`/`COMMIT` already in the file). Prefer `CREATE OR REPLACE` (no
+   `DROP FUNCTION` / no `CASCADE`).
+5. Verify function still resolves; confirm owner remains `mubasher_oms` and
+   `partition_job_ui` / scheduler role still have `EXECUTE`.
+   Confirm source contains `87421032` and `SKIPPED_TARGET_LOCKED`.
+6. Add to `.env.realtime` (mode 600, `enterprisedb`):
+   `PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS=1`
+7. Restart `partition-job-scheduler.service`.
+8. Verify `/health` and `/internal/scheduler/status`
+   (`max_concurrent_jobs=1`, `active_job_count` ≤ 1).
+9. Confirm serial execution with concurrency `1`.
+10. When stable, set `PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS=2`.
+11. Restart scheduler.
+12. Verify two jobs on **different** tables may run concurrently
+    (`active_job_count` ≤ 2; status `available_slots` coherent).
+13. Confirm same target table is serialized (`SKIPPED_TARGET_LOCKED` or
+    sequential completion — never overlapping CREATE/DROP on same table).
+14. Observe DB load before increasing further (only then consider `3`).
+
+Rollback (serial without reverting source):
+
+```bash
+# in .env.realtime
+PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS=1
+sudo systemctl restart partition-job-scheduler.service
+```
+
+This restores serial scheduler behaviour. SQL target lock may remain deployed
+(safe; with concurrency `1` it is rarely contended).
 
 Manual API start (for debugging):
 

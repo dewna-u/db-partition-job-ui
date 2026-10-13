@@ -99,6 +99,11 @@ class OccurrenceAdvancementSqlContractTests(unittest.TestCase):
         self.assertNotIn("interval '1 day'", null_block)
 
     def test_migration_matches_canonical_function_body(self) -> None:
+        """Latest scheduled-run migration body must match canonical SQL.
+
+        Phase 0 migration (20261007_01) remains historical and is superseded by
+        Phase 2 (20261013_01) for the live function body — do not rewrite Phase 0.
+        """
         root = os.path.dirname(__file__)
         with open(
             os.path.join(root, "sql", "realtime_scheduler_v1.sql"), encoding="utf-8"
@@ -108,7 +113,7 @@ class OccurrenceAdvancementSqlContractTests(unittest.TestCase):
             root,
             "sql",
             "migrations",
-            "20261007_01_run_partition_job_scheduled_occurrence_safety.sql",
+            "20261013_01_scheduled_target_advisory_lock.sql",
         )
         with open(mig_path, encoding="utf-8") as handle:
             migration = handle.read()
@@ -118,6 +123,18 @@ class OccurrenceAdvancementSqlContractTests(unittest.TestCase):
             re.sub(r"\s+", " ", canonical.strip()),
             re.sub(r"\s+", " ", migrated.strip()),
         )
+        # Phase 0 migration file must still exist (history); not equal to Phase 2.
+        phase0_path = os.path.join(
+            root,
+            "sql",
+            "migrations",
+            "20261007_01_run_partition_job_scheduled_occurrence_safety.sql",
+        )
+        self.assertTrue(os.path.isfile(phase0_path))
+        with open(phase0_path, encoding="utf-8") as handle:
+            phase0 = handle.read()
+        self.assertIn("FAILED_INVALID_SCHEDULE", phase0)
+        self.assertNotIn("SKIPPED_TARGET_LOCKED", phase0)
 
 
 class TightLoopRegressionTests(unittest.TestCase):
@@ -497,6 +514,7 @@ class CircuitBreakerBoundTests(unittest.TestCase):
             "NOT_FOUND",
             "SKIPPED_NOT_DUE",
             "SKIPPED_LOCKED",
+            "SKIPPED_TARGET_LOCKED",
         ):
             self.assertNotIn(status, _HANDLED_OCCURRENCE_STATUSES)
 

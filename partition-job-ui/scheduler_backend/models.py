@@ -33,6 +33,8 @@ class SchedulerConfig:
     lock_file: str = "/tmp/partition-job-scheduler.lock"
     connect_retry_seconds: float = 5.0
     max_connect_retry_seconds: float = 60.0
+    # Phase 2: max simultaneous scheduled DB executions (default serial = 1).
+    max_concurrent_jobs: int = 1
     schema: str = "mubasher_oms"
     upcoming_function: str = "get_upcoming_partition_jobs"
     scheduled_run_function: str = "run_partition_job_scheduled"
@@ -51,9 +53,13 @@ class SchedulerStatus:
     last_execution_job_id: Optional[int] = None
     last_execution_result: Optional[str] = None
     scheduler_active: bool = False
+    max_concurrent_jobs: int = 1
+    active_job_count: int = 0
+    queued_job_count: int = 0
     extra: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
+        available = max(0, int(self.max_concurrent_jobs) - int(self.active_job_count))
         return {
             "started_at": self.started_at.isoformat(sep=" ") if self.started_at else None,
             "last_refresh_at": (
@@ -70,5 +76,9 @@ class SchedulerStatus:
             "last_execution_job_id": self.last_execution_job_id,
             "last_execution_result": self.last_execution_result,
             "scheduler_active": self.scheduler_active,
+            "max_concurrent_jobs": self.max_concurrent_jobs,
+            "active_job_count": self.active_job_count,
+            "queued_job_count": self.queued_job_count,
+            "available_slots": available,
             **self.extra,
         }

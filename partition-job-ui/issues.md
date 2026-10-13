@@ -233,3 +233,50 @@ Deployment Notes:
 Remaining Risk:
     Using company DB credentials or inventing cron/worker bodies would
     undermine safety; both are refused by design.
+
+
+## ISSUE-005 — Manual run vs scheduled target-table concurrency
+
+Severity:
+    Medium
+
+Status:
+    Open — documented; not in Phase 2 scope
+
+Component:
+    `mubasher_oms.run_partition_job_manual` vs
+    `mubasher_oms.run_partition_job_scheduled`
+
+Detected:
+    2026-10-13 Phase 2 design review (local source inspection).
+
+Description:
+    Phase 2 adds a transaction-scoped target-table advisory lock
+    (`87421032`) inside `run_partition_job_scheduled` so two scheduled jobs
+    cannot CREATE/DROP the same `(table_schema, table_name)` concurrently.
+
+    `run_partition_job_manual(numeric)` does **not** acquire that target lock.
+    A UI/API manual run against the same table could therefore overlap a
+    scheduled worker for that table.
+
+Evidence:
+    - Scheduled function (canonical +
+      `20261013_01_scheduled_target_advisory_lock.sql`) uses
+      `pg_try_advisory_xact_lock(87421032, …)`.
+    - Manual migration
+      `20260929_03_run_partition_job_manual_duration.sql` has no target
+      advisory lock.
+
+Impact:
+    Rare in normal operations (manual runs are operator-driven), but DDL
+    against the same parent table from manual + scheduled paths is not
+    mutually excluded at the DB lock layer.
+
+Fix (future, small scoped change):
+    Add the same target-table `pg_try_advisory_xact_lock` / controlled skip
+    or wait policy to `run_partition_job_manual`, with migration + tests,
+    preserving owner/EXECUTE grants.
+
+Deployment Notes:
+    Not required for Phase 2 scheduler concurrency rollout. Prefer
+    avoiding manual runs on a table while its scheduled job is due.
