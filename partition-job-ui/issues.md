@@ -280,3 +280,37 @@ Fix (future, small scoped change):
 Deployment Notes:
     Not required for Phase 2 scheduler concurrency rollout. Prefer
     avoiding manual runs on a table while its scheduled job is due.
+
+
+## ISSUE-006 — Production Python 3.9 and boto3 support horizon
+
+Severity:
+    Low (technical follow-up; not a Datadog defect)
+
+Status:
+    Open — track for planned runtime upgrade
+
+Component:
+    Production Python runtime / `boto3` (Phase 1 Secrets Manager)
+
+Detected:
+    2026-10-13 operational review (production remains on Python 3.9).
+
+Description:
+    PartOps production currently runs Python 3.9. Upstream AWS SDK / boto3
+    support windows eventually drop older Python versions. This is unrelated
+    to Phase 3 Datadog work (stdlib DogStatsD), but should be scheduled so
+    Secrets Manager credential resolution remains supported.
+
+Impact:
+    Future `boto3` / botocore releases may stop supporting Python 3.9,
+    blocking security updates for the AWS credential path.
+
+Fix (future):
+    Plan a controlled upgrade of the production venv / system Python
+    (e.g. 3.11+) with regression of the full unittest suite and AWS-mode
+    smoke checks. Keep PartOps source Python 3.9-compatible until the
+    runtime is upgraded.
+
+Deployment Notes:
+    No change required for Phase 3 observability rollout.

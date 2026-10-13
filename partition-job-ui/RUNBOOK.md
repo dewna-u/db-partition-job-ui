@@ -643,6 +643,82 @@ sudo systemctl restart partition-job-scheduler.service
 This restores serial scheduler behaviour. SQL target lock may remain deployed
 (safe; with concurrency `1` it is rarely contended).
 
+### 10.4 Phase 3 — Datadog observability (future server setup)
+
+PartOps emits optional DogStatsD metrics and structured logs. The **Datadog
+Agent** owns the Datadog API key. Never put a Datadog API key in PartOps `.env` /
+`.env.realtime`.
+
+#### Deploy order (operator)
+
+1. Install Datadog Agent using the approved company method.
+2. Configure the Datadog API key **only** in Agent configuration (not PartOps).
+3. Enable journald/systemd log collection for:
+   - `partition-job-api.service`
+   - `partition-job-ui.service`
+   - `partition-job-scheduler.service`
+   Ensure Agent `logs_enabled: true` (or equivalent company template).
+4. Verify Agent DogStatsD listens on localhost UDP `8125`.
+5. Deploy PartOps source (`git pull` intended revision).
+6. Add to `.env` (API) and `.env.realtime` (scheduler), mode `600`:
+   ```bash
+   PARTOPS_DATADOG_ENABLED=true
+   PARTOPS_DOGSTATSD_HOST=127.0.0.1
+   PARTOPS_DOGSTATSD_PORT=8125
+   PARTOPS_ENVIRONMENT=production
+   ```
+7. Restart API and/or scheduler as appropriate (`systemctl restart …`).
+   Keep scheduler stopped if overdue-job policy still requires it.
+8. Verify metrics arrive in Datadog (`partops.scheduler.*`, `partops.api.*`).
+9. Verify journal logs arrive for the three units.
+10. Create dashboard/monitors manually (or approved Datadog tooling) — do **not**
+    drive this from PartOps code.
+
+#### Rollback
+
+```bash
+PARTOPS_DATADOG_ENABLED=false
+# restart API / scheduler as needed
+```
+
+PartOps continues to operate if the Agent is stopped or UDP send fails.
+
+#### Suggested dashboard widgets
+
+- Scheduler heartbeat
+- Queue depth / overdue jobs
+- Active jobs / max concurrency / available slots
+- Job executions by status
+- CREATE vs DROP counts (`operation` tag)
+- Job duration p50 / p95 / p99 (`partops.job.duration_ms`)
+- DB connection failures (by `component`)
+- Secrets Manager retrieval failures / refresh
+- API request / error (`status_class`)
+- systemd / HTTP health (Agent checks)
+- EC2 CPU / memory / disk
+
+#### Recommended monitors (starting points — tune with ops evidence)
+
+| # | Monitor | Starting idea |
+|---|---------|---------------|
+| 1 | Scheduler heartbeat missing | no `partops.scheduler.heartbeat` for ~2–3× reconcile interval |
+| 2 | Scheduler service down | systemd / process check |
+| 3 | API service down | systemd / process check |
+| 4 | UI service down | systemd / process check |
+| 5 | API `/health` failing | Agent HTTP check |
+| 6 | Scheduler `/health` failing | Agent HTTP check `127.0.0.1:8765/health` |
+| 7 | Scheduled job failures rising | `status:failed*` counters |
+| 8 | Consecutive job failures | windowed failure rate |
+| 9 | High job duration | p95 `partops.job.duration_ms` |
+| 10 | Queue depth increasing | `partops.scheduler.queue_depth` |
+| 11 | Overdue/due jobs above threshold | `partops.scheduler.overdue_jobs` |
+| 12 | Sustained saturation | `active_jobs >= max_concurrent_jobs` for several minutes |
+| 13 | DB connection failures | `partops.db.connection_failure` |
+| 14 | Secrets Manager failures | `partops.secrets_manager.retrieval_failure` |
+| 15–17 | Host CPU / memory / disk | Agent host metrics |
+
+Do not set aggressive production thresholds without operational evidence.
+
 Manual API start (for debugging):
 
 ```bash

@@ -32,6 +32,7 @@ from database import (
     partition_job_update_function_identity,
 )
 from db_credentials import credential_provider_status, secret_provider
+from observability import observability_status
 from scheduler_client import fetch_scheduler_status, scheduler_status_url
 
 logger = logging.getLogger(__name__)
@@ -771,6 +772,30 @@ def check_local_ports() -> List[Dict[str, Any]]:
 def check_runtime_configuration() -> List[Dict[str, Any]]:
     category = "configuration"
     checks: List[Dict[str, Any]] = []
+
+    # Datadog observability is informational only — never a readiness blocker.
+    dd = observability_status()
+    checks.append(
+        _check(
+            "datadog_observability",
+            "Datadog observability",
+            category,
+            STATUS_NOT_REQUIRED,
+            "enabled={0}; dogstatsd={1}:{2}; env={3}".format(
+                dd.get("datadog_enabled"),
+                "configured" if dd.get("dogstatsd_host_configured") else "missing",
+                dd.get("dogstatsd_port"),
+                dd.get("environment"),
+            ),
+            details=dd,
+            remediation_hint=(
+                "Set PARTOPS_DATADOG_ENABLED=true after Datadog Agent is installed "
+                "and listening on localhost UDP 8125."
+                if not dd.get("datadog_enabled")
+                else None
+            ),
+        )
+    )
 
     # Credential provider status never calls Secrets Manager.
     try:

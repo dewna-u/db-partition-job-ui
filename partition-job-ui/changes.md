@@ -405,3 +405,73 @@ Rollback:
 
 Notes:
     No commit/push; no production server/DB/AWS/Datadog/Edit work; no pool.
+
+
+## CHANGE-008 — Phase 3 Datadog observability
+
+Date:
+    2026-10-13
+
+Reason:
+    Add lightweight, optional DogStatsD metrics and searchable structured logs
+    for API, scheduler, DB connectivity, Secrets Manager, and job execution —
+    without embedding a Datadog API key or hard-depending on the Agent.
+
+Related Issues:
+    ISSUE-006 (Python 3.9 / boto3 support horizon — documented follow-up)
+
+Files Changed:
+    - `observability.py` (new — stdlib UDP DogStatsD)
+    - `scheduler_backend/scheduler.py`
+    - `scheduler_backend/scheduler_database.py`
+    - `database.py`
+    - `db_credentials.py`
+    - `api/main.py`
+    - `system_readiness.py`
+    - `test_observability.py` (new)
+    - `.env.example`
+    - `.env.realtime.example`
+    - `README.md`
+    - `RUNBOOK.md`
+    - `issues.md`
+    - `changes.md`
+
+Dependency Changes:
+    None. No `datadog` / `datadog-api-client` package.
+
+Environment Variables:
+    - `PARTOPS_DATADOG_ENABLED` — default `false`
+    - `PARTOPS_DOGSTATSD_HOST` — default `127.0.0.1`
+    - `PARTOPS_DOGSTATSD_PORT` — default `8125`
+    - `PARTOPS_ENVIRONMENT` — default `unknown`
+    - `PARTOPS_METRICS_NAMESPACE` — default `partops`
+
+Architecture:
+    logs → journald → Agent; metrics → DogStatsD localhost:8125 → Agent.
+    Agent owns API key. App never calls Datadog HTTPS API.
+
+Metrics (selected):
+    scheduler heartbeat / queue / concurrency / overdue; job.execution +
+    duration_ms (DB duration only); db.connection_failure; secrets_manager
+    refresh (real fetch only) + retrieval_failure; api.request / api.error
+    (method + status_class only).
+
+Security / cardinality:
+    No job_id / job_name / table / secret ARN / password / exception text as
+    metric tags. Metric send failures never break business paths.
+
+Readiness:
+    Informational `datadog_observability` check (`not_required`); Agent down
+    does not mark PartOps not-ready.
+
+Tests:
+    `test_observability.py` + full suite.
+
+Deployment (operator — not executed here):
+    See RUNBOOK §10.4. Enable only after Agent is installed.
+
+Rollback:
+    `PARTOPS_DATADOG_ENABLED=false` (+ restart). App continues without Agent.
+
+Notes:
+    No commit/push; no production server/DB/AWS/Agent install; no Edit work.

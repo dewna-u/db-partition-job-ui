@@ -23,6 +23,7 @@ from db_credentials import (
     is_authentication_error,
     resolve_database_credentials,
 )
+from observability import emit_db_connection_failure
 from scheduler_backend.models import ScheduledJob, SchedulerConfig
 from scheduler_backend.db_safety import (
     assert_expected_database,
@@ -169,7 +170,27 @@ def open_connection(purpose: str) -> Generator[Connection, None, None]:
         try:
             conn = _connect_with_auth_retry()
         except DatabaseCredentialError:
-            logger.exception("Scheduler database credential resolution failed")
+            logger.exception(
+                "event=database_connection_failed component=scheduler "
+                "cause=credential_resolution purpose=%s",
+                purpose,
+            )
+            # Credential failures are metered in db_credentials; do not double-count
+            # as a generic DB connection failure.
+            raise
+        except PsycopgError:
+            logger.exception(
+                "event=database_connection_failed component=scheduler purpose=%s",
+                purpose,
+            )
+            emit_db_connection_failure(component="scheduler")
+            raise
+        except OSError:
+            logger.exception(
+                "event=database_connection_failed component=scheduler purpose=%s",
+                purpose,
+            )
+            emit_db_connection_failure(component="scheduler")
             raise
         assert_expected_database(read_current_database(conn))
         # End the implicit transaction from the identity SELECT.

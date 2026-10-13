@@ -208,25 +208,44 @@ def get_database_secret() -> Tuple[Optional[str], str]:
     Raises:
         DatabaseCredentialError on any failure (fail closed; no env fallback).
     """
+    # Local import keeps observability optional and avoids import cycles.
+    from observability import emit_secrets_refresh, emit_secrets_retrieval_failure
+
     secret_id = (os.environ.get("PARTITION_DB_SECRET_ID") or "").strip()
     if not secret_id:
+        logger.warning("event=secret_retrieval_failed reason=missing_secret_id")
+        emit_secrets_retrieval_failure(reason="missing_secret_id")
         raise DatabaseCredentialError(
             "PARTITION_DB_SECRET_ID is required when PARTITION_DB_SECRET_PROVIDER=aws."
         )
 
-    client = _secrets_manager_client()
+    try:
+        client = _secrets_manager_client()
+    except DatabaseCredentialError:
+        logger.warning("event=secret_retrieval_failed reason=aws_error")
+        emit_secrets_retrieval_failure(reason="aws_error")
+        raise
+
     try:
         response = client.get_secret_value(SecretId=secret_id)
     except Exception as exc:  # noqa: BLE001 — map AWS errors without leaking secrets
-        raise _map_aws_error(exc) from None
+        mapped = _map_aws_error(exc)
+        reason = _aws_failure_reason(exc)
+        logger.warning("event=secret_retrieval_failed reason=%s", reason)
+        emit_secrets_retrieval_failure(reason=reason)
+        raise mapped from None
 
     secret_string = response.get("SecretString")
     if not secret_string:
         # Do not surface SecretBinary contents.
         if response.get("SecretBinary") is not None:
+            logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+            emit_secrets_retrieval_failure(reason="binary_secret")
             raise DatabaseCredentialError(
                 "Secrets Manager secret is binary; PartOps expects a JSON SecretString."
             )
+        logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+        emit_secrets_retrieval_failure(reason="missing_secret_string")
         raise DatabaseCredentialError(
             "Secrets Manager response contained no SecretString."
         )
@@ -234,21 +253,29 @@ def get_database_secret() -> Tuple[Optional[str], str]:
     try:
         payload = json.loads(secret_string)
     except (TypeError, ValueError) as exc:
+        logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+        emit_secrets_retrieval_failure(reason="invalid_json")
         raise DatabaseCredentialError(
             "Secrets Manager SecretString is not valid JSON."
         ) from exc
 
     if not isinstance(payload, dict):
+        logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+        emit_secrets_retrieval_failure(reason="invalid_secret")
         raise DatabaseCredentialError(
             "Secrets Manager JSON must be an object with password (and optional username)."
         )
 
     password = payload.get("password")
     if password is None or password == "":
+        logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+        emit_secrets_retrieval_failure(reason="missing_password")
         raise DatabaseCredentialError(
             "Secrets Manager JSON is missing a non-empty password field."
         )
     if not isinstance(password, str):
+        logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+        emit_secrets_retrieval_failure(reason="invalid_secret")
         raise DatabaseCredentialError(
             "Secrets Manager JSON password field must be a string."
         )
@@ -256,10 +283,14 @@ def get_database_secret() -> Tuple[Optional[str], str]:
     username = payload.get("username")
     if username is not None and username != "":
         if not isinstance(username, str):
+            logger.warning("event=secret_retrieval_failed reason=invalid_secret")
+            emit_secrets_retrieval_failure(reason="invalid_secret")
             raise DatabaseCredentialError(
                 "Secrets Manager JSON username field must be a string when present."
             )
+        emit_secrets_refresh()
         return username, password
+    emit_secrets_refresh()
     return None, password
 
 
@@ -290,15 +321,27 @@ def _secrets_manager_client() -> Any:
         return _sm_client
 
 
-def _map_aws_error(exc: BaseException) -> DatabaseCredentialError:
-    """Convert botocore/AWS errors into safe DatabaseCredentialError messages."""
-    name = type(exc).__name__
-    # botocore ClientError exposes response error code.
+def _aws_error_code(exc: BaseException) -> Optional[str]:
     response = getattr(exc, "response", None)
-    code = None
     if isinstance(response, dict):
         err = response.get("Error") or {}
         code = err.get("Code")
+        if code:
+            return str(code)
+    return None
+
+
+def _aws_failure_reason(exc: BaseException) -> str:
+    code = _aws_error_code(exc)
+    if code:
+        return code
+    return type(exc).__name__
+
+
+def _map_aws_error(exc: BaseException) -> DatabaseCredentialError:
+    """Convert botocore/AWS errors into safe DatabaseCredentialError messages."""
+    name = type(exc).__name__
+    code = _aws_error_code(exc)
 
     if code in ("AccessDeniedException", "AccessDenied", "UnrecognizedClientException"):
         return DatabaseCredentialError(

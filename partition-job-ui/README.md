@@ -584,6 +584,39 @@ asyncio.Semaphore (PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS, default 1)
 * Rollout recommendation: deploy with `1`, verify, then `2`, then `3` only if
   DB capacity allows. Do not default production to `3`.
 
+### Phase 3 — Datadog observability
+
+```text
+PartOps (API + scheduler)
+  ├─ logs  → stdout/stderr → systemd/journald → Datadog Agent
+  └─ metrics → DogStatsD UDP 127.0.0.1:8125 → Datadog Agent → Datadog
+```
+
+* Implementation: stdlib UDP in `observability.py` (no Datadog Python SDK,
+  no application Datadog API key, no direct Datadog HTTPS API calls).
+* The **Datadog Agent** owns the API key.
+* Default: `PARTOPS_DATADOG_ENABLED=false` (metrics are no-ops).
+* Metrics failure never breaks API, scheduler, DB, or Secrets Manager paths.
+* Low-cardinality tags only — never `job_id`, `job_name`, table names, secret
+  IDs/ARNs, passwords, or raw exception text as metric tags.
+* Job IDs remain acceptable in structured logs (`event=… job_id=…`).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PARTOPS_DATADOG_ENABLED` | `false` | Master switch |
+| `PARTOPS_DOGSTATSD_HOST` | `127.0.0.1` | DogStatsD host |
+| `PARTOPS_DOGSTATSD_PORT` | `8125` | DogStatsD UDP port |
+| `PARTOPS_ENVIRONMENT` | `unknown` | `env` tag (set `production` on server) |
+| `PARTOPS_METRICS_NAMESPACE` | `partops` | Metric prefix |
+
+Key metrics: `partops.scheduler.heartbeat`, `queue_depth`, `active_jobs`,
+`max_concurrent_jobs`, `available_slots`, `overdue_jobs`,
+`partops.job.execution`, `partops.job.duration_ms`,
+`partops.db.connection_failure`, `partops.secrets_manager.*`,
+`partops.api.request` / `partops.api.error`.
+
+See RUNBOOK §10.4 for Agent setup, dashboard, and monitor recommendations.
+
 ### New database configuration (production-copy / sensitive)
 
 The NEW database is a **backup/copy of production**. It already contains application

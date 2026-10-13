@@ -20,6 +20,7 @@ from db_credentials import (
     is_authentication_error,
     resolve_database_credentials,
 )
+from observability import emit_db_connection_failure
 from job_autofill import (
     INVOCATION_CALL,
     PROKIND_FUNCTION,
@@ -839,17 +840,26 @@ def _connection(kwargs_factory: Any) -> Generator[Connection, None, None]:
     """
     conn: Optional[Connection] = None
     try:
-        conn = _connect_psycopg_with_auth_retry(kwargs_factory)
-        yield conn
-    except PsycopgError as exc:
-        raise _map_psycopg_error(exc) from None
-    except DatabaseCredentialError as exc:
-        raise DatabaseError(str(exc)) from None
-    except OSError:
-        logger.exception("OS-level database connection failure")
-        raise DatabaseError(
-            "Unable to connect to the database. Check the database configuration and server logs."
-        ) from None
+        try:
+            conn = _connect_psycopg_with_auth_retry(kwargs_factory)
+        except PsycopgError as exc:
+            logger.warning("event=database_connection_failed component=api")
+            emit_db_connection_failure(component="api")
+            raise _map_psycopg_error(exc) from None
+        except DatabaseCredentialError as exc:
+            # Credential failures are metered in db_credentials.
+            raise DatabaseError(str(exc)) from None
+        except OSError:
+            logger.exception("event=database_connection_failed component=api")
+            emit_db_connection_failure(component="api")
+            raise DatabaseError(
+                "Unable to connect to the database. Check the database configuration and server logs."
+            ) from None
+        try:
+            yield conn
+        except PsycopgError as exc:
+            # Query/runtime errors are not connection failures.
+            raise _map_psycopg_error(exc) from None
     finally:
         if conn is not None and not conn.closed:
             try:

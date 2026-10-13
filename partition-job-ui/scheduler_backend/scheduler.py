@@ -9,6 +9,13 @@ from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Optional, Set, Tuple
 
+from observability import (
+    emit_job_execution,
+    emit_scheduler_concurrency,
+    emit_scheduler_execution_exception,
+    emit_scheduler_heartbeat,
+    emit_scheduler_refresh_failure,
+)
 from scheduler_backend.models import SchedulerConfig, SchedulerStatus
 from scheduler_backend.queue_manager import ScheduleQueue
 from scheduler_backend.scheduler_database import (
@@ -143,15 +150,24 @@ class PartitionScheduler:
         self.status.max_concurrent_jobs = int(self.config.max_concurrent_jobs)
         self.status.active_job_count = int(self._active_count)
         self.status.queued_job_count = len(self.queue)
-        self.status.extra["available_slots"] = max(
+        available = max(
             0, int(self.config.max_concurrent_jobs) - int(self._active_count)
         )
+        self.status.extra["available_slots"] = available
         if self._active_count > self.config.max_concurrent_jobs:
             logger.critical(
                 "Invariant violated: active_job_count=%s > max_concurrent_jobs=%s",
                 self._active_count,
                 self.config.max_concurrent_jobs,
             )
+        overdue = self.status.extra.get("overdue_jobs")
+        emit_scheduler_concurrency(
+            active_jobs=self.status.active_job_count,
+            max_concurrent_jobs=self.status.max_concurrent_jobs,
+            queue_depth=self.status.queued_job_count,
+            available_slots=available,
+            overdue_jobs=int(overdue) if overdue is not None else None,
+        )
 
     async def refresh_queue(self, reason: str) -> bool:
         """
@@ -162,17 +178,24 @@ class PartitionScheduler:
         try:
             jobs = await asyncio.to_thread(fetch_upcoming_jobs, self.config)
         except Exception:  # noqa: BLE001
-            logger.exception("Upcoming-job refresh failed (%s)", reason)
+            logger.exception(
+                "event=scheduler_refresh_failed reason=%s",
+                reason,
+            )
             self.status.last_refresh_at = datetime.now(timezone.utc).replace(tzinfo=None)
             self.status.last_refresh_result = f"error:{reason}"
             self._backoff = min(
                 self._backoff * 2.0,
                 float(self.config.max_connect_retry_seconds),
             )
+            emit_scheduler_refresh_failure()
             return False
 
         filtered = []
+        overdue_count = 0
         for job in jobs:
+            if float(job.delay_seconds) <= 0.0:
+                overdue_count += 1
             key = (job.job_id, job.expected_run_time)
             if key in self._active_keys:
                 # Already in-flight (queued on semaphore or executing).
@@ -192,16 +215,20 @@ class PartitionScheduler:
             filtered.append(job)
 
         self.queue.replace_from_jobs(filtered)
+        self.status.extra["overdue_jobs"] = overdue_count
         self._update_status_from_queue()
         self.status.last_refresh_at = datetime.now(timezone.utc).replace(tzinfo=None)
         self.status.last_refresh_result = f"ok:{reason}:{len(filtered)}"
         self.status.extra["circuit_breaker_entries"] = len(self._handled_occurrences)
         self._backoff = float(self.config.connect_retry_seconds)
+        # Heartbeat on successful reconcile/refresh (existing cycle; no extra loop).
+        emit_scheduler_heartbeat()
         logger.info(
-            "Queue refreshed (%s): %s upcoming job(s); next=%s @ %s; "
-            "active=%s/%s",
+            "event=scheduler_refresh_ok reason=%s upcoming=%s overdue=%s "
+            "next_job_id=%s next_expected_run_time=%s active=%s max=%s",
             reason,
             len(filtered),
+            overdue_count,
             self.status.next_job_id,
             self.status.next_expected_run_time,
             self._active_count,
@@ -226,7 +253,7 @@ class PartitionScheduler:
             return
 
         logger.info(
-            "Timer fired for job_id=%s expected_run_time=%s",
+            "event=scheduled_job_timer job_id=%s expected_run_time=%s",
             job_id,
             expected,
         )
@@ -237,8 +264,7 @@ class PartitionScheduler:
             )
         except Exception:  # noqa: BLE001 — never kill the scheduler process
             logger.exception(
-                "Scheduled execution connection/runtime failure for job_id=%s "
-                "expected_run_time=%s",
+                "event=scheduled_job_exception job_id=%s expected_run_time=%s",
                 job_id,
                 expected,
             )
@@ -248,25 +274,33 @@ class PartitionScheduler:
                 self._backoff * 2.0,
                 float(self.config.max_connect_retry_seconds),
             )
+            emit_scheduler_execution_exception()
+            emit_job_execution(status="FAILED_CONNECTION", is_create=None)
             # Do not cache: transaction likely rolled back; occurrence still open.
             return
 
         status = str(result.get("status") or "FAILED")
         new_next = result.get("next_run_time")
+        is_create = result.get("is_create")
+        # Only DB-provided execution_duration_ms (never semaphore wait).
+        duration_ms = result.get("execution_duration_ms")
         self.status.last_execution_job_id = job_id
         self.status.last_execution_result = status
         logger.info(
-            "Scheduled job %s result %s (%s) expected_run_time=%s "
-            "returned_next_run_time=%s",
+            "event=scheduled_job_complete job_id=%s status=%s "
+            "expected_run_time=%s returned_next_run_time=%s duration_ms=%s",
             job_id,
             status,
-            result.get("message"),
             expected,
             new_next,
+            duration_ms,
+        )
+        emit_job_execution(
+            status=status, is_create=is_create, duration_ms=duration_ms
         )
         if status == "SKIPPED_TARGET_LOCKED":
             logger.info(
-                "Scheduled job target locked job_id=%s expected_run_time=%s "
+                "event=scheduled_job_target_locked job_id=%s expected_run_time=%s "
                 "(will remain eligible for reconciliation)",
                 job_id,
                 expected,
@@ -321,7 +355,7 @@ class PartitionScheduler:
                 self._active_count += 1
                 self._update_concurrency_status()
                 logger.info(
-                    "Scheduled job started job_id=%s expected_run_time=%s "
+                    "event=scheduled_job_start job_id=%s expected_run_time=%s "
                     "active=%s max=%s",
                     job_id,
                     expected,
