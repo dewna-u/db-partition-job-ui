@@ -1,25 +1,46 @@
 import { cn } from "@/lib/utils";
 
+export type BadgeTone =
+  | "ok"
+  | "warn"
+  | "fail"
+  | "info"
+  | "mute"
+  | "create"
+  | "drop"
+  | "success"
+  | "error"
+  | "warning"
+  | "neutral";
+
+const TONE: Record<BadgeTone, string> = {
+  ok: "bg-[var(--success-bg)] text-[var(--success-fg)]",
+  success: "bg-[var(--success-bg)] text-[var(--success-fg)]",
+  warn: "bg-[var(--warning-bg)] text-[var(--warning-fg)]",
+  warning: "bg-[var(--warning-bg)] text-[var(--warning-fg)]",
+  fail: "bg-[var(--error-bg)] text-[var(--error-fg)]",
+  error: "bg-[var(--error-bg)] text-[var(--error-fg)]",
+  info: "bg-[var(--info-bg)] text-[var(--info-fg)]",
+  mute: "bg-[var(--neutral-bg)] text-[var(--content-secondary)]",
+  neutral: "bg-[var(--neutral-bg)] text-[var(--content-secondary)]",
+  create: "bg-[var(--info-bg)] text-[var(--info-fg)]",
+  drop: "bg-[var(--warning-bg)] text-[var(--warning-fg)]",
+};
+
 export function Badge({
   children,
   tone = "mute",
   className,
 }: {
   children: React.ReactNode;
-  tone?: "ok" | "warn" | "fail" | "info" | "mute" | "create" | "drop";
+  tone?: BadgeTone;
   className?: string;
 }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-md px-2 py-0.5 text-[0.58rem] font-extrabold uppercase tracking-wide",
-        tone === "ok" && "bg-pj-ok-bg text-pj-ok dark:bg-pj-ok-bg dark:text-pj-ok",
-        tone === "warn" && "bg-pj-warn-bg text-pj-warn",
-        tone === "fail" && "bg-pj-fail-bg text-pj-fail",
-        tone === "info" && "bg-pj-create-bg text-pj-primary",
-        tone === "mute" && "bg-pj-table-head text-pj-muted",
-        tone === "create" && "bg-pj-create-bg text-pj-primary",
-        tone === "drop" && "bg-pj-drop-bg text-pj-warn",
+        "inline-flex items-center gap-1 rounded-[4px] px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wide",
+        TONE[tone],
         className,
       )}
     >
@@ -38,12 +59,12 @@ export function StatusDot({
   return (
     <span
       className={cn(
-        "inline-block h-2 w-2 rotate-45 rounded-[2px]",
-        tone === "green" && "bg-pj-ok",
-        tone === "amber" && "bg-pj-warn",
-        tone === "red" && "bg-pj-fail",
-        tone === "blue" && "bg-pj-primary",
-        tone === "mute" && "bg-pj-muted",
+        "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
+        tone === "green" && "bg-[var(--success-fg)]",
+        tone === "amber" && "bg-[var(--warning-fg)]",
+        tone === "red" && "bg-[var(--error-fg)]",
+        tone === "blue" && "bg-[var(--info-fg)]",
+        tone === "mute" && "bg-[var(--content-tertiary)]",
         className,
       )}
     />
@@ -52,16 +73,16 @@ export function StatusDot({
 
 export function readinessStatusBadgeTone(
   status: string,
-): "ok" | "warn" | "fail" | "mute" | "info" {
+): BadgeTone {
   switch (status.toLowerCase()) {
     case "ready":
-      return "ok";
+      return "success";
     case "warning":
-      return "warn";
+      return "warning";
     case "failed":
-      return "fail";
+      return "error";
     case "not_required":
-      return "mute";
+      return "neutral";
     default:
       return "info";
   }

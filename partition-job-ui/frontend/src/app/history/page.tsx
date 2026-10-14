@@ -48,10 +48,10 @@ export default function HistoryPage() {
   }, [logs, jobFilter, statusFilter]);
 
   return (
-    <div className="pj-enter space-y-5">
+    <div className="pj-enter space-y-3">
       <PageHeader
-        title="Execution history"
-        subtitle="Latest executions recorded in mubasher_oms.partitioning_job_table_log."
+        title="History"
+        subtitle="Recent partition job executions."
         showActions={false}
       />
 
@@ -78,9 +78,9 @@ export default function HistoryPage() {
         </Button>
       </div>
 
-      {error ? <p className="text-sm font-semibold text-[#c4473a]">{error}</p> : null}
+      {error ? <p className="text-sm font-semibold text-[var(--error-fg)]">{error}</p> : null}
 
-      <div className="overflow-hidden rounded-card border border-pj-line bg-pj-card shadow-card">
+      <div className="overflow-hidden rounded-card border border-pj-line bg-pj-card">
         <table className="w-full text-left text-xs">
           <thead className="bg-pj-table-head text-[0.62rem] uppercase tracking-[0.08em] text-pj-muted">
             <tr>
@@ -108,7 +108,7 @@ export default function HistoryPage() {
                       {row.last_run_status || "—"}
                     </Badge>
                   </td>
-                  <td className="px-3 py-2.5 tabular-nums font-semibold text-[#53615b]">
+                  <td className="px-3 py-2.5 tabular-nums font-semibold text-[var(--content-secondary)]">
                     {row.execution_duration_ms == null
                       ? "—"
                       : formatDurationMs(row.execution_duration_ms)}
@@ -152,7 +152,7 @@ export default function HistoryPage() {
       >
         <div className="space-y-3 text-xs">
           <div className="rounded-lg border border-pj-line bg-pj-surface px-3 py-2">
-            <div className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[#8a958e]">
+            <div className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[var(--content-tertiary)]">
               Duration
             </div>
             <div className="mt-1 font-semibold">
@@ -161,7 +161,7 @@ export default function HistoryPage() {
                 : formatDurationMs(selected.execution_duration_ms)}
             </div>
           </div>
-          <pre className="whitespace-pre-wrap rounded-xl border border-[#cbd7ef] bg-[#eef3ff] p-3 font-mono text-xs text-[#40526f]">
+          <pre className="whitespace-pre-wrap rounded-xl border border-[var(--border-default)] bg-[var(--info-bg)] p-3 font-mono text-xs text-[var(--info-fg)]">
             {selected?.job_error}
           </pre>
         </div>

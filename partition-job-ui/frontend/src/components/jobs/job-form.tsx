@@ -209,9 +209,9 @@ export function JobForm({
   }
 
   return (
-    <form onSubmit={onSubmit} className="space-y-5">
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
-        <SectionTitle>Basic information</SectionTitle>
+    <form onSubmit={onSubmit} className="space-y-3">
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
+        <SectionTitle>Job</SectionTitle>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <Field label="Job name">
             <Input
@@ -221,10 +221,10 @@ export function JobForm({
             />
           </Field>
           <Field label="Enabled">
-            <label className="flex h-9 items-center gap-3 text-sm font-semibold">
+            <label className="flex h-8 items-center gap-3 text-sm font-semibold">
               <span
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
-                  values.is_enabled ? "bg-[#1f8a64]" : "bg-[#c5c0b6]"
+                  values.is_enabled ? "bg-[var(--success-fg)]" : "bg-[var(--content-tertiary)]"
                 }`}
               >
                 <input
@@ -234,7 +234,7 @@ export function JobForm({
                   onChange={(e) => set("is_enabled", e.target.checked)}
                 />
                 <span
-                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition ${
+                  className={`inline-block h-5 w-5 transform rounded-full bg-[var(--surface-primary)] shadow transition ${
                     values.is_enabled ? "translate-x-5" : "translate-x-0.5"
                   }`}
                 />
@@ -251,12 +251,12 @@ export function JobForm({
                 key={op}
                 type="button"
                 onClick={() => set("is_create", op === "CREATE")}
-                className={`rounded-lg border px-3 py-2 text-xs font-bold ${
+                className={`rounded-[6px] border px-2.5 py-1.5 text-[12px] font-medium ${
                   (op === "CREATE") === values.is_create
                     ? op === "CREATE"
-                      ? "border-[#165dff] bg-[#e7edff] text-[#165dff]"
-                      : "border-[#c76b2d] bg-[#fff0e5] text-[#c76b2d]"
-                    : "border-[#d1cdc4] bg-white text-[#5f6d68]"
+                      ? "border-[var(--client-primary)] bg-[var(--info-bg)] text-[var(--client-primary)]"
+                      : "border-[var(--warning-fg)] bg-[var(--warning-bg)] text-[var(--warning-fg)]"
+                    : "border-[var(--border-default)] bg-[var(--surface-primary)] text-[var(--content-secondary)]"
                 }`}
               >
                 {op}
@@ -264,7 +264,7 @@ export function JobForm({
             ))}
           </div>
           {!values.is_create ? (
-            <p className="mt-2 rounded-lg border border-[#e5c4a8] bg-[#fff0e5] px-3 py-2 text-xs font-bold text-[#8a4b16]">
+            <p className="mt-2 rounded-lg border border-[var(--border-default)] bg-[var(--warning-bg)] px-3 py-2 text-xs font-bold text-[var(--warning-fg)]">
               DROP operation: review retention carefully. Wrong values can remove
               production data.
             </p>
@@ -272,8 +272,8 @@ export function JobForm({
         </div>
       </section>
 
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
-        <SectionTitle>Target</SectionTitle>
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
+        <SectionTitle>Target table</SectionTitle>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <Field label="Schema">
             <Input
@@ -292,7 +292,7 @@ export function JobForm({
         </div>
       </section>
 
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
         <SectionTitle>Partition configuration</SectionTitle>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <Field label="Partition unit">
@@ -338,7 +338,7 @@ export function JobForm({
         </div>
       </section>
 
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
         <SectionTitle>Schedule</SectionTitle>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <Field label="Cron expression (six-field)">
@@ -349,7 +349,7 @@ export function JobForm({
               required
             />
           </Field>
-          <div className="rounded-xl border border-[#cbd7ef] bg-[#eef3ff] px-3 py-2 text-xs text-[#40526f]">
+          <div className="rounded-xl border border-[var(--border-default)] bg-[var(--info-bg)] px-3 py-2 text-xs text-[var(--info-fg)]">
             <div className="font-bold">Schedule preview</div>
             <div className="mt-1">
               {preview?.valid
@@ -403,7 +403,7 @@ export function JobForm({
         ) : null}
       </section>
 
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
         <button
           type="button"
           className="flex w-full items-center justify-between text-left"
@@ -428,7 +428,7 @@ export function JobForm({
       </section>
 
       {dangerous ? (
-        <label className="flex items-start gap-2 rounded-xl border border-[#e5c4a8] bg-[#fff0e5] px-3 py-3 text-xs font-semibold text-[#8a4b16]">
+        <label className="flex items-start gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--warning-bg)] px-3 py-3 text-xs font-semibold text-[var(--warning-fg)]">
           <input
             type="checkbox"
             className="mt-0.5"
@@ -468,15 +468,15 @@ export function JobForm({
       {mode === "edit" && !dirty ? (
         <p className="text-sm font-semibold text-pj-muted">No changes to save</p>
       ) : null}
-      {ok ? <p className="text-sm font-semibold text-[#1f8a64]">{ok}</p> : null}
-      {error ? <p className="text-sm font-semibold text-[#c4473a]">{error}</p> : null}
+      {ok ? <p className="text-sm font-semibold text-[var(--success-fg)]">{ok}</p> : null}
+      {error ? <p className="text-sm font-semibold text-[var(--error-fg)]">{error}</p> : null}
     </form>
   );
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+    <div className="text-[14px] font-semibold text-[var(--content-primary)]">
       {children}
     </div>
   );

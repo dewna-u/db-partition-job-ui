@@ -77,10 +77,10 @@ export default function ConvertPage() {
               key={label}
               className={`rounded-full border px-3 py-1 text-xs font-bold ${
                 active
-                  ? "border-[#b7c9f5] bg-[#e7edff] text-[#165dff]"
+                  ? "border-[var(--border-default)] bg-[var(--info-bg)] text-[var(--client-primary)]"
                   : done
-                    ? "border-[#b7d9c7] bg-[#e4f3ea] text-[#1f8a64]"
-                    : "border-[#d1cdc4] bg-white text-pj-muted"
+                    ? "border-[var(--border-default)] bg-[var(--success-bg)] text-[var(--success-fg)]"
+                    : "border-[var(--border-default)] bg-[var(--surface-primary)] text-pj-muted"
               }`}
             >
               {label}
@@ -89,8 +89,8 @@ export default function ConvertPage() {
         })}
       </div>
 
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
-        <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
+        <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
           Select existing job
         </div>
         <div className="mt-3 flex flex-wrap items-end gap-3">
@@ -142,8 +142,8 @@ export default function ConvertPage() {
       </section>
 
       {stepChoices.length ? (
-        <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
-          <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+        <section className="rounded-card border border-pj-line bg-pj-card p-3">
+          <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
             Multiple steps found
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -164,9 +164,9 @@ export default function ConvertPage() {
       ) : null}
 
       {details ? (
-        <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
+        <section className="rounded-card border border-pj-line bg-pj-card p-3">
           <div className="mb-3 flex items-center gap-2">
-            <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+            <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
               Detected configuration
             </div>
             <Badge tone="info">Automatically detected</Badge>
@@ -182,7 +182,7 @@ export default function ConvertPage() {
               ["Schedule", String((details.autofill as Record<string, unknown>)?.job_schedule || "—")],
             ].map(([k, v]) => (
               <div key={k} className="rounded-lg border border-pj-line bg-pj-surface px-3 py-2">
-                <dt className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[#8a958e]">
+                <dt className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[var(--content-tertiary)]">
                   {k}
                 </dt>
                 <dd className="mt-1 font-semibold">{v}</dd>
@@ -190,7 +190,7 @@ export default function ConvertPage() {
             ))}
           </dl>
           {Array.isArray(details.warnings) && details.warnings.length ? (
-            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-[#b8672d]">
+            <ul className="mt-3 list-disc space-y-1 pl-5 text-xs text-[var(--warning-fg)]">
               {(details.warnings as string[]).map((w) => (
                 <li key={w}>{w}</li>
               ))}
@@ -201,7 +201,7 @@ export default function ConvertPage() {
 
       {details && step >= 3 ? (
         <section className="space-y-3">
-          <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+          <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
             Review & create
           </div>
           <JobForm
@@ -214,7 +214,7 @@ export default function ConvertPage() {
       ) : null}
 
       {error ? (
-        <p className="text-sm font-semibold text-[#c4473a]">{error}</p>
+        <p className="text-sm font-semibold text-[var(--error-fg)]">{error}</p>
       ) : null}
     </div>
   );

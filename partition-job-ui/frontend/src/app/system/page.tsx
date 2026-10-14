@@ -72,14 +72,14 @@ export default function SystemPage() {
   const counts = report?.counts;
 
   return (
-    <div className="pj-enter space-y-6">
+    <div className="pj-enter space-y-3">
       <PageHeader
-        title="System readiness"
-        subtitle="Read-only diagnostics across database, scheduler, host services, and runtime configuration."
+        title="System"
+        subtitle="Operational health for API, database, credentials, and scheduler."
         showActions={false}
       />
 
-      <section className="rounded-card border border-pj-line bg-pj-card p-5 shadow-card">
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex items-start gap-3">
             <StatusDot
@@ -87,7 +87,7 @@ export default function SystemPage() {
               className="mt-1.5"
             />
             <div>
-              <div className="text-lg font-extrabold tracking-tight text-pj-ink">
+              <div className="text-[16px] font-semibold tracking-tight text-pj-ink">
                 {loading && !report
                   ? "Loading diagnostics…"
                   : report?.overall_label ?? "Unknown"}
@@ -95,7 +95,7 @@ export default function SystemPage() {
               <p className="mt-1 text-sm text-pj-muted">
                 {report?.checked_at
                   ? `Last checked ${new Date(report.checked_at).toLocaleString()}`
-                  : "Run checks to validate deployment health."}
+                  : "Refresh checks to validate deployment health."}
                 {report?.from_cache ? " (cached)" : null}
               </p>
             </div>
@@ -110,7 +110,7 @@ export default function SystemPage() {
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
-            Run checks
+            Refresh checks
           </Button>
         </div>
 
@@ -138,7 +138,7 @@ export default function SystemPage() {
                 <div className="text-[0.62rem] font-bold uppercase tracking-[0.1em] text-pj-muted">
                   {label}
                 </div>
-                <div className="mt-1 text-xl font-extrabold tabular-nums text-pj-ink">
+                <div className="mt-1 text-[28px] font-semibold tabular-nums text-pj-ink">
                   {counts[key]}
                 </div>
               </div>
@@ -156,12 +156,12 @@ export default function SystemPage() {
       {report?.categories.map((category) => (
         <section
           key={category.key}
-          className="rounded-card border border-pj-line bg-pj-card shadow-card"
+          className="rounded-card border border-pj-line bg-pj-card"
         >
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-pj-line px-4 py-3">
             <div className="flex items-center gap-2">
               <StatusDot tone={overallDot(category.status)} />
-              <h2 className="text-sm font-extrabold text-pj-ink">{category.label}</h2>
+              <h2 className="text-[14px] font-semibold text-[var(--content-primary)]">{category.label}</h2>
             </div>
             <Badge tone={readinessStatusBadgeTone(category.status)}>
               {readinessStatusLabel(category.status)}

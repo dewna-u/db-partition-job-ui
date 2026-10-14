@@ -9,9 +9,42 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ["var(--font-manrope)", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["var(--font-jetbrains)", "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+      },
       colors: {
         background: "var(--background)",
         foreground: "var(--foreground)",
+        client: {
+          primary: "var(--client-primary)",
+          "primary-h": "var(--client-primary-h)",
+          "primary-2": "var(--client-primary-2)",
+        },
+        content: {
+          primary: "var(--content-primary)",
+          secondary: "var(--content-secondary)",
+          tertiary: "var(--content-tertiary)",
+          link: "var(--content-link)",
+          accent: "var(--content-accent)",
+        },
+        surface: {
+          primary: "var(--surface-primary)",
+          secondary: "var(--surface-secondary)",
+          tertiary: "var(--surface-tertiary)",
+          chrome: "var(--surface-chrome)",
+          axis: "var(--surface-axis)",
+          overlay: "var(--surface-overlay)",
+        },
+        border: {
+          DEFAULT: "var(--border-default)",
+          strong: "var(--border-strong)",
+        },
+        success: { DEFAULT: "var(--success-fg)", fg: "var(--success-fg)", bg: "var(--success-bg)" },
+        error: { DEFAULT: "var(--error-fg)", fg: "var(--error-fg)", bg: "var(--error-bg)" },
+        warning: { DEFAULT: "var(--warning-fg)", fg: "var(--warning-fg)", bg: "var(--warning-bg)" },
+        info: { DEFAULT: "var(--info-fg)", fg: "var(--info-fg)", bg: "var(--info-bg)" },
+        neutral: { DEFAULT: "var(--neutral-fg)", fg: "var(--neutral-fg)", bg: "var(--neutral-bg)" },
         pj: {
           bg: "var(--pj-bg)",
           card: "var(--pj-card)",
@@ -36,10 +69,21 @@ export default {
         },
       },
       boxShadow: {
-        card: "0 7px 22px color-mix(in srgb, var(--pj-ink) 4%, transparent)",
+        card: "none",
+        menu: "var(--shadow-menu)",
+        toast: "var(--shadow-toast)",
+        modal: "var(--shadow-modal)",
       },
       borderRadius: {
-        card: "13px",
+        card: "6px",
+      },
+      fontSize: {
+        caption: ["11px", { lineHeight: "1.35" }],
+        body: ["12px", { lineHeight: "1.45" }],
+        emphasis: ["14px", { lineHeight: "1.4" }],
+        title: ["16px", { lineHeight: "1.35" }],
+        page: ["24px", { lineHeight: "1.2" }],
+        kpi: ["28px", { lineHeight: "1.1" }],
       },
     },
   },

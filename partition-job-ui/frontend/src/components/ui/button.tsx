@@ -4,26 +4,28 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-[9px] text-[0.72rem] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pj-primary focus-visible:ring-offset-2 focus-visible:ring-offset-pj-bg disabled:pointer-events-none disabled:opacity-45",
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[6px] text-[12px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--client-primary)] focus-visible:ring-offset-1 focus-visible:ring-offset-[var(--surface-secondary)] disabled:pointer-events-none disabled:opacity-45",
   {
     variants: {
       variant: {
         default:
-          "bg-pj-primary text-white shadow-[0_8px_20px_color-mix(in_srgb,var(--pj-primary)_17%,transparent)] hover:opacity-90",
+          "bg-[var(--client-primary)] text-[var(--content-accent)] hover:bg-[var(--client-primary-h)]",
         secondary:
-          "border border-pj-line bg-pj-card text-pj-ink hover:border-pj-muted hover:bg-pj-surface",
+          "border border-[var(--border-default)] bg-[var(--surface-primary)] text-[var(--content-primary)] hover:bg-[var(--hover-surface-1)]",
         outline:
-          "border border-pj-line bg-transparent text-pj-ink hover:bg-pj-surface",
-        ghost: "text-pj-muted hover:bg-pj-table-head hover:text-pj-ink",
+          "border border-[var(--border-default)] bg-transparent text-[var(--content-primary)] hover:bg-[var(--hover-surface-1)]",
+        ghost:
+          "text-[var(--content-secondary)] hover:bg-[var(--hover-surface-1)] hover:text-[var(--content-primary)]",
         success:
-          "bg-pj-ok text-white shadow-[0_8px_20px_color-mix(in_srgb,var(--pj-ok)_17%,transparent)] hover:opacity-90",
-        danger: "bg-pj-warn text-white hover:opacity-90",
+          "bg-[var(--success-fg)] text-white hover:opacity-90",
+        danger:
+          "bg-[var(--error-fg)] text-white hover:opacity-90",
       },
       size: {
-        default: "h-9 px-4 py-2",
-        sm: "h-8 px-3",
-        lg: "h-10 px-5",
-        icon: "h-9 w-9",
+        default: "h-8 px-3",
+        sm: "h-7 px-2.5 text-[11px]",
+        lg: "h-9 px-4",
+        icon: "h-8 w-8",
       },
     },
     defaultVariants: { variant: "default", size: "default" },

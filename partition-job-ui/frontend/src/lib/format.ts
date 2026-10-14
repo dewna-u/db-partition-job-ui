@@ -157,3 +157,23 @@ export function dbConfigToString(value: unknown): string {
   }
 }
 
+export type StatusTone = "success" | "error" | "warning" | "info" | "neutral";
+
+export function runStatusTone(status?: string | null): StatusTone {
+  const s = (status || "").toUpperCase();
+  if (SUCCESS.has(s) || s === "SUCCESS") return "success";
+  if (FAIL.has(s) || s.includes("FAIL") || s.includes("ERROR")) return "error";
+  if (!s) return "neutral";
+  return "info";
+}
+
+export function runStatusLabel(status?: string | null): string {
+  const s = (status || "").trim();
+  if (!s) return "—";
+  return s.toUpperCase();
+}
+
+export function enabledTone(enabled: boolean): StatusTone {
+  return enabled ? "success" : "neutral";
+}
+

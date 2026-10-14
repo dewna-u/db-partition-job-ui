@@ -112,7 +112,7 @@ export default function OverviewPage() {
     }
     return {
       tone: "ok" as const,
-      title: "Everything is running smoothly",
+      title: "Systems look healthy",
       detail:
         active
           ? "All scheduled jobs are healthy and the realtime scheduler is responding."
@@ -121,19 +121,19 @@ export default function OverviewPage() {
   })();
 
   return (
-    <div className="pj-enter space-y-5">
+    <div className="pj-enter space-y-3">
       <PageHeader
-        title="Partition job management"
-        subtitle="Configure, monitor, and safely manage PostgreSQL partition jobs."
+        title="Overview"
+        subtitle="Monitor partition jobs, scheduler health, and recent executions."
       />
 
       <section
-        className={`flex flex-wrap items-center justify-between gap-4 rounded-card border px-4 py-3.5 shadow-card ${
+        className={`flex flex-wrap items-center justify-between gap-4 rounded-card border px-4 py-3.5 ${
           banner.tone === "ok"
-            ? "border-[#cfe3d6] bg-[#f3faf6]"
+            ? "border-[var(--border-default)] bg-[var(--success-bg)]"
             : banner.tone === "warn"
-              ? "border-[#e5c4a8] bg-[#fff7f0]"
-              : "border-[#e7b7b1] bg-[#fff5f3]"
+              ? "border-[var(--border-default)] bg-[var(--warning-bg)]"
+              : "border-[var(--border-default)] bg-[var(--error-bg)]"
         }`}
       >
         <div className="flex items-start gap-3">
@@ -142,11 +142,11 @@ export default function OverviewPage() {
             className="mt-1.5"
           />
           <div>
-            <div className="text-sm font-extrabold text-pj-ink">{banner.title}</div>
-            <div className="mt-0.5 text-xs text-[#5f6d68]">{banner.detail}</div>
+            <div className="text-sm font-semibold text-pj-ink">{banner.title}</div>
+            <div className="mt-0.5 text-xs text-[var(--content-secondary)]">{banner.detail}</div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-4 text-xs font-semibold text-[#5f6d68]">
+        <div className="flex flex-wrap gap-4 text-xs font-semibold text-[var(--content-secondary)]">
           <span className="inline-flex items-center gap-1.5">
             <StatusDot tone="blue" /> {data?.counts.enabled ?? "—"} scheduled
           </span>
@@ -168,10 +168,10 @@ export default function OverviewPage() {
 
       <Link
         href="/system"
-        className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-pj-line bg-pj-card px-4 py-3 shadow-card transition-colors hover:border-pj-primary/40"
+        className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-pj-line bg-pj-card px-4 py-3 transition-colors hover:border-pj-primary/40"
       >
         <div>
-          <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.12em] text-pj-muted">
+          <div className="text-[0.62rem] font-semibold uppercase tracking-[0.12em] text-pj-muted">
             System readiness
           </div>
           <div className="mt-1 text-sm font-bold text-pj-ink">
@@ -195,7 +195,7 @@ export default function OverviewPage() {
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
         {[
           {
-            label: "Configured jobs",
+            label: "Partition jobs",
             value: data?.counts.total ?? (loading ? "…" : "0"),
             detail: data
               ? `${data.counts.enabled} enabled / ${data.counts.disabled} disabled`
@@ -232,14 +232,14 @@ export default function OverviewPage() {
         ].map((card) => (
           <div
             key={card.label}
-            className={`rounded-card border border-pj-line bg-pj-card p-4 shadow-card ${
-              card.warn ? "border-[#e5c4a8] bg-[#fff7f0]" : ""
+            className={`rounded-card border border-pj-line bg-pj-card p-3 ${
+              card.warn ? "border-[var(--border-default)] bg-[var(--warning-bg)]" : ""
             }`}
           >
-            <div className="text-[0.68rem] font-bold uppercase tracking-[0.12em] text-pj-muted">
+            <div className="text-[11px] font-medium text-[var(--content-secondary)]">
               {card.label}
             </div>
-            <div className="mt-2 text-[1.65rem] font-extrabold tracking-[-0.04em] tabular-nums text-pj-ink">
+            <div className="mt-1 text-[28px] font-semibold tracking-tight tabular-nums text-[var(--content-primary)]">
               {card.value}
             </div>
             <div className="mt-1 text-xs text-pj-muted">{card.detail}</div>
@@ -248,13 +248,13 @@ export default function OverviewPage() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.55fr_0.95fr]">
-        <div className="rounded-card border border-pj-line bg-pj-card p-4 shadow-card">
+        <div className="rounded-card border border-pj-line bg-pj-card p-3">
           <div className="mb-3 flex items-end justify-between gap-3">
             <div>
-              <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
-                Live queue
+              <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
+                Jobs
               </div>
-              <div className="text-base font-extrabold tracking-tight">Configured jobs</div>
+              <div className="text-base font-semibold tracking-tight">Partition jobs</div>
             </div>
             <Button variant="secondary" asChild>
               <Link href="/jobs">View all</Link>
@@ -262,7 +262,7 @@ export default function OverviewPage() {
           </div>
           <div className="mb-3 grid gap-2 md:grid-cols-[1.4fr_0.8fr_1fr]">
             <Input
-              placeholder="Filter jobs..."
+              placeholder="Search jobs"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -298,7 +298,7 @@ export default function OverviewPage() {
                       key={job.job_id}
                       onClick={() => setSelected(job)}
                       className={`cursor-pointer border-t border-pj-line hover:bg-pj-surface ${
-                        isSel ? "bg-[#eef3ff]" : ""
+                        isSel ? "bg-[var(--info-bg)]" : ""
                       }`}
                     >
                       <td className="px-3 py-2.5">
@@ -330,7 +330,7 @@ export default function OverviewPage() {
                           {status.label}
                         </span>
                       </td>
-                      <td className="px-3 py-2.5 font-semibold tabular-nums text-[#53615b]">
+                      <td className="px-3 py-2.5 font-semibold tabular-nums text-[var(--content-secondary)]">
                         {nextRunLabel(job)}
                       </td>
                     </tr>
@@ -348,7 +348,7 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        <div className="rounded-card border border-pj-line bg-pj-card p-4 shadow-card">
+        <div className="rounded-card border border-pj-line bg-pj-card p-3">
           {selected ? (
             <JobDetailPanel job={selected} onRan={() => void load()} />
           ) : (
@@ -358,19 +358,19 @@ export default function OverviewPage() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <div className="rounded-card border border-pj-line bg-pj-card p-4 shadow-card">
+        <div className="rounded-card border border-pj-line bg-pj-card p-3">
           <div className="mb-3 flex items-end justify-between">
             <div>
-              <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+              <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
                 Recent activity
               </div>
-              <div className="text-base font-extrabold">Execution history</div>
+              <div className="text-base font-semibold">Execution history</div>
             </div>
             <Button variant="secondary" asChild>
               <Link href="/history">Full history</Link>
             </Button>
           </div>
-          <div className="divide-y divide-[#ebe8e1]">
+          <div className="divide-y divide-[var(--border-default)]">
             {(data?.logs || []).slice(0, 8).map((log) => {
               const fail = isFailStatus(log.last_run_status);
               const ok = isSuccessStatus(log.last_run_status);
@@ -393,7 +393,7 @@ export default function OverviewPage() {
                     <div className="truncate text-[0.78rem] font-bold">
                       {log.job_name || `Job ${log.job_id}`}
                     </div>
-                    <div className="mt-0.5 text-[0.68rem] text-[#7f8a84]">
+                    <div className="mt-0.5 text-[0.68rem] text-[var(--content-secondary)]">
                       {fail
                         ? "Partition operation failed"
                         : ok
@@ -401,9 +401,9 @@ export default function OverviewPage() {
                           : `Status: ${log.last_run_status || "—"}`}
                     </div>
                   </div>
-                  <div className="text-right text-[0.62rem] text-[#8d9790]">
+                  <div className="text-right text-[0.62rem] text-[var(--content-tertiary)]">
                     <div>{formatWhen(log.job_runtime)}</div>
-                    <div className="mt-0.5 font-bold text-[#53615b]">
+                    <div className="mt-0.5 font-bold text-[var(--content-secondary)]">
                       {log.last_run_status || "—"}
                     </div>
                   </div>
@@ -416,21 +416,15 @@ export default function OverviewPage() {
           </div>
         </div>
 
-        <div className="relative overflow-hidden rounded-card border border-[#202c34] bg-[#202c34] p-5 text-[#f5f3ea] shadow-card">
-          <div className="pointer-events-none absolute -right-10 -top-14 h-40 w-40 rounded-full bg-[#e5ff5c] opacity-85" />
-          <div className="relative z-10">
-            <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#aebbb4]">
-              System insight
-            </div>
-            <h3 className="mt-2 text-[1.05rem] font-extrabold tracking-tight">
-              Operational notes
-            </h3>
-            <ul className="mt-3 space-y-2 text-[0.78rem] leading-relaxed text-[#b5c0bb]">
-              {(data?.insights || ["Loading insights…"]).map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
-          </div>
+        <div className="rounded-card border border-[var(--border-default)] bg-[var(--surface-primary)] p-3">
+          <h3 className="text-[14px] font-semibold text-[var(--content-primary)]">
+            Operational notes
+          </h3>
+          <ul className="mt-2 space-y-1.5 text-[12px] text-[var(--content-secondary)]">
+            {(data?.insights || ["Loading insights…"]).map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
         </div>
       </section>
 
@@ -441,7 +435,7 @@ export default function OverviewPage() {
         description="Database error from partitioning_job_table_log"
         wide
       >
-        <pre className="whitespace-pre-wrap rounded-xl border border-[#cbd7ef] bg-[#eef3ff] p-3 font-mono text-xs text-[#40526f]">
+        <pre className="whitespace-pre-wrap rounded-xl border border-[var(--border-default)] bg-[var(--info-bg)] p-3 font-mono text-xs text-[var(--info-fg)]">
           {errorLog?.body}
         </pre>
       </Sheet>

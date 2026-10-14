@@ -6,20 +6,25 @@ import { PageHeader } from "@/components/shell/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Select } from "@/components/ui/input";
+import { Panel, QueryState } from "@/components/ui/panel";
 import { Sheet } from "@/components/ui/sheet";
 import { JobDetailPanel } from "@/components/jobs/job-detail-panel";
 import { api, ApiError } from "@/lib/api";
 import {
   displayStatus,
+  enabledTone,
   formatDurationMs,
   nextRunLabel,
   operationLabel,
+  runStatusLabel,
+  runStatusTone,
   targetTable,
 } from "@/lib/format";
 import type { PartitionJob } from "@/lib/types";
 
 export default function JobsPage() {
   const [jobs, setJobs] = useState<PartitionJob[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [op, setOp] = useState("All");
@@ -30,6 +35,7 @@ export default function JobsPage() {
 
   async function load() {
     setError(null);
+    setLoading(true);
     try {
       const res = await api.jobs();
       setJobs(res.jobs || []);
@@ -40,6 +46,8 @@ export default function JobsPage() {
       });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load jobs");
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -71,110 +79,148 @@ export default function JobsPage() {
   }
 
   return (
-    <div className="pj-enter space-y-5">
+    <div className="pj-enter space-y-3">
       <PageHeader
-        title="Configured jobs"
-        subtitle="Every row is one parameterized partition job in mubasher_oms.partitioning_job_table."
+        title="Partition jobs"
+        count={loading ? undefined : filtered.length}
+        subtitle="Configure and manage scheduled partition operations."
       />
 
-      <div className="flex flex-wrap items-end gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-[200px] flex-1">
           <Input
-            placeholder="Search job / table"
+            placeholder="Search jobs"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            aria-label="Search jobs"
           />
         </div>
-        <Select value={op} onChange={(e) => setOp(e.target.value)} className="w-32">
+        <Select value={op} onChange={(e) => setOp(e.target.value)} className="w-28" aria-label="Operation filter">
           <option>All</option>
           <option>CREATE</option>
           <option>DROP</option>
         </Select>
-        <Select value={enabled} onChange={(e) => setEnabled(e.target.value)} className="w-36">
+        <Select value={enabled} onChange={(e) => setEnabled(e.target.value)} className="w-32" aria-label="Enabled filter">
           <option>All</option>
           <option>Enabled</option>
           <option>Disabled</option>
         </Select>
-        <Select value={status} onChange={(e) => setStatus(e.target.value)} className="w-40">
+        <Select value={status} onChange={(e) => setStatus(e.target.value)} className="w-36" aria-label="Status filter">
           {statuses.map((s) => (
             <option key={s}>{s}</option>
           ))}
         </Select>
-        <Button variant="secondary" onClick={() => void load()}>
+        <Button variant="secondary" size="sm" onClick={() => void load()}>
           Refresh
         </Button>
       </div>
 
-      {error ? <p className="text-sm font-semibold text-[#c4473a]">{error}</p> : null}
-
-      <div className="overflow-hidden rounded-card border border-pj-line bg-pj-card shadow-card">
-        <table className="w-full text-left text-xs">
-          <thead className="bg-pj-table-head text-[0.62rem] uppercase tracking-[0.08em] text-pj-muted">
-            <tr>
-              <th className="px-3 py-2.5">Job ID</th>
-              <th className="px-3 py-2.5">Job name</th>
-              <th className="px-3 py-2.5">Target</th>
-              <th className="px-3 py-2.5">Type</th>
-              <th className="px-3 py-2.5">Schedule</th>
-              <th className="px-3 py-2.5">Next run</th>
-              <th className="px-3 py-2.5">Last run</th>
-              <th className="px-3 py-2.5">Status</th>
-              <th className="px-3 py-2.5">Enabled</th>
-              <th className="px-3 py-2.5 text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map((job) => {
-              const st = displayStatus(job);
-              const type = operationLabel(job);
-              return (
-                <tr
-                  key={job.job_id}
-                  className="cursor-pointer border-t border-pj-line hover:bg-pj-surface"
-                  onClick={() => openJob(job, false)}
-                >
-                  <td className="px-3 py-2.5 font-bold tabular-nums">{job.job_id}</td>
-                  <td className="px-3 py-2.5 font-semibold">{job.job_name}</td>
-                  <td className="px-3 py-2.5 text-[#53615b]">{targetTable(job)}</td>
-                  <td className="px-3 py-2.5">
-                    <Badge tone={type === "CREATE" ? "create" : "drop"}>{type}</Badge>
-                  </td>
-                  <td className="px-3 py-2.5 font-mono text-[0.7rem]">{job.job_schedule}</td>
-                  <td className="px-3 py-2.5 tabular-nums">{nextRunLabel(job)}</td>
-                  <td className="px-3 py-2.5">{String(job.last_run_time || "—")}</td>
-                  <td className="px-3 py-2.5">{st.label}</td>
-                  <td className="px-3 py-2.5">{job.is_enabled ? "Yes" : "No"}</td>
-                  <td className="px-3 py-2.5 text-right">
-                    <button
-                      type="button"
-                      title="Edit configuration"
-                      className="inline-flex rounded-lg border border-[#d1cdc4] bg-white p-1.5 text-[#53615b] hover:border-[#165dff] hover:text-[#165dff]"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openJob(job, true);
-                      }}
-                    >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                  </td>
+      <Panel className="overflow-hidden">
+        <QueryState
+          loading={loading}
+          error={error}
+          empty={!loading && !error && filtered.length === 0}
+          emptyMessage="No jobs match the current filters."
+        >
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[12px]">
+              <thead className="sticky top-0 bg-[var(--surface-tertiary)] text-[11px] font-medium text-[var(--content-secondary)]">
+                <tr>
+                  <th className="px-3 py-2 font-medium">Job</th>
+                  <th className="px-3 py-2 font-medium">Target</th>
+                  <th className="px-3 py-2 font-medium">Operation</th>
+                  <th className="px-3 py-2 font-medium">Schedule</th>
+                  <th className="px-3 py-2 font-medium">Next run</th>
+                  <th className="px-3 py-2 font-medium">Last run</th>
+                  <th className="px-3 py-2 font-medium">Status</th>
+                  <th className="px-3 py-2 font-medium">Enabled</th>
+                  <th className="px-3 py-2 text-right font-medium">Actions</th>
                 </tr>
-              );
-            })}
-            {!filtered.length ? (
-              <tr>
-                <td colSpan={10} className="px-3 py-10 text-center text-pj-muted">
-                  No jobs match the current filters.
-                </td>
-              </tr>
-            ) : null}
-          </tbody>
-        </table>
-      </div>
+              </thead>
+              <tbody>
+                {filtered.map((job) => {
+                  const st = displayStatus(job);
+                  const type = operationLabel(job);
+                  const overdue = nextRunLabel(job).startsWith("Overdue");
+                  return (
+                    <tr
+                      key={job.job_id}
+                      className="cursor-pointer border-t border-[var(--border-default)] hover:bg-[var(--hover-surface-1)]"
+                      onClick={() => openJob(job, false)}
+                    >
+                      <td className="px-3 py-2 align-top">
+                        <div className="font-medium text-[var(--content-primary)]">
+                          {job.job_name || `Job ${job.job_id}`}
+                        </div>
+                        <div className="mt-0.5 font-mono text-[11px] tabular-nums text-[var(--content-tertiary)]">
+                          #{job.job_id}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 align-top">
+                        <span className="font-mono text-[11px] text-[var(--content-secondary)]">
+                          {targetTable(job)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 align-top">
+                        <Badge tone={type === "CREATE" ? "create" : "drop"}>{type}</Badge>
+                      </td>
+                      <td className="px-3 py-2 align-top">
+                        <span className="font-mono text-[11px]">{job.job_schedule}</span>
+                      </td>
+                      <td className="px-3 py-2 align-top tabular-nums">
+                        {overdue ? (
+                          <Badge tone="warning">OVERDUE</Badge>
+                        ) : (
+                          nextRunLabel(job)
+                        )}
+                      </td>
+                      <td className="px-3 py-2 align-top tabular-nums text-[var(--content-secondary)]">
+                        {String(job.last_run_time || "—")}
+                      </td>
+                      <td className="px-3 py-2 align-top">
+                        {job.last_run_status ? (
+                          <Badge tone={runStatusTone(job.last_run_status)}>
+                            {runStatusLabel(job.last_run_status)}
+                          </Badge>
+                        ) : (
+                          <span className="text-[var(--content-tertiary)]">{st.label}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 align-top">
+                        <Badge tone={enabledTone(job.is_enabled)}>
+                          {job.is_enabled ? "ENABLED" : "DISABLED"}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-2 text-right align-top">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          aria-label={`Edit ${job.job_name || `job ${job.job_id}`}`}
+                          title="Edit job"
+                          className="h-7 w-7"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openJob(job, true);
+                          }}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </QueryState>
+      </Panel>
 
-      <p className="text-[0.65rem] text-pj-muted">
-        Last duration is shown in the job details drawer to keep this table readable.
-        Current last duration for the selected job:{" "}
-        {selected ? formatDurationMs(selected.last_execution_duration_ms) : "—"}
+      <p className="text-[11px] text-[var(--content-tertiary)]">
+        Last duration is shown in the job details drawer.
+        {selected
+          ? ` Selected duration: ${formatDurationMs(selected.last_execution_duration_ms)}`
+          : ""}
       </p>
 
       <Sheet
@@ -188,14 +234,14 @@ export default function JobsPage() {
         title={
           selected
             ? editMode
-              ? `Edit partition job · #${selected.job_id}`
+              ? `Edit job · #${selected.job_id}`
               : `Job #${selected.job_id}`
             : "Job"
         }
         description={
           editMode
-            ? "Load current values, edit configuration, then save"
-            : "Configuration details, duration, and manual run"
+            ? "Load current values, edit configuration, then save changes"
+            : "Configuration, duration, and manual run"
         }
         wide
       >

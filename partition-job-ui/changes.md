@@ -573,3 +573,53 @@ Deployment / rollback:
 Notes:
     No commit/push; no prod DB/server access; Datadog Agent unchanged;
     partops.jobs.failed_count preserved.
+
+## CHANGE-011 — Frontend design language alignment (Central DB visual language)
+
+Date:
+    2026-10-14
+
+Reason:
+    Align PartOps UI presentation with the GTN Central DB console design
+    language (dense operational admin console) while preserving all PartOps
+    functionality and the existing Next.js architecture.
+
+Related Issues:
+    None (visual/UX alignment only)
+
+Files Changed:
+    - `frontend/src/app/globals.css` (semantic design tokens; light/dark)
+    - `frontend/tailwind.config.ts` (token aliases, typography scale)
+    - `frontend/src/app/layout.tsx` (Manrope + JetBrains Mono)
+    - `frontend/src/components/shell/app-shell.tsx` (52px top header shell)
+    - `frontend/src/components/shell/sidebar.tsx` (flat chrome side nav)
+    - `frontend/src/components/shell/page-header.tsx` (compact page headers)
+    - `frontend/src/components/theme/theme-toggle.tsx`
+    - `frontend/src/components/ui/button.tsx`, `badge.tsx`, `input.tsx`, `sheet.tsx`
+    - `frontend/src/components/ui/panel.tsx` (new Panel / QueryState)
+    - `frontend/src/components/jobs/job-form.tsx`, `job-detail-panel.tsx`
+    - `frontend/src/app/page.tsx`, `jobs/page.tsx`, `jobs/new/page.tsx`
+    - `frontend/src/app/system/page.tsx`, `history/page.tsx`, `convert/page.tsx`
+    - `frontend/src/lib/format.ts` (status tone helpers)
+    - `changes.md`
+
+Database Changes:
+    None
+
+Configuration Changes:
+    None. Ports unchanged. `.env` / `.env.realtime` unchanged.
+    No Vite/shadcn migration. Next.js stack preserved.
+
+Behavioural Impact:
+    Visual/UX only. API contracts, scheduler, SQL, Secrets Manager, Datadog,
+    Phase 0–4 behaviours unchanged. Theme modes light/dark/system retained.
+
+Tests:
+    `npm run lint` (frontend) — pass
+    `npm run build` (frontend) — pass
+    No dedicated frontend unit test script configured.
+
+Notes:
+    Design reference: design-cdb guide (visual language only).
+    Central DB domain features (Users, Policies, Grants, Hubs, etc.) not copied.
+    No commit/push; no server/DB/AWS/Datadog access.

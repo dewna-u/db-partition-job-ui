@@ -81,10 +81,10 @@ export function JobDetailPanel({
     return (
       <div className="space-y-4">
         <div>
-          <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+          <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
             Edit partition job
           </div>
-          <div className="text-base font-extrabold tracking-tight">Job #{job.job_id}</div>
+          <div className="text-base font-semibold tracking-tight">Job #{job.job_id}</div>
         </div>
         <JobForm
           mode="edit"
@@ -105,18 +105,18 @@ export function JobDetailPanel({
   return (
     <div className="space-y-4">
       <div>
-        <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+        <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
           Selected job · #{job.job_id}
         </div>
-        <div className="text-base font-extrabold tracking-tight">Job details</div>
+        <div className="text-base font-semibold tracking-tight">Job details</div>
       </div>
 
-      <div className="flex items-center gap-3 rounded-[10px] border border-[#d9e1f5] bg-[#f1f5ff] px-3 py-3">
-        <div className="grid h-9 w-9 place-items-center rounded-lg bg-[#165dff] text-[0.7rem] font-extrabold text-white">
+      <div className="flex items-center gap-3 rounded-[6px] border border-[var(--border-default)] bg-[var(--info-bg)] px-3 py-3">
+        <div className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--client-primary)] text-[0.7rem] font-semibold text-white">
           SQL
         </div>
         <div>
-          <div className="text-sm font-extrabold">{job.job_name || `Job ${job.job_id}`}</div>
+          <div className="text-sm font-semibold">{job.job_name || `Job ${job.job_id}`}</div>
           <div className="text-[0.65rem] text-pj-muted">
             Parameterized partition routine
           </div>
@@ -168,7 +168,7 @@ export function JobDetailPanel({
           ["Relative", nextRunLabel(job)],
         ].map(([k, v]) => (
           <div key={k} className="rounded-lg border border-pj-line bg-pj-surface px-3 py-2">
-            <dt className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[#8a958e]">
+            <dt className="text-[0.58rem] font-bold uppercase tracking-[0.1em] text-[var(--content-tertiary)]">
               {k}
             </dt>
             <dd className="mt-1 break-all font-semibold text-pj-ink">{v}</dd>
@@ -176,16 +176,16 @@ export function JobDetailPanel({
         ))}
       </dl>
 
-      <pre className="whitespace-pre-wrap rounded-xl border border-[#cbd7ef] bg-[#eef3ff] p-3 font-mono text-[0.72rem] leading-relaxed text-[#40526f]">
+      <pre className="whitespace-pre-wrap rounded-[6px] border border-[var(--border-default)] bg-[var(--info-bg)] p-3 font-mono text-[0.72rem] leading-relaxed text-[var(--info-fg)]">
         {`${op} partition job\n${targetTable(job)}\npartition unit: ${job.partition_unit}\nperiod: ${job.partition_period}\ninterval: ${job.create_drop_interval}\nschedule: ${job.job_schedule}`}
       </pre>
 
       <div className="space-y-2 border-t border-pj-line pt-3">
-        <div className="text-[0.62rem] font-extrabold uppercase tracking-[0.13em] text-[#86928a]">
+        <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--content-tertiary)]">
           Actions
         </div>
         {op === "DROP" ? (
-          <label className="flex items-start gap-2 text-xs text-[#8a4b16]">
+          <label className="flex items-start gap-2 text-xs text-[var(--warning-fg)]">
             <input
               type="checkbox"
               checked={confirmDrop}
@@ -210,8 +210,8 @@ export function JobDetailPanel({
         >
           Edit configuration
         </Button>
-        {message ? <p className="text-xs font-semibold text-[#1f8a64]">{message}</p> : null}
-        {error ? <p className="text-xs font-semibold text-[#c4473a]">{error}</p> : null}
+        {message ? <p className="text-xs font-semibold text-[var(--success-fg)]">{message}</p> : null}
+        {error ? <p className="text-xs font-semibold text-[var(--error-fg)]">{error}</p> : null}
         <p className="text-[0.65rem] text-pj-muted">
           Uses existing run_partition_job_manual(). Does not change next_run_time.
         </p>
