@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PageHeader } from "@/components/shell/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Select } from "@/components/ui/input";
 import { Sheet } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
@@ -12,18 +13,26 @@ import type { JobLog } from "@/lib/types";
 
 export default function HistoryPage() {
   const [logs, setLogs] = useState<JobLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobFilter, setJobFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [selected, setSelected] = useState<JobLog | null>(null);
 
-  async function load() {
+  async function load(opts?: { refresh?: boolean }) {
+    const isRefresh = Boolean(opts?.refresh);
     setError(null);
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
     try {
       const res = await api.logs(100);
       setLogs(res.logs || []);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load history");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -73,10 +82,28 @@ export default function HistoryPage() {
           <option>MANUAL_SUCCESS</option>
           <option>MANUAL_FAIL</option>
         </Select>
-        <Button variant="secondary" onClick={() => void load()}>
-          Refresh
+        <Button
+          variant="secondary"
+          onClick={() => void load({ refresh: true })}
+          disabled={loading || refreshing}
+          aria-busy={refreshing}
+        >
+          {refreshing ? (
+            <>
+              <PartOpsLoader size="sm" />
+              Refreshing…
+            </>
+          ) : (
+            "Refresh"
+          )}
         </Button>
       </div>
+
+      {loading && !logs.length ? (
+        <div className="flex items-center gap-2 py-6" aria-busy="true" role="status">
+          <PartOpsLoader size="md" label="Loading history…" />
+        </div>
+      ) : null}
 
       {error ? <p className="text-sm font-semibold text-[var(--error-fg)]">{error}</p> : null}
 

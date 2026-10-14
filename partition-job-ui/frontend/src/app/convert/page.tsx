@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { PageHeader } from "@/components/shell/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Label } from "@/components/ui/input";
 import { JobForm, type JobFormValues } from "@/components/jobs/job-form";
 import { api, ApiError } from "@/lib/api";
@@ -103,8 +104,15 @@ export default function ConvertPage() {
               onChange={(e) => setJobId(e.target.value)}
             />
           </div>
-          <Button disabled={busy} onClick={() => void loadDetails()}>
-            {busy ? "Loading…" : "Load job details"}
+          <Button disabled={busy} onClick={() => void loadDetails()} aria-busy={busy}>
+            {busy ? (
+              <>
+                <PartOpsLoader size="sm" />
+                Loading…
+              </>
+            ) : (
+              "Load job details"
+            )}
           </Button>
           <Button variant="secondary" type="button" onClick={() => void loadBrowse()}>
             Browse pgAgent jobs

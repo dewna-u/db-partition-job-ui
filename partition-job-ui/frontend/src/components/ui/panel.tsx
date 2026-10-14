@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 
 export function Panel({
   children,
@@ -53,18 +54,25 @@ export function QueryState({
   error,
   empty,
   emptyMessage = "No data.",
+  loadingLabel = "Loading…",
   children,
 }: {
   loading?: boolean;
   error?: string | null;
   empty?: boolean;
   emptyMessage?: string;
+  loadingLabel?: string;
   children: React.ReactNode;
 }) {
   if (loading) {
     return (
-      <div className="px-3 py-8 text-center text-[12px] text-[var(--content-secondary)]">
-        Loading…
+      <div
+        className="flex flex-col items-center justify-center gap-2 px-3 py-10"
+        aria-busy="true"
+        role="status"
+      >
+        <PartOpsLoader size="md" />
+        <span className="text-[12px] text-[var(--content-secondary)]">{loadingLabel}</span>
       </div>
     );
   }

@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { Badge, StatusDot } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { JobForm, type JobFormValues } from "@/components/jobs/job-form";
 import { api, ApiError } from "@/lib/api";
 import {
@@ -200,8 +201,16 @@ export function JobDetailPanel({
           disabled={busy || (op === "DROP" && !confirmDrop)}
           onClick={() => void runNow()}
           className="w-full"
+          aria-busy={busy}
         >
-          {busy ? "Running…" : "Run now"}
+          {busy ? (
+            <>
+              <PartOpsLoader size="sm" />
+              Running…
+            </>
+          ) : (
+            "Run now"
+          )}
         </Button>
         <Button
           variant="secondary"

@@ -193,3 +193,19 @@ pre,
 .pj-enter {
   animation: po-fade 140ms ease-out both;
 }
+
+@keyframes po-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.po-loader-spin {
+  animation: po-loader-spin 1100ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .po-loader-spin {
+    animation: none;
+  }
+}

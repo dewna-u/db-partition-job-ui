@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Label, Select, Textarea } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api";
 import type { JobCreatePayload, JobUpdatePayload } from "@/lib/types";
@@ -448,12 +449,16 @@ export function JobForm({
             (mode === "edit" && !dirty) ||
             (dangerous && !confirmDangerous)
           }
+          aria-busy={busy}
         >
-          {busy
-            ? mode === "edit"
-              ? "Saving…"
-              : "Creating…"
-            : submitLabel}
+          {busy ? (
+            <>
+              <PartOpsLoader size="sm" />
+              {mode === "edit" ? "Saving…" : "Creating job…"}
+            </>
+          ) : (
+            submitLabel
+          )}
         </Button>
         {mode === "edit" && onCancel ? (
           <Button type="button" variant="secondary" onClick={onCancel}>

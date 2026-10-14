@@ -623,3 +623,37 @@ Notes:
     Design reference: design-cdb guide (visual language only).
     Central DB domain features (Users, Policies, Grants, Hubs, etc.) not copied.
     No commit/push; no server/DB/AWS/Datadog access.
+
+## CHANGE-012 — PartOps logo and branded loading indicator
+
+Date:
+    2026-10-14
+
+Reason:
+    Integrate new transparent PartOps wordmark and branded loader icon into
+    the existing Central DB-aligned Next.js UI for clearer product identity
+    and consistent loading/refresh feedback.
+
+Files Changed:
+    - `frontend/public/branding/partops-logo-transparent.png` (new)
+    - `frontend/public/branding/partops-loader.png` (new)
+    - `frontend/public/branding/README.md`
+    - `frontend/src/app/globals.css` (loader spin + reduced-motion)
+    - `frontend/src/components/ui/partops-loader.tsx` (new)
+    - `frontend/src/components/ui/panel.tsx` (QueryState uses loader)
+    - `frontend/src/components/shell/app-shell.tsx`
+    - `frontend/src/components/shell/sidebar.tsx`
+    - `frontend/src/components/jobs/job-form.tsx`
+    - `frontend/src/components/jobs/job-detail-panel.tsx`
+    - `frontend/src/app/jobs/page.tsx`
+    - `frontend/src/app/history/page.tsx`
+    - `frontend/src/app/system/page.tsx`
+    - `frontend/src/app/convert/page.tsx`
+    - `changes.md`
+
+Behavioural Impact:
+    Visual/UX only. Favicon remains `partops-mark.svg`. Background polling
+    does not show a continuous loader. API/scheduler/DB unchanged.
+
+Notes:
+    No commit/push; no server/DB/AWS access.

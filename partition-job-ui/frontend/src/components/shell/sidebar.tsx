@@ -45,6 +45,19 @@ export function AppSidebar({
 
   return (
     <aside className="flex h-[calc(100vh-52px)] w-[228px] shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--surface-chrome)]">
+      <div className="border-b border-[var(--border-default)] px-3 py-2.5">
+        <Link href="/" className="block" aria-label="PartOps home">
+          <Image
+            src="/branding/partops-logo-transparent.png"
+            alt="PartOps"
+            width={280}
+            height={64}
+            className="h-8 w-auto max-w-[140px] object-contain object-left"
+            priority
+          />
+        </Link>
+      </div>
+
       <div className="px-3 pt-3">
         <div className="mb-1.5 px-2 text-[11px] font-medium uppercase tracking-[0.08em] text-[var(--content-tertiary)]">
           Manage
@@ -116,23 +129,6 @@ export function AppSidebar({
           >
             Open system
           </Link>
-        </div>
-        <div className="hidden items-center gap-2 px-1 pt-1 lg:flex">
-          <Image
-            src="/branding/partops-mark.svg"
-            alt=""
-            width={20}
-            height={20}
-            className="h-5 w-5 shrink-0"
-          />
-          <div className="min-w-0">
-            <div className="truncate text-[11px] font-semibold text-[var(--content-primary)]">
-              PartOps
-            </div>
-            <div className="truncate text-[11px] text-[var(--content-tertiary)]">
-              Partition operations
-            </div>
-          </div>
         </div>
       </div>
     </aside>

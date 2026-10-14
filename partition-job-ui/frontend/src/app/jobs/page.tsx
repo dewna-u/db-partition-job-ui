@@ -5,6 +5,7 @@ import { Pencil } from "lucide-react";
 import { PageHeader } from "@/components/shell/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Select } from "@/components/ui/input";
 import { Panel, QueryState } from "@/components/ui/panel";
 import { Sheet } from "@/components/ui/sheet";
@@ -25,6 +26,7 @@ import type { PartitionJob } from "@/lib/types";
 export default function JobsPage() {
   const [jobs, setJobs] = useState<PartitionJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [op, setOp] = useState("All");
@@ -33,9 +35,11 @@ export default function JobsPage() {
   const [selected, setSelected] = useState<PartitionJob | null>(null);
   const [editMode, setEditMode] = useState(false);
 
-  async function load() {
+  async function load(opts?: { refresh?: boolean }) {
+    const isRefresh = Boolean(opts?.refresh);
     setError(null);
-    setLoading(true);
+    if (isRefresh) setRefreshing(true);
+    else setLoading(true);
     try {
       const res = await api.jobs();
       setJobs(res.jobs || []);
@@ -48,6 +52,7 @@ export default function JobsPage() {
       setError(err instanceof ApiError ? err.message : "Failed to load jobs");
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -110,14 +115,27 @@ export default function JobsPage() {
             <option key={s}>{s}</option>
           ))}
         </Select>
-        <Button variant="secondary" size="sm" onClick={() => void load()}>
-          Refresh
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={() => void load({ refresh: true })}
+          disabled={loading || refreshing}
+          aria-busy={refreshing}
+        >
+          {refreshing ? (
+            <>
+              <PartOpsLoader size="sm" />
+              Refreshing…
+            </>
+          ) : (
+            "Refresh"
+          )}
         </Button>
       </div>
 
       <Panel className="overflow-hidden">
         <QueryState
-          loading={loading}
+          loading={loading && jobs.length === 0}
           error={error}
           empty={!loading && !error && filtered.length === 0}
           emptyMessage="No jobs match the current filters."

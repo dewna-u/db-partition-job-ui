@@ -50,23 +50,19 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col bg-[var(--surface-secondary)] text-[var(--content-primary)]">
       <header className="sticky top-0 z-30 flex h-[52px] shrink-0 items-center justify-between gap-3 border-b border-[var(--border-default)] bg-[var(--surface-chrome)] px-4">
-        <Link href="/" className="flex min-w-0 items-center gap-2.5">
+        <Link
+          href="/"
+          className="flex min-w-0 items-center"
+          aria-label="PartOps home"
+        >
           <Image
-            src="/branding/partops-mark.svg"
-            alt=""
-            width={28}
-            height={28}
-            className="h-7 w-7 shrink-0"
+            src="/branding/partops-logo-transparent.png"
+            alt="PartOps"
+            width={280}
+            height={64}
             priority
+            className="h-8 w-auto max-w-[140px] object-contain object-left"
           />
-          <div className="min-w-0">
-            <div className="truncate text-[14px] font-semibold tracking-tight text-[var(--content-primary)]">
-              PartOps
-            </div>
-            <div className="truncate text-[11px] text-[var(--content-tertiary)]">
-              GTN EDB Partition Operations
-            </div>
-          </div>
         </Link>
         <div className="flex items-center gap-3">
           <div className="hidden text-[11px] text-[var(--content-secondary)] sm:block">

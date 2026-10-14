@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
+import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { PageHeader } from "@/components/shell/page-header";
 import {
   Badge,
@@ -104,13 +105,14 @@ export default function SystemPage() {
             type="button"
             onClick={() => void load(true)}
             disabled={loading || refreshing}
+            aria-busy={refreshing || (loading && !report)}
           >
-            {refreshing ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+            {refreshing || (loading && !report) ? (
+              <PartOpsLoader size="sm" />
             ) : (
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className="h-4 w-4" aria-hidden />
             )}
-            Refresh checks
+            {refreshing ? "Refreshing…" : "Refresh checks"}
           </Button>
         </div>
 
@@ -148,8 +150,9 @@ export default function SystemPage() {
       </section>
 
       {loading && !report ? (
-        <div className="flex items-center gap-2 text-sm text-pj-muted">
-          <Loader2 className="h-4 w-4 animate-spin" /> Collecting checks…
+        <div className="flex items-center gap-2 text-sm text-pj-muted" aria-busy="true" role="status">
+          <PartOpsLoader size="sm" />
+          Collecting checks…
         </div>
       ) : null}
 
