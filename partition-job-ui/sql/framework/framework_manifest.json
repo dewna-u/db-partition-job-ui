@@ -1,0 +1,1615 @@
+{
+  "manifest_format": 1,
+  "framework_version": "20261117_04",
+  "description": "Database objects PartOps requires in the CONTROL database (and, scope 'target_execution', in each managed target database). Source for preflight, the scheduler start gate, readiness, target health, the inventory and capture lists. Keep in sync with sql/ (unit-tested). Phase 5D: remote execution attempt ledger and control functions (claim / dispatch / finalize / unknown outcome / recovery / resolution); target-aware discovery; hub-local only.",
+  "default_schema": "mubasher_oms",
+  "roles": [
+    {
+      "name": "mubasher_oms",
+      "purpose": "Owner of framework objects and of SECURITY DEFINER functions (NOLOGIN recommended).",
+      "required": true
+    },
+    {
+      "name": "partition_job_ui",
+      "purpose": "FastAPI login role (least privilege).",
+      "required": true
+    },
+    {
+      "name": "partition_job_scheduler",
+      "purpose": "Realtime scheduler login role (least privilege).",
+      "required": true
+    }
+  ],
+  "objects": [
+    {
+      "kind": "schema",
+      "schema": "mubasher_oms",
+      "name": "mubasher_oms",
+      "ownership": "legacy_framework",
+      "definition_in_git": "partial",
+      "status": "existing",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql"
+      ],
+      "purpose": "Application schema that hosts the partition framework (existing in production; bootstrap only creates it when absent).",
+      "called_by": [
+        "all"
+      ],
+      "required_by": [
+        "api",
+        "manual_run",
+        "migration",
+        "scheduler",
+        "target_execution"
+      ],
+      "required": true
+    },
+    {
+      "kind": "table",
+      "schema": "mubasher_oms",
+      "name": "partitioning_job_table",
+      "ownership": "legacy_framework",
+      "definition_in_git": "reconstructed",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql",
+        "sql/migrations/20261117_01_partops_database_target.sql",
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "One row per partition job: target table, schedule, next_run_time, last scheduled outcome.",
+      "called_by": [
+        "database.py",
+        "scheduler functions",
+        "update/manual/reconcile functions"
+      ],
+      "required_by": [
+        "api",
+        "scheduler",
+        "manual_run",
+        "migration"
+      ],
+      "required": true,
+      "expected_owner": "mubasher_oms",
+      "required_columns": [
+        "job_id",
+        "job_name",
+        "is_enabled",
+        "table_schema",
+        "table_name",
+        "db_config_para",
+        "frequency",
+        "last_run_time",
+        "next_run_time",
+        "last_run_status",
+        "partition_unit",
+        "partition_period",
+        "is_create",
+        "create_drop_interval",
+        "job_schedule",
+        "database_target_id"
+      ],
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ],
+        "partition_job_scheduler": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "mubasher_oms",
+      "name": "partitioning_job_table_log",
+      "ownership": "legacy_framework",
+      "definition_in_git": "reconstructed",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql",
+        "sql/migrations/20260929_01_add_execution_duration_ms.sql",
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Execution history (SUCCESS/FAIL/MANUAL_SUCCESS/MANUAL_FAIL) with execution_duration_ms.",
+      "called_by": [
+        "database.py",
+        "run_partition_job_scheduled",
+        "run_partition_job_manual",
+        "count_failed_jobs"
+      ],
+      "required_by": [
+        "api",
+        "scheduler",
+        "manual_run"
+      ],
+      "required": true,
+      "expected_owner": "mubasher_oms",
+      "required_columns": [
+        "job_log_id",
+        "job_id",
+        "job_name",
+        "last_run_status",
+        "job_runtime",
+        "job_error",
+        "execution_duration_ms",
+        "database_target_id",
+        "execution_attempt_id"
+      ],
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT",
+          "INSERT"
+        ],
+        "partition_job_scheduler": [
+          "SELECT",
+          "INSERT"
+        ]
+      }
+    },
+    {
+      "kind": "sequence",
+      "schema": "mubasher_oms",
+      "name": "seq_partitioning_job_id",
+      "ownership": "legacy_framework",
+      "definition_in_git": "reconstructed",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql"
+      ],
+      "purpose": "job_id default.",
+      "called_by": [
+        "insert_data_to_partition_job_table"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true
+    },
+    {
+      "kind": "sequence",
+      "schema": "mubasher_oms",
+      "name": "seq_partitioning_job_log_id",
+      "ownership": "legacy_framework",
+      "definition_in_git": "reconstructed",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql"
+      ],
+      "purpose": "job_log_id default (log inserts by scheduler and manual run).",
+      "called_by": [
+        "run_partition_job_scheduled",
+        "run_partition_job_manual"
+      ],
+      "required_by": [
+        "scheduler",
+        "manual_run"
+      ],
+      "required": true,
+      "usage_roles": [
+        "partition_job_ui",
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "type",
+      "schema": "mubasher_oms",
+      "name": "cron_schedule_result",
+      "ownership": "legacy_framework",
+      "definition_in_git": "reconstructed",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql"
+      ],
+      "purpose": "Composite (schedule_interval interval, next_run_time timestamp) returned by cron_to_interval_or_next_run.",
+      "called_by": [
+        "cron_to_interval_or_next_run",
+        "run_partition_job_scheduled",
+        "reconcile_missed_partition_job",
+        "update_data_to_partition_job_table"
+      ],
+      "required_by": [
+        "scheduler",
+        "api",
+        "migration"
+      ],
+      "required": true
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "fn_set_default_db_config_para",
+      "identity_args": "",
+      "ownership": "legacy_framework",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql",
+        "../sql/remove_default_lock_timeout_from_db_config.sql"
+      ],
+      "purpose": "Trigger function: NULL db_config_para -> '{}' (never injects defaults).",
+      "called_by": [
+        "trg_set_default_db_config_para"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": false,
+      "security": "invoker"
+    },
+    {
+      "kind": "trigger",
+      "schema": "mubasher_oms",
+      "name": "trg_set_default_db_config_para",
+      "table": "partitioning_job_table",
+      "ownership": "legacy_framework",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/bootstrap_partition_job_framework.sql"
+      ],
+      "purpose": "BEFORE INSERT OR UPDATE OF db_config_para normalisation.",
+      "called_by": [
+        "inserts/updates of partitioning_job_table"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": false
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "insert_data_to_partition_job_table",
+      "identity_args": "character varying, boolean, character varying, character varying, jsonb, character varying, interval, timestamp without time zone, character varying, numeric, boolean, interval",
+      "parameter_names": [
+        "p_job_name",
+        "p_is_enabled",
+        "p_table_schema",
+        "p_table_name",
+        "p_db_config_para",
+        "p_job_schedule",
+        "p_frequency",
+        "p_next_run_time",
+        "p_partition_unit",
+        "p_partition_period",
+        "p_is_create",
+        "p_is_create_drop_interval"
+      ],
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "capture_required",
+      "source_files": [],
+      "purpose": "Create path: inserts one partitioning_job_table row (called with named notation by database.create_partition_job).",
+      "called_by": [
+        "database.create_partition_job (POST /api/jobs)",
+        "system_readiness"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true,
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "cron_to_interval_or_next_run",
+      "identity_args": "text",
+      "result": "mubasher_oms.cron_schedule_result",
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "capture_required",
+      "source_files": [],
+      "purpose": "Six-field cron -> interval or next run timestamp. Authoritative schedule calculation (ISSUE-003).",
+      "called_by": [
+        "run_partition_job_scheduled",
+        "reconcile_missed_partition_job",
+        "update_data_to_partition_job_table (as owner)"
+      ],
+      "required_by": [
+        "scheduler",
+        "api"
+      ],
+      "required": true,
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "cron_field_to_int_array",
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "capture_required",
+      "signature_known": false,
+      "source_files": [],
+      "purpose": "Reported (bootstrap notes) as a helper of cron_to_interval_or_next_run. Signature and actual use UNVERIFIED until captured.",
+      "called_by": [
+        "cron_to_interval_or_next_run (unverified)"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": false
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "create_any_table_partition",
+      "identity_args": "character varying, character varying, character varying, integer, interval",
+      "result": "void",
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "capture_required",
+      "source_files": [],
+      "purpose": "CREATE worker: creates future partitions of (schema, table).",
+      "called_by": [
+        "run_partition_job_scheduled",
+        "run_partition_job_manual",
+        "scheduler remote orchestrator (on the managed TARGET database)"
+      ],
+      "required_by": [
+        "manual_run",
+        "scheduler",
+        "target_execution"
+      ],
+      "required": true,
+      "execute_roles": [
+        "partition_job_scheduler",
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "drop_any_table_partition",
+      "identity_args": "character varying, character varying, interval",
+      "result": "void",
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "capture_required",
+      "source_files": [],
+      "purpose": "DROP worker: removes partitions older than the retention interval (destructive).",
+      "called_by": [
+        "run_partition_job_scheduled",
+        "run_partition_job_manual",
+        "scheduler remote orchestrator (on the managed TARGET database)"
+      ],
+      "required_by": [
+        "manual_run",
+        "scheduler",
+        "target_execution"
+      ],
+      "required": true,
+      "execute_roles": [
+        "partition_job_scheduler",
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "run_partition_create_jobs",
+      "identity_args": "",
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "legacy_must_not_run",
+      "source_files": [],
+      "purpose": "Legacy polling runner. PartOps never calls it; it must NOT be scheduled (pgAgent) against a database served by the realtime scheduler.",
+      "called_by": [
+        "legacy pgAgent job (detected read-only)"
+      ],
+      "required_by": [],
+      "required": false
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "run_partition_drop_jobs",
+      "identity_args": "",
+      "ownership": "legacy_framework",
+      "definition_in_git": "no",
+      "status": "legacy_must_not_run",
+      "source_files": [],
+      "purpose": "Legacy polling runner (see run_partition_create_jobs).",
+      "called_by": [
+        "legacy pgAgent job (detected read-only)"
+      ],
+      "required_by": [],
+      "required": false
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "run_partition_job_manual",
+      "identity_args": "numeric",
+      "result": "TABLE(status text, message text, execution_duration_ms bigint)",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20260929_03_run_partition_job_manual_duration.sql",
+        "sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql",
+        "sql/migrations/20261117_02_target_aware_executors.sql"
+      ],
+      "purpose": "Manual Run now: shared target lock, allowlist, MANUAL_* log; never changes next_run_time / last_run_*. Phase 5C: jobs of other targets → MANUAL_REMOTE_TARGET.",
+      "called_by": [
+        "database.run_partition_job_manual (POST /api/jobs/{id}/run)",
+        "run_partition_job_attention_recovery"
+      ],
+      "required_by": [
+        "api",
+        "manual_run"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "update_data_to_partition_job_table",
+      "identity_args": "numeric, character varying, boolean, character varying, character varying, jsonb, character varying, interval, timestamp without time zone, character varying, numeric, boolean, interval",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261013_02_secure_update_partition_job.sql",
+        "sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql"
+      ],
+      "purpose": "Edit / Enable / Disable (SECURITY DEFINER, fixed search_path, allowlist).",
+      "called_by": [
+        "database.update_partition_job (PATCH /api/jobs/{id})"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "get_upcoming_partition_jobs",
+      "identity_args": "interval",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/realtime_scheduler_v1.sql",
+        "sql/migrations/20261117_02_target_aware_executors.sql"
+      ],
+      "purpose": "Read-only discovery of enabled jobs due within lookahead (includes overdue). Phase 5C: control-database jobs only.",
+      "called_by": [
+        "scheduler_database.fetch_upcoming_jobs"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "owner_strict": false,
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "run_partition_job_scheduled",
+      "identity_args": "numeric, timestamp without time zone",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/realtime_scheduler_v1.sql",
+        "sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql",
+        "sql/migrations/20261117_02_target_aware_executors.sql"
+      ],
+      "purpose": "Execute one owned occurrence after DB revalidation; DB max-lateness ceiling. Phase 5C: jobs of other targets → SKIPPED_REMOTE_TARGET.",
+      "called_by": [
+        "scheduler_database.execute_scheduled_job"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "owner_strict": false,
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "reconcile_missed_partition_job",
+      "identity_args": "numeric, timestamp without time zone, text, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/realtime_scheduler_v1.sql",
+        "sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql",
+        "sql/migrations/20261117_02_target_aware_executors.sql",
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Record a not-executed occurrence (attention) and advance next_run_time; no DDL. Phase 5D: every target of the hub; refuses while a remote attempt is in flight / unresolved.",
+      "called_by": [
+        "scheduler_database.reconcile_occurrence",
+        "run_partition_job_scheduled (ceiling)",
+        "remote claim (lateness ceiling)"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "run_partition_job_attention_recovery",
+      "identity_args": "bigint",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql"
+      ],
+      "purpose": "DBA recovery of a missed occurrence via run_partition_job_manual.",
+      "called_by": [
+        "database.recover_partition_job_attention (POST /api/attention/{id}/recover)"
+      ],
+      "required_by": [
+        "api",
+        "manual_run"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "acknowledge_partition_job_attention",
+      "identity_args": "bigint, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql"
+      ],
+      "purpose": "Acknowledge a missed occurrence without executing.",
+      "called_by": [
+        "database.acknowledge_partition_job_attention (POST /api/attention/{id}/acknowledge)"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partition_job_max_execution_lateness",
+      "identity_args": "",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_01_partition_job_attention.sql"
+      ],
+      "purpose": "DB safety ceiling (default 6 h) used by run_partition_job_scheduled.",
+      "called_by": [
+        "run_partition_job_scheduled"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partition_job_config_param_allowed",
+      "identity_args": "text, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_01_partition_job_attention.sql"
+      ],
+      "purpose": "db_config_para allowlist (mirrored in validators.py).",
+      "called_by": [
+        "run_partition_job_scheduled",
+        "run_partition_job_manual",
+        "update_data_to_partition_job_table"
+      ],
+      "required_by": [
+        "scheduler",
+        "manual_run",
+        "api"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_scheduler",
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "fn_partition_job_attention_guard",
+      "identity_args": "",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_01_partition_job_attention.sql",
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Trigger function: immutable evidence (incl. target/attempt), single resolution, MANUALLY_RERUN needs MANUAL_SUCCESS, unknown remote outcomes never re-run.",
+      "called_by": [
+        "trg_partition_job_attention_guard"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "public_execute": false
+    },
+    {
+      "kind": "table",
+      "schema": "mubasher_oms",
+      "name": "partition_job_attention",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_01_partition_job_attention.sql",
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Missed / retry-exhausted occurrences and DBA review outcome.",
+      "called_by": [
+        "reconcile_missed_partition_job",
+        "recovery/acknowledge",
+        "database.get_partition_job_attention",
+        "count_pending_attention"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "expected_owner": "mubasher_oms",
+      "required_columns": [
+        "attention_id",
+        "job_id",
+        "job_name",
+        "table_schema",
+        "table_name",
+        "is_create",
+        "reason",
+        "missed_run_time",
+        "detected_at",
+        "rescheduled_to",
+        "detail",
+        "status",
+        "reviewed_at",
+        "resolution",
+        "manual_execution_result",
+        "manual_execution_message",
+        "manual_execution_duration_ms",
+        "manual_executed_at",
+        "database_target_id",
+        "execution_attempt_id"
+      ],
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ],
+        "partition_job_scheduler": [
+          "SELECT",
+          "INSERT"
+        ]
+      },
+      "forbidden_privileges": {
+        "partition_job_ui": [
+          "DELETE"
+        ],
+        "partition_job_scheduler": [
+          "DELETE"
+        ]
+      }
+    },
+    {
+      "kind": "trigger",
+      "schema": "mubasher_oms",
+      "name": "trg_partition_job_attention_guard",
+      "table": "partition_job_attention",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_01_partition_job_attention.sql"
+      ],
+      "purpose": "BEFORE UPDATE guard on partition_job_attention.",
+      "called_by": [
+        "updates of partition_job_attention"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true
+    },
+    {
+      "kind": "table",
+      "schema": "mubasher_oms",
+      "name": "partops_framework_version",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261110_03_partops_framework_version.sql"
+      ],
+      "purpose": "Applied PartOps framework migrations (compatibility check only; never written by the application).",
+      "called_by": [
+        "framework preflight",
+        "scheduler start gate",
+        "system readiness"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "expected_owner": "mubasher_oms",
+      "required_columns": [
+        "migration_id",
+        "framework_version",
+        "description",
+        "applied_at",
+        "applied_by"
+      ],
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ],
+        "partition_job_scheduler": [
+          "SELECT"
+        ]
+      },
+      "forbidden_privileges": {
+        "partition_job_ui": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ],
+        "partition_job_scheduler": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "mubasher_oms",
+      "name": "partops_database_target",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_01_partops_database_target.sql"
+      ],
+      "purpose": "Hub-local registry of managed databases (control database = default target). No passwords/keys/secret values.",
+      "called_by": [
+        "database_targets",
+        "database.list_database_targets",
+        "scheduler control-target lookup",
+        "partops_control_target_id"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "expected_owner": "mubasher_oms",
+      "required_columns": [
+        "target_id",
+        "target_key",
+        "display_name",
+        "host",
+        "port",
+        "database_name",
+        "credential_provider",
+        "secret_id",
+        "aws_region",
+        "ssl_mode",
+        "environment",
+        "is_enabled",
+        "is_control_database",
+        "max_concurrent_jobs",
+        "created_at",
+        "updated_at"
+      ],
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ],
+        "partition_job_scheduler": [
+          "SELECT"
+        ]
+      },
+      "forbidden_privileges": {
+        "partition_job_ui": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ],
+        "partition_job_scheduler": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ]
+      }
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_control_target_id",
+      "identity_args": "",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_01_partops_database_target.sql"
+      ],
+      "purpose": "target_id of the control database; DEFAULT of partitioning_job_table.database_target_id; executor remote-target guard.",
+      "called_by": [
+        "get_upcoming_partition_jobs",
+        "run_partition_job_scheduled",
+        "reconcile_missed_partition_job",
+        "run_partition_job_manual",
+        "job inserts (column DEFAULT)"
+      ],
+      "required_by": [
+        "api",
+        "scheduler",
+        "manual_run"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "execute_roles": [
+        "partition_job_scheduler",
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "table",
+      "schema": "pgagent",
+      "name": "pga_job",
+      "ownership": "external",
+      "definition_in_git": "no",
+      "status": "external_optional",
+      "source_files": [],
+      "purpose": "pgAgent job list (read-only; job listing, Convert page, legacy-runner detection).",
+      "called_by": [
+        "database.get_pgagent_jobs",
+        "system_readiness"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": false,
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "pgagent",
+      "name": "pga_jobstep",
+      "ownership": "external",
+      "definition_in_git": "no",
+      "status": "external_optional",
+      "source_files": [],
+      "purpose": "pgAgent job steps (read-only).",
+      "called_by": [
+        "database.get_pgagent_job_details"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": false,
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "pgagent",
+      "name": "pga_schedule",
+      "ownership": "external",
+      "definition_in_git": "no",
+      "status": "external_optional",
+      "source_files": [],
+      "purpose": "pgAgent schedules (read-only).",
+      "called_by": [
+        "database.get_pgagent_job_details"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": false,
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ]
+      }
+    },
+    {
+      "kind": "table",
+      "schema": "mubasher_oms",
+      "name": "partops_execution_attempt",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Remote execution attempt ledger (control DB): state machine PREPARED → DISPATCHING → TARGET_SUCCEEDED → FINALIZED; TARGET_FAILED (proven rollback); OUTCOME_UNKNOWN (review). No credentials.",
+      "called_by": [
+        "partops_remote_* functions",
+        "API execution-attempt endpoints",
+        "job configuration guard"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "expected_owner": "mubasher_oms",
+      "required_columns": [
+        "attempt_id",
+        "job_id",
+        "database_target_id",
+        "target_key_snapshot",
+        "execution_kind",
+        "expected_run_time",
+        "operation",
+        "job_name_snapshot",
+        "table_schema_snapshot",
+        "table_name_snapshot",
+        "partition_unit_snapshot",
+        "partition_period_snapshot",
+        "create_drop_interval_snapshot",
+        "db_config_snapshot",
+        "planned_next_run_time",
+        "attention_id",
+        "state",
+        "failure_count",
+        "executor_instance",
+        "created_at",
+        "updated_at",
+        "dispatch_started_at",
+        "target_finished_at",
+        "finalized_at",
+        "result",
+        "error_class",
+        "error_summary",
+        "execution_duration_ms"
+      ],
+      "table_privileges": {
+        "partition_job_ui": [
+          "SELECT"
+        ],
+        "partition_job_scheduler": [
+          "SELECT"
+        ]
+      },
+      "forbidden_privileges": {
+        "partition_job_ui": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ],
+        "partition_job_scheduler": [
+          "INSERT",
+          "UPDATE",
+          "DELETE"
+        ]
+      }
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "fn_partops_execution_attempt_guard",
+      "identity_args": "",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Trigger function: legal attempt state transitions; identity immutable.",
+      "called_by": [
+        "trg_partops_execution_attempt_guard"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp"
+    },
+    {
+      "kind": "trigger",
+      "schema": "mubasher_oms",
+      "name": "trg_partops_execution_attempt_guard",
+      "table": "partops_execution_attempt",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "BEFORE UPDATE state-machine guard on the ledger.",
+      "called_by": [
+        "ledger updates"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "fn_partops_job_execution_guard",
+      "identity_args": "",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Trigger function: target/table/operation/schedule/config cannot change while a remote attempt is in flight or unresolved; no re-enable while an outcome is unknown.",
+      "called_by": [
+        "trg_partops_job_execution_guard"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp"
+    },
+    {
+      "kind": "trigger",
+      "schema": "mubasher_oms",
+      "name": "trg_partops_job_execution_guard",
+      "table": "partitioning_job_table",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "BEFORE UPDATE job configuration guard (Phase 5D).",
+      "called_by": [
+        "job edits / enable"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "fn_partops_job_target_on_insert",
+      "identity_args": "",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Trigger function: a new job may request its target via partops.requested_target_id (validated).",
+      "called_by": [
+        "trg_partops_job_target_on_insert"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp"
+    },
+    {
+      "kind": "trigger",
+      "schema": "mubasher_oms",
+      "name": "trg_partops_job_target_on_insert",
+      "table": "partitioning_job_table",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "BEFORE INSERT target assignment of new jobs.",
+      "called_by": [
+        "database.create_partition_job"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_job_open_attempt_state",
+      "identity_args": "numeric",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_03_remote_execution_ledger.sql"
+      ],
+      "purpose": "Most significant open remote attempt state of a job.",
+      "called_by": [
+        "job configuration guard",
+        "API"
+      ],
+      "required_by": [
+        "api",
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler",
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_compute_next_run",
+      "identity_args": "character varying, timestamp without time zone, timestamp without time zone",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Internal: first legitimate future occurrence via the legacy cron helper (no invention).",
+      "called_by": [
+        "remote claim / finalize / resolution"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "internal": true
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_safe_error",
+      "identity_args": "text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Internal: bounded error text without secret-like tokens.",
+      "called_by": [
+        "remote ledger functions"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "internal": true
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_get_upcoming_jobs",
+      "identity_args": "interval",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Target-aware discovery of due/upcoming jobs across all enabled targets (read-only).",
+      "called_by": [
+        "scheduler_database.fetch_upcoming_jobs"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "invoker",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_close_attempt",
+      "identity_args": "bigint, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Close a PREPARED / TARGET_FAILED attempt when its occurrence is reconciled.",
+      "called_by": [
+        "reconcile_missed_partition_job"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_claim",
+      "identity_args": "numeric, timestamp without time zone, text, text, bigint, boolean",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Revalidate a remote occurrence / manual run and create or reuse its attempt (no DDL).",
+      "called_by": [
+        "scheduler remote orchestrator"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_mark_dispatching",
+      "identity_args": "bigint, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "PREPARED → DISPATCHING before the target worker call.",
+      "called_by": [
+        "scheduler remote orchestrator"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_record_success",
+      "identity_args": "bigint, bigint",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "DISPATCHING → TARGET_SUCCEEDED (target COMMIT confirmed).",
+      "called_by": [
+        "scheduler remote orchestrator"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_record_failure",
+      "identity_args": "bigint, text, text, bigint",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "PREPARED/DISPATCHING → TARGET_FAILED (proven rollback); manual runs finalized.",
+      "called_by": [
+        "scheduler remote orchestrator"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_mark_unknown",
+      "identity_args": "bigint, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "DISPATCHING → OUTCOME_UNKNOWN; REMOTE_OUTCOME_UNKNOWN attention; job scheduling paused.",
+      "called_by": [
+        "scheduler remote orchestrator",
+        "partops_remote_recover_attempts"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_finalize",
+      "identity_args": "bigint",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "TARGET_SUCCEEDED → FINALIZED: history, last status, next legitimate schedule (control DB only).",
+      "called_by": [
+        "scheduler remote orchestrator"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_remote_recover_attempts",
+      "identity_args": "text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Scheduler start: DISPATCHING → OUTCOME_UNKNOWN; TARGET_SUCCEEDED → finalize only; stale attempts closed.",
+      "called_by": [
+        "scheduler start"
+      ],
+      "required_by": [
+        "scheduler"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_scheduler"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_resolve_remote_outcome",
+      "identity_args": "bigint, text, text",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Operator resolution of OUTCOME_UNKNOWN (APPLIED / NOT_APPLIED + note); resumes scheduling. No DDL.",
+      "called_by": [
+        "POST /api/execution-attempts/{id}/resolve"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    },
+    {
+      "kind": "function",
+      "schema": "mubasher_oms",
+      "name": "partops_set_job_target",
+      "identity_args": "numeric, integer",
+      "ownership": "partops",
+      "definition_in_git": "yes",
+      "status": "versioned",
+      "source_files": [
+        "sql/migrations/20261117_04_remote_execution_functions.sql"
+      ],
+      "purpose": "Move a job to another enabled target (guarded by the job configuration guard).",
+      "called_by": [
+        "PATCH /api/jobs/{id}"
+      ],
+      "required_by": [
+        "api"
+      ],
+      "required": true,
+      "security": "definer",
+      "expected_owner": "mubasher_oms",
+      "public_execute": false,
+      "search_path": "pg_catalog, mubasher_oms, pg_temp",
+      "execute_roles": [
+        "partition_job_ui"
+      ]
+    }
+  ],
+  "builtins_used": [
+    "pg_try_advisory_xact_lock(integer, integer)",
+    "hashtext(text)",
+    "set_config(text, text, boolean)",
+    "jsonb_each_text(jsonb)",
+    "clock_timestamp()",
+    "to_char(timestamp, text)",
+    "current_database()",
+    "pg_get_functiondef(oid)",
+    "has_function_privilege",
+    "has_table_privilege",
+    "to_regprocedure",
+    "to_regclass"
+  ],
+  "advisory_lock_namespaces": {
+    "87421031": "per job_id (run_partition_job_scheduled, reconcile_missed_partition_job)",
+    "87421032": "per target (schema.table) — scheduled AND manual CREATE/DROP"
+  },
+  "extensions": {
+    "required": [],
+    "optional": [
+      "pgagent (job listing / Convert page only)"
+    ]
+  }
+}

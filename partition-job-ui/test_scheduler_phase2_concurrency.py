@@ -527,9 +527,21 @@ class TargetAdvisoryLockSqlTests(unittest.TestCase):
         self.assertNotIn("CASCADE", text)
 
     def test_canonical_matches_migration_behaviour(self) -> None:
+        # Canonical body now tracks the latest migration (Phase 5A). The Phase 2
+        # migration stays historical and still carries the target-lock logic.
+        latest_path = os.path.join(
+            os.path.dirname(__file__),
+            "sql",
+            "migrations",
+            # Latest migration that redefines the scheduled executor (Phase 5C).
+            "20261117_02_target_aware_executors.sql",
+        )
+        with open(latest_path, encoding="utf-8") as handle:
+            latest = handle.read()
         canon_fn = _extract_scheduled_fn(self._canonical())
-        mig_fn = _extract_scheduled_fn(self._migration())
+        mig_fn = _extract_scheduled_fn(latest)
         self.assertEqual(canon_fn, mig_fn)
+        self.assertIn("87421032", _extract_scheduled_fn(self._migration()))
 
     def test_lock_order_job_then_row_then_target(self) -> None:
         fn = _extract_scheduled_fn(self._canonical())

@@ -101,8 +101,9 @@ class OccurrenceAdvancementSqlContractTests(unittest.TestCase):
     def test_migration_matches_canonical_function_body(self) -> None:
         """Latest scheduled-run migration body must match canonical SQL.
 
-        Phase 0 migration (20261007_01) remains historical and is superseded by
-        Phase 2 (20261013_01) for the live function body — do not rewrite Phase 0.
+        Phase 0 migration (20261007_01) and Phase 2 (20261013_01) remain
+        historical; the live function body is now Phase 5A (20261110_02) —
+        do not rewrite historical migrations.
         """
         root = os.path.dirname(__file__)
         with open(
@@ -113,7 +114,8 @@ class OccurrenceAdvancementSqlContractTests(unittest.TestCase):
             root,
             "sql",
             "migrations",
-            "20261013_01_scheduled_target_advisory_lock.sql",
+            # Latest migration that redefines the scheduled executor (Phase 5C).
+            "20261117_02_target_aware_executors.sql",
         )
         with open(mig_path, encoding="utf-8") as handle:
             migration = handle.read()
@@ -504,7 +506,23 @@ class CircuitBreakerBoundTests(unittest.TestCase):
     def test_handled_status_policy(self) -> None:
         self.assertEqual(
             _HANDLED_OCCURRENCE_STATUSES,
-            frozenset({"EXECUTED", "FAILED", "FAILED_INVALID_SCHEDULE"}),
+            frozenset(
+                {
+                    "EXECUTED",
+                    "FAILED",
+                    "FAILED_INVALID_SCHEDULE",
+                    # Phase 5A: committed reconciliation (no DDL; next advanced).
+                    "MISSED_RESCHEDULED",
+                    "MISSED_INVALID_SCHEDULE",
+                    # Phase 5D remote outcomes that must never be re-dispatched
+                    # (commit confirmed / outcome unknown / already decided).
+                    "REMOTE_FINALIZE_PENDING",
+                    "REMOTE_OUTCOME_UNKNOWN",
+                    "REMOTE_NEEDS_REVIEW",
+                    "REMOTE_ALREADY_FINALIZED",
+                    "REMOTE_ALREADY_DISPATCHING",
+                }
+            ),
         )
         for status in (
             "FAILED_DATABASE",

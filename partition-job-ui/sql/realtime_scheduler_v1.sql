@@ -10,10 +10,22 @@
 --   mubasher_oms.cron_to_interval_or_next_run(text)
 --   mubasher_oms.create_any_table_partition(varchar,varchar,varchar,integer,interval)
 --   mubasher_oms.drop_any_table_partition(varchar,varchar,interval)
+--   partitioning_job_table_log.execution_duration_ms   (migration 20260929_01)
+--   mubasher_oms.partops_database_target + partops_control_target_id()
+--       (migration 20261117_01_partops_database_target.sql)
+--   mubasher_oms.partition_job_attention + helper functions
+--       partition_job_max_execution_lateness() / partition_job_config_param_allowed()
+--       (migration 20261110_01_partition_job_attention.sql)
 --
 -- This file creates ONLY:
 --   get_upcoming_partition_jobs(interval)
 --   run_partition_job_scheduled(numeric, timestamp without time zone)
+--   reconcile_missed_partition_job(numeric, timestamp without time zone, text, text)
+--
+-- Canonical function bodies. The latest scheduled-run / reconcile bodies must
+-- be identical to the latest migration that redefines them (currently
+-- sql/migrations/20261117_02_target_aware_executors.sql)
+-- (enforced by unit tests). Existing databases: apply that migration instead.
 --
 -- No LISTEN/NOTIFY. No legacy runner changes.
 -- Tables must remain empty of production-copy target rows until controlled onboarding.
@@ -139,6 +151,8 @@ BEGIN
         EXTRACT(EPOCH FROM (j.next_run_time - v_now))::double precision AS delay_seconds
     FROM mubasher_oms.partitioning_job_table AS j
     WHERE j.is_enabled IS TRUE
+      -- Phase 5C: only jobs of THIS control database are executable here.
+      AND j.database_target_id = mubasher_oms.partops_control_target_id()
       AND j.next_run_time IS NOT NULL
       AND j.next_run_time <= v_now + p_lookahead
     ORDER BY j.next_run_time ASC, j.job_id ASC;
@@ -147,7 +161,8 @@ $function$;
 
 COMMENT ON FUNCTION mubasher_oms.get_upcoming_partition_jobs(interval) IS
 'Read-only discovery of enabled partition jobs due within the lookahead window '
-'(including overdue). Used by the realtime scheduler backend. Does not mutate data.';
+'(including overdue) that target this control database (Phase 5C). Used by the '
+'realtime scheduler backend. Does not mutate data.';
 
 
 -- ----------------------------------------------------------------------------
@@ -191,7 +206,7 @@ BEGIN
     -- Transaction-scoped advisory lock (no persistent session required).
     v_lock_ok := pg_try_advisory_xact_lock(
         87421031,
-        (abs(hashtext('partition_job_scheduled:' || p_job_id::text)) % 2147483647)::integer
+        (abs(hashtext('partition_job_scheduled:' || p_job_id::text)::bigint) % 2147483647)::integer
     );
     IF NOT v_lock_ok THEN
         status := 'SKIPPED_LOCKED';
@@ -232,6 +247,23 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Phase 5C: this executor runs CREATE/DROP in THIS (control) database only.
+    -- A job assigned to another managed target must never execute here (it
+    -- would hit a same-named table in the wrong database). Remote execution
+    -- arrives with the Phase 5D dispatcher.
+    IF v_job.database_target_id IS DISTINCT FROM mubasher_oms.partops_control_target_id() THEN
+        status := 'SKIPPED_REMOTE_TARGET';
+        job_id := v_job.job_id;
+        message := format(
+            'Job targets database_target_id %s, not this control database; not executed here.',
+            v_job.database_target_id
+        );
+        next_run_time := v_job.next_run_time;
+        is_create := v_job.is_create;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
     IF v_job.next_run_time IS DISTINCT FROM p_expected_run_time THEN
         status := 'SKIPPED_RESCHEDULED';
         job_id := v_job.job_id;
@@ -260,6 +292,22 @@ BEGIN
         RETURN;
     END IF;
 
+    -- Phase 5A safety ceiling. The scheduler only calls this function for
+    -- occurrences it discovered on time ("owned"); historical occurrences go
+    -- straight to reconcile_missed_partition_job. Independently of the
+    -- caller, the database never executes an occurrence later than the
+    -- maximum execution lateness: it is recorded for DBA review and the job
+    -- moves to its first legitimate future occurrence. No worker runs here.
+    IF v_now > p_expected_run_time + mubasher_oms.partition_job_max_execution_lateness() THEN
+        RETURN QUERY
+        SELECT r.status, r.job_id, r.message, r.next_run_time, r.is_create
+          FROM mubasher_oms.reconcile_missed_partition_job(
+                   p_job_id, p_expected_run_time, 'MISSED_SCHEDULED_RUN',
+                   'Exceeded maximum execution lateness; not executed.'
+               ) AS r;
+        RETURN;
+    END IF;
+
     IF v_job.is_create IS NULL THEN
         -- Fail closed: clear next_run_time so get_upcoming cannot rediscover.
         -- Do not invent a schedule (no +1 day / frequency fallback).
@@ -285,10 +333,11 @@ BEGIN
 
     -- Target-table transaction advisory lock (namespace 87421032 — distinct from
     -- job-id lock 87421031). Serializes CREATE/DROP against the same
-    -- (table_schema, table_name) across different job_ids. Non-blocking:
-    -- SKIPPED_TARGET_LOCKED so the occurrence remains eligible for later
-    -- reconciliation. Lock order: job advisory → FOR UPDATE → validate →
-    -- target advisory → schedule calc → worker.
+    -- (table_schema, table_name) across different job_ids AND against
+    -- run_partition_job_manual (same namespace, identical key). Non-blocking:
+    -- SKIPPED_TARGET_LOCKED so the occurrence remains eligible for a later,
+    -- bounded, backed-off retry by the scheduler. Lock order: job advisory →
+    -- FOR UPDATE → validate → target advisory → schedule calc → worker.
     v_lock_ok := pg_try_advisory_xact_lock(
         87421032,
         (abs(hashtext(
@@ -296,7 +345,7 @@ BEGIN
             || COALESCE(v_job.table_schema, '')
             || '.'
             || COALESCE(v_job.table_name, '')
-        )) % 2147483647)::integer
+        )::bigint) % 2147483647)::integer
     );
     IF NOT v_lock_ok THEN
         status := 'SKIPPED_TARGET_LOCKED';
@@ -371,11 +420,18 @@ BEGIN
     v_exec_start := clock_timestamp();
 
     -- Apply db_config_para for this transaction only (is_local = true).
+    -- Every key/value must pass the PartOps allowlist (fail closed).
     BEGIN
         FOR v_cfg IN
             SELECT key, value
               FROM jsonb_each_text(COALESCE(v_job.db_config_para, '{}'::jsonb))
         LOOP
+            IF NOT mubasher_oms.partition_job_config_param_allowed(v_cfg.key, v_cfg.value) THEN
+                RAISE EXCEPTION
+                    'db_config_para parameter "%" (or its value) is not allowed by the PartOps allowlist',
+                    v_cfg.key
+                    USING ERRCODE = '22023';
+            END IF;
             PERFORM set_config(v_cfg.key, v_cfg.value, true);
         END LOOP;
     EXCEPTION
@@ -467,16 +523,238 @@ COMMENT ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp 
 'Job-id advisory lock (87421031) then target-table advisory lock (87421032). '
 'Same (table_schema, table_name) cannot run CREATE/DROP concurrently '
 '(SKIPPED_TARGET_LOCKED; non-blocking; occurrence left eligible). '
+'Phase 5A: the scheduler reconciles historical (not owned) occurrences via '
+'reconcile_missed_partition_job; as a safety ceiling this function never '
+'executes an occurrence later than partition_job_max_execution_lateness() and '
+'records it in partition_job_attention instead (MISSED_RESCHEDULED / '
+'MISSED_INVALID_SCHEDULE). '
+'db_config_para must pass partition_job_config_param_allowed. '
 'Validates a future next_run_time distinct from p_expected_run_time BEFORE '
 'CREATE/DROP. Invalid schedule fails closed (next_run_time NULL, no worker). '
 'Does not invent +1 day or frequency fallbacks. '
 'Records execution_duration_ms on SUCCESS and FAIL worker attempts. '
 'Rejects stale expected_run_time and disabled jobs before workers run. '
+'Phase 5C: jobs of other managed targets return SKIPPED_REMOTE_TARGET (never '
+'executed in this database). '
 'Does not replace run_partition_job_manual. Does not call legacy polling runners.';
 
 
 -- ----------------------------------------------------------------------------
--- 3. Least-privilege grants (role must already exist — DBA creates it)
+-- 3. Missed-occurrence reconciliation (Phase 5A; no DDL)
+-- ----------------------------------------------------------------------------
+-- Requires mubasher_oms.partition_job_attention and the helper functions from
+-- sql/migrations/20261110_01_partition_job_attention.sql.
+CREATE OR REPLACE FUNCTION mubasher_oms.reconcile_missed_partition_job(
+    p_job_id            numeric,
+    p_expected_run_time timestamp without time zone,
+    p_reason            text,
+    p_detail            text DEFAULT NULL
+)
+RETURNS TABLE (
+    status            text,
+    job_id            numeric,
+    message           text,
+    next_run_time     timestamp without time zone,
+    is_create         boolean
+)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $function$
+DECLARE
+    v_job        mubasher_oms.partitioning_job_table%ROWTYPE;
+    v_now        timestamp without time zone;
+    v_schedule   mubasher_oms.cron_schedule_result;
+    v_next       timestamp without time zone;
+    v_error      text;
+    v_reason     text;
+    v_lock_ok    boolean;
+    v_att_id     bigint;
+    v_att_state  text;
+    v_att_error  text;
+BEGIN
+    v_reason := upper(btrim(COALESCE(p_reason, '')));
+    IF v_reason NOT IN ('MISSED_SCHEDULED_RUN', 'RETRY_EXHAUSTED') THEN
+        RAISE EXCEPTION
+            'reconcile_missed_partition_job: unsupported reason %', p_reason
+            USING ERRCODE = '22023';
+    END IF;
+
+    -- Same per-job lock as run_partition_job_scheduled (re-entrant when called
+    -- from inside it in the same transaction).
+    v_lock_ok := pg_try_advisory_xact_lock(
+        87421031,
+        (abs(hashtext('partition_job_scheduled:' || p_job_id::text)::bigint) % 2147483647)::integer
+    );
+    IF NOT v_lock_ok THEN
+        status := 'SKIPPED_LOCKED';
+        job_id := p_job_id;
+        message := 'Another transaction is already processing this job_id.';
+        next_run_time := NULL;
+        is_create := NULL;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    SELECT *
+      INTO v_job
+      FROM mubasher_oms.partitioning_job_table AS j
+     WHERE j.job_id = p_job_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        status := 'NOT_FOUND';
+        job_id := p_job_id;
+        message := 'Job row does not exist.';
+        next_run_time := NULL;
+        is_create := NULL;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    v_now := clock_timestamp()::timestamp without time zone;
+
+    IF v_job.is_enabled IS NOT TRUE THEN
+        status := 'SKIPPED_DISABLED';
+        job_id := v_job.job_id;
+        message := 'Job is disabled; nothing reconciled.';
+        next_run_time := v_job.next_run_time;
+        is_create := v_job.is_create;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF v_job.next_run_time IS DISTINCT FROM p_expected_run_time THEN
+        status := 'SKIPPED_RESCHEDULED';
+        job_id := v_job.job_id;
+        message := format(
+            'Expected next_run_time %s but database has %s; nothing reconciled.',
+            p_expected_run_time,
+            v_job.next_run_time
+        );
+        next_run_time := v_job.next_run_time;
+        is_create := v_job.is_create;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF v_job.next_run_time > v_now THEN
+        status := 'SKIPPED_NOT_DUE';
+        job_id := v_job.job_id;
+        message := 'Occurrence is in the future; nothing to reconcile.';
+        next_run_time := v_job.next_run_time;
+        is_create := v_job.is_create;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Phase 5D: a remote attempt of this occurrence that may be running, whose
+    -- target commit is confirmed, or whose outcome is unknown is never
+    -- reconciled away (that would advance the schedule under in-flight DDL).
+    SELECT x.attempt_id, x.state, x.error_summary
+      INTO v_att_id, v_att_state, v_att_error
+      FROM mubasher_oms.partops_execution_attempt AS x
+     WHERE x.execution_kind = 'SCHEDULED'
+       AND x.job_id = v_job.job_id
+       AND x.expected_run_time = p_expected_run_time
+       AND x.database_target_id = v_job.database_target_id;
+    IF v_att_state IN ('DISPATCHING', 'TARGET_SUCCEEDED', 'OUTCOME_UNKNOWN') THEN
+        status := 'SKIPPED_ATTEMPT_ACTIVE';
+        job_id := v_job.job_id;
+        message := format('Remote execution attempt %s is %s; nothing reconciled.',
+                          v_att_id, v_att_state);
+        next_run_time := v_job.next_run_time;
+        is_create := v_job.is_create;
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- First legitimate FUTURE occurrence from the authoritative cron helper.
+    -- No +1 day / frequency invention.
+    BEGIN
+        v_schedule := mubasher_oms.cron_to_interval_or_next_run(v_job.job_schedule);
+        v_next := CASE
+            WHEN v_schedule.schedule_interval IS NOT NULL
+                THEN v_now + v_schedule.schedule_interval
+            WHEN v_schedule.next_run_time IS NOT NULL
+                THEN v_schedule.next_run_time
+            ELSE
+                NULL
+        END;
+    EXCEPTION
+        WHEN OTHERS THEN
+            v_next := NULL;
+            v_error := 'Cron calculation failed: ' || SQLERRM;
+    END;
+
+    IF v_next IS NOT NULL
+       AND (v_next <= v_now OR v_next <= p_expected_run_time) THEN
+        v_error := COALESCE(
+            v_error,
+            format('Schedule helper returned non-future next_run_time %s (now=%s).',
+                   v_next, v_now)
+        );
+        v_next := NULL;
+    ELSIF v_next IS NULL THEN
+        v_error := COALESCE(v_error, 'Schedule helper returned no next occurrence.');
+    END IF;
+
+    -- Evidence first. Idempotent per (job_id, missed_run_time).
+    INSERT INTO mubasher_oms.partition_job_attention (
+        job_id, job_name, table_schema, table_name, is_create,
+        reason, missed_run_time, detected_at, rescheduled_to, detail,
+        database_target_id, execution_attempt_id
+    ) VALUES (
+        v_job.job_id, v_job.job_name, v_job.table_schema, v_job.table_name,
+        v_job.is_create, v_reason, p_expected_run_time, v_now, v_next,
+        NULLIF(left(concat_ws(' ', NULLIF(btrim(COALESCE(p_detail, '')), ''), v_error,
+                              CASE WHEN v_att_error IS NOT NULL
+                                   THEN 'Last remote error: ' || v_att_error END), 1000), ''),
+        v_job.database_target_id, v_att_id
+    )
+    ON CONFLICT ON CONSTRAINT partition_job_attention_job_missed_uq DO NOTHING;
+
+    -- Advance the normal cadence. last_run_time / last_run_status are NOT
+    -- touched: no execution happened (a miss is not a FAIL).
+    UPDATE mubasher_oms.partitioning_job_table AS j
+       SET next_run_time = v_next
+     WHERE j.job_id = v_job.job_id;
+
+    -- Phase 5D: close the (never dispatched / proven rolled back) attempt.
+    IF v_att_id IS NOT NULL THEN
+        PERFORM mubasher_oms.partops_remote_close_attempt(v_att_id, v_reason);
+    END IF;
+
+    job_id := v_job.job_id;
+    next_run_time := v_next;
+    is_create := v_job.is_create;
+    IF v_next IS NULL THEN
+        status := 'MISSED_INVALID_SCHEDULE';
+        message := 'Missed occurrence recorded for review and NOT executed. '
+                   || 'No valid future schedule: next_run_time cleared (fail closed). '
+                   || COALESCE(v_error, '');
+    ELSE
+        status := 'MISSED_RESCHEDULED';
+        message := format(
+            'Missed occurrence %s recorded for review and NOT executed. '
+            'Next scheduled run: %s.',
+            p_expected_run_time, v_next
+        );
+    END IF;
+    RETURN NEXT;
+END;
+$function$;
+
+COMMENT ON FUNCTION mubasher_oms.reconcile_missed_partition_job(
+    numeric, timestamp without time zone, text, text
+) IS
+'Phase 5A: record a not-executed scheduled occurrence in partition_job_attention '
+'and advance next_run_time to the first future occurrence (fail closed to NULL). '
+'Never runs CREATE/DROP and never changes last_run_time/last_run_status. '
+'Phase 5C: other managed targets return SKIPPED_REMOTE_TARGET.';
+
+
+-- ----------------------------------------------------------------------------
+-- 4. Least-privilege grants (role must already exist — DBA creates it)
 -- ----------------------------------------------------------------------------
 -- Do NOT GRANT ALL. Do NOT grant DDL over existing business tables here.
 -- Production table onboarding is a separate controlled DBA action.
@@ -493,6 +771,7 @@ BEGIN
     EXECUTE 'GRANT USAGE ON SCHEMA mubasher_oms TO partition_job_scheduler';
     EXECUTE 'GRANT EXECUTE ON FUNCTION mubasher_oms.get_upcoming_partition_jobs(interval) TO partition_job_scheduler';
     EXECUTE 'GRANT EXECUTE ON FUNCTION mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone) TO partition_job_scheduler';
+    EXECUTE 'GRANT EXECUTE ON FUNCTION mubasher_oms.reconcile_missed_partition_job(numeric, timestamp without time zone, text, text) TO partition_job_scheduler';
     EXECUTE 'GRANT SELECT ON mubasher_oms.partitioning_job_table TO partition_job_scheduler';
     EXECUTE 'GRANT UPDATE (last_run_time, last_run_status, next_run_time) ON mubasher_oms.partitioning_job_table TO partition_job_scheduler';
     EXECUTE 'GRANT INSERT ON mubasher_oms.partitioning_job_table_log TO partition_job_scheduler';
@@ -510,14 +789,15 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
--- 4. Verification
+-- 5. Verification
 -- ----------------------------------------------------------------------------
 SELECT proname, pg_get_function_identity_arguments(oid) AS args
   FROM pg_proc
  WHERE pronamespace = 'mubasher_oms'::regnamespace
    AND proname IN (
          'get_upcoming_partition_jobs',
-         'run_partition_job_scheduled'
+         'run_partition_job_scheduled',
+         'reconcile_missed_partition_job'
        )
  ORDER BY 1;
 
@@ -527,6 +807,7 @@ COMMIT;
 -- ----------------------------------------------------------------------------
 -- ROLLBACK NOTES (NEW realtime objects only)
 -- ----------------------------------------------------------------------------
+--   DROP FUNCTION IF EXISTS mubasher_oms.reconcile_missed_partition_job(numeric, timestamp without time zone, text, text);
 --   DROP FUNCTION IF EXISTS mubasher_oms.run_partition_job_scheduled(numeric, timestamp without time zone);
 --   DROP FUNCTION IF EXISTS mubasher_oms.get_upcoming_partition_jobs(interval);
 --

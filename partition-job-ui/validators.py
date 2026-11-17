@@ -81,6 +81,95 @@ def validate_table_name(table_name: str) -> str:
     return _validate_identifier(table_name, "Table Name")
 
 
+# ---------------------------------------------------------------------------
+# db_config_para allowlist (Phase 5A).
+#
+# Every key is applied by the database with set_config(key, value, true) inside
+# run_partition_job_scheduled / run_partition_job_manual, so only performance /
+# timeout session parameters are accepted. Identity- or resolution-changing
+# settings (role, session_authorization, search_path, ...) are never allowed.
+#
+# MUST stay identical to mubasher_oms.partition_job_config_param_allowed() in
+# sql/migrations/20261110_01_partition_job_attention.sql (unit-tested).
+# ---------------------------------------------------------------------------
+ALLOWED_DB_CONFIG_PARAMETERS = frozenset(
+    {
+        "lock_timeout",
+        "statement_timeout",
+        "idle_in_transaction_session_timeout",
+        "work_mem",
+        "maintenance_work_mem",
+        "effective_io_concurrency",
+        "random_page_cost",
+        "max_parallel_maintenance_workers",
+        # Value-restricted: ISO output only (legacy routines use 'ISO, DMY').
+        # Non-ISO styles such as 'Redwood, SHOW_TIME' break psycopg timestamp
+        # parsing and historically triggered the scheduler retry loop.
+        "datestyle",
+    }
+)
+DB_CONFIG_VALUE_MAX_LENGTH = 64
+_DB_CONFIG_VALUE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]*$")
+_DATESTYLE_VALUE_RE = re.compile(
+    r"^\s*iso\s*(,\s*(dmy|mdy|ymd)\s*)?$", re.IGNORECASE
+)
+
+
+def is_allowed_db_config_parameter(key: str, value: str) -> bool:
+    """Python mirror of partition_job_config_param_allowed(key, value)."""
+    if key is None or value is None:
+        return False
+    name = str(key).strip().lower()
+    text = str(value)
+    if len(text) < 1 or len(text) > DB_CONFIG_VALUE_MAX_LENGTH:
+        return False
+    if name == "datestyle":
+        return bool(_DATESTYLE_VALUE_RE.match(text))
+    if name in ALLOWED_DB_CONFIG_PARAMETERS:
+        return bool(_DB_CONFIG_VALUE_RE.match(text))
+    return False
+
+
+def validate_db_config_parameters(config: dict[str, Any]) -> dict[str, Any]:
+    """Reject unsupported db_config_para keys/values with a clear message.
+
+    Keys are normalised to lower case (PostgreSQL GUC names are
+    case-insensitive). Values must be strings or numbers.
+    """
+    normalised: dict[str, Any] = {}
+    for raw_key, value in config.items():
+        key = str(raw_key).strip().lower()
+        if not key:
+            raise ValidationError("Database Configuration contains an empty parameter name.")
+        if key in normalised:
+            raise ValidationError(
+                f"Database Configuration parameter '{key}' is specified more than once."
+            )
+        if key not in ALLOWED_DB_CONFIG_PARAMETERS:
+            allowed = ", ".join(sorted(ALLOWED_DB_CONFIG_PARAMETERS))
+            raise ValidationError(
+                f"Database Configuration parameter '{raw_key}' is not supported. "
+                f"Allowed parameters: {allowed}."
+            )
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            raise ValidationError(
+                f"Database Configuration parameter '{key}' must be a string or number."
+            )
+        if not is_allowed_db_config_parameter(key, str(value)):
+            if key == "datestyle":
+                raise ValidationError(
+                    "Database Configuration 'datestyle' must use ISO output "
+                    "(for example 'ISO, DMY' or 'ISO, MDY')."
+                )
+            raise ValidationError(
+                f"Database Configuration value for '{key}' is not valid. Use a plain "
+                "value such as '30s', '512MB' or 4 (max "
+                f"{DB_CONFIG_VALUE_MAX_LENGTH} characters)."
+            )
+        normalised[key] = value
+    return normalised
+
+
 def validate_db_config_json(raw: str) -> dict[str, Any]:
     text = trim_text(raw)
     if not text:
@@ -95,7 +184,7 @@ def validate_db_config_json(raw: str) -> dict[str, Any]:
         raise ValidationError(
             "Database Configuration must be a JSON object (not an array, string, number, boolean, or null)."
         )
-    return parsed
+    return validate_db_config_parameters(parsed)
 
 
 def validate_cron_schedule(schedule: str) -> str:

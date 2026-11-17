@@ -1,24 +1,67 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { OctagonAlert } from "lucide-react";
 import { PageHeader } from "@/components/shell/page-header";
+import { useHub } from "@/components/hub/hub-context";
+import { AttemptSheet, attemptTable } from "@/components/attempts/attempt-review";
+import { AttemptStateBadge, TargetBadge } from "@/components/targets/target-badges";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Select } from "@/components/ui/input";
+import { Panel, PanelHeader } from "@/components/ui/panel";
 import { Sheet } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
 import { formatDurationMs, formatWhen, isFailStatus, isSuccessStatus } from "@/lib/format";
-import type { JobLog } from "@/lib/types";
+import { attemptResultLabel, redactText, resolveTarget, safeText } from "@/lib/targets";
+import type { ExecutionAttempt, JobLog } from "@/lib/types";
+
+/** History statuses written by the local and remote executors. */
+const HISTORY_STATUSES = [
+  "SUCCESS",
+  "FAIL",
+  "MANUAL_SUCCESS",
+  "MANUAL_FAIL",
+  "OUTCOME_UNKNOWN",
+  "MANUAL_OUTCOME_UNKNOWN",
+  "RESOLVED_APPLIED",
+  "RESOLVED_NOT_APPLIED",
+] as const;
+
+function logTone(status?: string | null) {
+  const s = (status || "").toUpperCase();
+  if (s.includes("OUTCOME_UNKNOWN")) return "error" as const;
+  if (isFailStatus(s)) return "fail" as const;
+  if (isSuccessStatus(s)) return "ok" as const;
+  return "mute" as const;
+}
 
 export default function HistoryPage() {
+  const { targets } = useHub();
   const [logs, setLogs] = useState<JobLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobFilter, setJobFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
+  const [targetFilter, setTargetFilter] = useState("All");
   const [selected, setSelected] = useState<JobLog | null>(null);
+  const [attempts, setAttempts] = useState<ExecutionAttempt[]>([]);
+  const [attemptsAvailable, setAttemptsAvailable] = useState(true);
+  const [showFinalized, setShowFinalized] = useState(false);
+  const [attemptId, setAttemptId] = useState<number | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function loadAttempts(all: boolean) {
+    try {
+      const res = await api.attempts({ open: !all, limit: all ? 200 : 100 });
+      setAttempts(res.attempts || []);
+      setAttemptsAvailable(res.available);
+    } catch {
+      setAttempts([]);
+    }
+  }
 
   async function load(opts?: { refresh?: boolean }) {
     const isRefresh = Boolean(opts?.refresh);
@@ -26,10 +69,10 @@ export default function HistoryPage() {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     try {
-      const res = await api.logs(100);
+      const [res] = await Promise.all([api.logs(200), loadAttempts(showFinalized)]);
       setLogs(res.logs || []);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Failed to load history");
+      setError(err instanceof ApiError ? safeText(err.message) : "Failed to load history");
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -38,12 +81,20 @@ export default function HistoryPage() {
 
   useEffect(() => {
     void load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    void loadAttempts(showFinalized);
+  }, [showFinalized]);
 
   const filtered = useMemo(() => {
     return logs.filter((row) => {
-      if (statusFilter !== "All" && String(row.last_run_status || "") !== statusFilter)
-        return false;
+      if (statusFilter !== "All" && String(row.last_run_status || "") !== statusFilter) return false;
+      if (targetFilter !== "All") {
+        const key = row.target_key || resolveTarget(row.database_target_id, targets)?.target_key || "";
+        if (key !== targetFilter) return false;
+      }
       if (jobFilter.trim()) {
         const wanted = Number(jobFilter);
         if (!Number.isNaN(wanted) && row.job_id !== wanted) return false;
@@ -54,13 +105,22 @@ export default function HistoryPage() {
       }
       return true;
     });
-  }, [logs, jobFilter, statusFilter]);
+  }, [logs, jobFilter, statusFilter, targetFilter, targets]);
+
+  const visibleAttempts = useMemo(
+    () =>
+      attempts.filter(
+        (a) => targetFilter === "All" || a.target_key === targetFilter,
+      ),
+    [attempts, targetFilter],
+  );
+  const unknown = visibleAttempts.filter((a) => String(a.state).toUpperCase() === "OUTCOME_UNKNOWN");
 
   return (
     <div className="pj-enter space-y-3">
       <PageHeader
         title="History"
-        subtitle="Recent partition job executions."
+        subtitle="Executions on every database target of this hub, and remote execution attempts."
         showActions={false}
       />
 
@@ -70,17 +130,33 @@ export default function HistoryPage() {
           placeholder="Filter by job id or name"
           value={jobFilter}
           onChange={(e) => setJobFilter(e.target.value)}
+          aria-label="Filter by job id or name"
         />
+        {(targets || []).length > 1 ? (
+          <Select
+            className="w-32"
+            value={targetFilter}
+            onChange={(e) => setTargetFilter(e.target.value)}
+            aria-label="Database target filter"
+          >
+            <option value="All">All targets</option>
+            {(targets || []).map((t) => (
+              <option key={t.target_id} value={t.target_key}>
+                {t.target_key.toUpperCase()}
+              </option>
+            ))}
+          </Select>
+        ) : null}
         <Select
-          className="w-48"
+          className="w-52"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
+          aria-label="Status filter"
         >
           <option>All</option>
-          <option>SUCCESS</option>
-          <option>FAIL</option>
-          <option>MANUAL_SUCCESS</option>
-          <option>MANUAL_FAIL</option>
+          {HISTORY_STATUSES.map((s) => (
+            <option key={s}>{s}</option>
+          ))}
         </Select>
         <Button
           variant="secondary"
@@ -99,6 +175,27 @@ export default function HistoryPage() {
         </Button>
       </div>
 
+      {notice ? (
+        <p className="text-[12px] font-semibold text-[var(--success-fg)]" role="status">{notice}</p>
+      ) : null}
+
+      {unknown.length ? (
+        <div
+          role="alert"
+          className="rounded-[6px] border-2 border-[var(--error-fg)] bg-[var(--error-bg)] px-3 py-2.5 text-[12px]"
+        >
+          <div className="flex items-center gap-1.5 font-semibold text-[var(--error-fg)]">
+            <OctagonAlert className="h-4 w-4" aria-hidden />
+            {unknown.length} execution outcome{unknown.length === 1 ? "" : "s"} unknown
+          </div>
+          <p className="mt-0.5 text-[var(--content-primary)]">
+            PartOps cannot confirm whether the target database committed these operations. Do not run
+            the jobs again until the target state has been inspected. Open an attempt to record the
+            inspection result.
+          </p>
+        </div>
+      ) : null}
+
       {loading && !logs.length ? (
         <div className="flex items-center gap-2 py-6" aria-busy="true" role="status">
           <PartOpsLoader size="md" label="Loading history…" />
@@ -107,57 +204,71 @@ export default function HistoryPage() {
 
       {error ? <p className="text-sm font-semibold text-[var(--error-fg)]">{error}</p> : null}
 
-      <div className="overflow-hidden rounded-card border border-pj-line bg-pj-card">
+      <div className="overflow-x-auto rounded-card border border-pj-line bg-pj-card">
         <table className="w-full text-left text-xs">
+          <caption className="sr-only">Execution history</caption>
           <thead className="bg-pj-table-head text-[0.62rem] uppercase tracking-[0.08em] text-pj-muted">
             <tr>
               <th className="px-3 py-2.5">Time</th>
+              <th className="px-3 py-2.5">Target</th>
               <th className="px-3 py-2.5">Job</th>
               <th className="px-3 py-2.5">Status</th>
               <th className="px-3 py-2.5">Duration</th>
               <th className="px-3 py-2.5">Error</th>
-              <th className="px-3 py-2.5">Actions</th>
+              <th className="px-3 py-2.5">Details</th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((row) => {
-              const fail = isFailStatus(row.last_run_status);
-              const ok = isSuccessStatus(row.last_run_status);
+              const target = resolveTarget(row.database_target_id, targets);
               return (
                 <tr key={row.job_log_id} className="border-t border-pj-line">
-                  <td className="px-3 py-2.5 tabular-nums">{formatWhen(row.job_runtime)}</td>
+                  <td className="whitespace-nowrap px-3 py-2.5 tabular-nums">{formatWhen(row.job_runtime)}</td>
+                  <td className="px-3 py-2.5">
+                    <TargetBadge
+                      target={target || (row.target_key ? { target_key: row.target_key, is_control_database: false, display_name: row.target_key } : null)}
+                      fallbackId={row.database_target_id ?? null}
+                    />
+                  </td>
                   <td className="px-3 py-2.5">
                     <div className="font-bold">{row.job_name || `Job ${row.job_id}`}</div>
                     <div className="text-[0.65rem] text-pj-muted">#{row.job_id}</div>
                   </td>
                   <td className="px-3 py-2.5">
-                    <Badge tone={fail ? "fail" : ok ? "ok" : "mute"}>
-                      {row.last_run_status || "—"}
-                    </Badge>
+                    <Badge tone={logTone(row.last_run_status)}>{row.last_run_status || "—"}</Badge>
                   </td>
                   <td className="px-3 py-2.5 tabular-nums font-semibold text-[var(--content-secondary)]">
-                    {row.execution_duration_ms == null
-                      ? "—"
-                      : formatDurationMs(row.execution_duration_ms)}
+                    {row.execution_duration_ms == null ? "—" : formatDurationMs(row.execution_duration_ms)}
                   </td>
-                  <td className="max-w-md truncate px-3 py-2.5 text-pj-muted">
-                    {row.job_error ? String(row.job_error).slice(0, 120) : "—"}
+                  <td className="max-w-[240px] truncate px-3 py-2.5 text-pj-muted" title={safeText(row.job_error)}>
+                    {row.job_error ? safeText(row.job_error).slice(0, 120) : "—"}
                   </td>
-                  <td className="px-3 py-2.5">
-                    {row.job_error ? (
-                      <Button variant="secondary" size="sm" onClick={() => setSelected(row)}>
-                        View details
-                      </Button>
-                    ) : (
-                      "—"
-                    )}
+                  <td className="whitespace-nowrap px-3 py-2.5">
+                    <div className="flex gap-1.5">
+                      {row.execution_attempt_id != null ? (
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => setAttemptId(row.execution_attempt_id ?? null)}
+                          aria-label={`Open execution attempt ${row.execution_attempt_id}`}
+                        >
+                          Attempt #{row.execution_attempt_id}
+                        </Button>
+                      ) : null}
+                      {row.job_error ? (
+                        <Button variant="ghost" size="sm" onClick={() => setSelected(row)}>
+                          Error
+                        </Button>
+                      ) : null}
+                      {row.execution_attempt_id == null && !row.job_error ? "—" : null}
+                    </div>
                   </td>
                 </tr>
               );
             })}
-            {!filtered.length ? (
+            {!filtered.length && !loading ? (
               <tr>
-                <td colSpan={6} className="px-3 py-10 text-center text-pj-muted">
+                <td colSpan={7} className="px-3 py-10 text-center text-pj-muted">
                   No execution history rows match.
                 </td>
               </tr>
@@ -165,6 +276,99 @@ export default function HistoryPage() {
           </tbody>
         </table>
       </div>
+
+      <Panel>
+        <PanelHeader
+          title="Remote execution attempts"
+          description={
+            showFinalized
+              ? "Recent attempts on managed targets (control-database ledger), including finalized ones."
+              : "Attempts that are still open — in flight, awaiting finalization, retrying, or with an unknown outcome."
+          }
+          actions={
+            <label className="flex items-center gap-1.5 text-[11px] text-[var(--content-secondary)]">
+              <input
+                type="checkbox"
+                checked={showFinalized}
+                onChange={(e) => setShowFinalized(e.target.checked)}
+              />
+              Include finalized
+            </label>
+          }
+        />
+        {!attemptsAvailable ? (
+          <p className="px-3 py-3 text-[12px] text-[var(--content-secondary)]">
+            Remote execution is not installed on this database (migrations 20261117_03/04).
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-[12px]">
+              <caption className="sr-only">Remote execution attempts</caption>
+              <thead className="bg-[var(--surface-tertiary)] text-[11px] text-[var(--content-secondary)]">
+                <tr>
+                  <th className="px-3 py-1.5 font-medium">Attempt</th>
+                  <th className="px-3 py-1.5 font-medium">Target</th>
+                  <th className="px-3 py-1.5 font-medium">Job</th>
+                  <th className="px-3 py-1.5 font-medium">Operation</th>
+                  <th className="px-3 py-1.5 font-medium">Schema.table</th>
+                  <th className="px-3 py-1.5 font-medium">State</th>
+                  <th className="px-3 py-1.5 font-medium">Result</th>
+                  <th className="px-3 py-1.5 font-medium">Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[...unknown, ...visibleAttempts.filter((a) => !unknown.includes(a))].map((a) => {
+                  const isUnknown = String(a.state).toUpperCase() === "OUTCOME_UNKNOWN";
+                  return (
+                    <tr
+                      key={a.attempt_id}
+                      className={`cursor-pointer border-t border-[var(--border-default)] hover:bg-[var(--hover-surface-1)] ${
+                        isUnknown ? "bg-[var(--error-bg)] shadow-[inset_3px_0_0_var(--error-fg)]" : ""
+                      }`}
+                      onClick={() => setAttemptId(a.attempt_id)}
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setAttemptId(a.attempt_id);
+                        }
+                      }}
+                      aria-label={`Open execution attempt ${a.attempt_id}`}
+                    >
+                      <td className="px-3 py-1.5 font-mono text-[11px]">#{a.attempt_id}</td>
+                      <td className="px-3 py-1.5">
+                        <TargetBadge target={resolveTarget(a.database_target_id, targets)} fallbackId={a.database_target_id} />
+                      </td>
+                      <td className="px-3 py-1.5">
+                        {a.job_name || "Job"} <span className="text-[var(--content-tertiary)]">#{a.job_id}</span>
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <Badge tone={a.operation === "DROP" ? "drop" : "create"}>{a.operation}</Badge>
+                        <span className="ml-1 text-[11px] text-[var(--content-tertiary)]">{a.execution_kind.toLowerCase()}</span>
+                      </td>
+                      <td className="max-w-[200px] truncate px-3 py-1.5 font-mono text-[11px]" title={attemptTable(a)}>
+                        {attemptTable(a)}
+                      </td>
+                      <td className="px-3 py-1.5"><AttemptStateBadge state={a.state} /></td>
+                      <td className="px-3 py-1.5 text-[var(--content-secondary)]">{attemptResultLabel(a.result)}</td>
+                      <td className="whitespace-nowrap px-3 py-1.5 tabular-nums text-[var(--content-secondary)]">
+                        {formatWhen(a.updated_at)}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {!visibleAttempts.length ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-4 text-center text-[var(--content-tertiary)]">
+                      {showFinalized ? "No remote execution attempts recorded." : "No open remote execution attempts."}
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
 
       <Sheet
         open={Boolean(selected)}
@@ -174,7 +378,7 @@ export default function HistoryPage() {
             ? `${selected.job_name || `Job ${selected.job_id}`} · ${selected.last_run_status}`
             : "Error"
         }
-        description="Database error from partitioning_job_table_log"
+        description="Error recorded in partitioning_job_table_log"
         wide
       >
         <div className="space-y-3 text-xs">
@@ -189,10 +393,19 @@ export default function HistoryPage() {
             </div>
           </div>
           <pre className="whitespace-pre-wrap rounded-xl border border-[var(--border-default)] bg-[var(--info-bg)] p-3 font-mono text-xs text-[var(--info-fg)]">
-            {selected?.job_error}
+            {redactText(selected?.job_error)}
           </pre>
         </div>
       </Sheet>
+
+      <AttemptSheet
+        attemptId={attemptId}
+        onClose={() => setAttemptId(null)}
+        onChanged={(m) => {
+          setNotice(m);
+          void load({ refresh: true });
+        }}
+      />
     </div>
   );
 }

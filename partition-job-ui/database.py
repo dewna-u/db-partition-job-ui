@@ -10,7 +10,7 @@ from typing import Any, Generator, Optional
 
 from dotenv import load_dotenv
 from psycopg import Connection, Error as PsycopgError
-from psycopg.errors import UndefinedColumn
+from psycopg.errors import UndefinedColumn, UndefinedFunction, UndefinedTable
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -57,6 +57,15 @@ DEFAULT_PARTITION_JOB_TABLE = "partitioning_job_table"
 DEFAULT_PARTITION_JOB_LOG_TABLE = "partitioning_job_table_log"
 DEFAULT_PARTITION_JOB_SEQUENCE = "seq_partitioning_job_id"
 DEFAULT_MANUAL_RUN_FUNCTION = "run_partition_job_manual"
+DEFAULT_PARTITION_JOB_ATTENTION_TABLE = "partition_job_attention"
+DEFAULT_ATTENTION_RECOVERY_FUNCTION = "run_partition_job_attention_recovery"
+DEFAULT_ATTENTION_ACKNOWLEDGE_FUNCTION = "acknowledge_partition_job_attention"
+
+# Attention item lifecycle (Phase 5A; mirrors the table CHECK constraint).
+ATTENTION_STATUS_PENDING = "PENDING_REVIEW"
+ATTENTION_STATUSES = frozenset(
+    {ATTENTION_STATUS_PENDING, "MANUALLY_RERUN", "ACKNOWLEDGED"}
+)
 
 # The two generic scanners that replace per-table pgAgent jobs. The application
 # only ever *detects* these; it never creates pgAgent jobs.
@@ -154,6 +163,8 @@ SELECT
     j.is_create,
     j.create_drop_interval,
     j.job_schedule,
+    -- Phase 5C: works before and after migration 20261117_01.
+    (to_jsonb(j) ->> 'database_target_id')::integer AS database_target_id,
     (
         SELECT l.execution_duration_ms
           FROM {schema}.{log_table} AS l
@@ -187,8 +198,9 @@ SELECT
     partition_period,
     is_create,
     create_drop_interval,
-    job_schedule
-FROM {schema}.{table}
+    job_schedule,
+    (to_jsonb(j) ->> 'database_target_id')::integer AS database_target_id
+FROM {schema}.{table} AS j
 ORDER BY job_id DESC;
 """
 
@@ -209,6 +221,8 @@ SELECT
     j.is_create,
     j.create_drop_interval,
     j.job_schedule,
+    -- Phase 5C: works before and after migration 20261117_01.
+    (to_jsonb(j) ->> 'database_target_id')::integer AS database_target_id,
     (
         SELECT l.execution_duration_ms
           FROM {schema}.{log_table} AS l
@@ -242,8 +256,9 @@ SELECT
     partition_period,
     is_create,
     create_drop_interval,
-    job_schedule
-FROM {schema}.{table}
+    job_schedule,
+    (to_jsonb(j) ->> 'database_target_id')::integer AS database_target_id
+FROM {schema}.{table} AS j
 WHERE job_id = %(job_id)s;
 """
 
@@ -255,8 +270,10 @@ SELECT
     last_run_status,
     job_runtime,
     job_error,
-    execution_duration_ms
-FROM {schema}.{table}
+    execution_duration_ms,
+    (to_jsonb(l) ->> 'database_target_id')::integer AS database_target_id,
+    (to_jsonb(l) ->> 'execution_attempt_id')::bigint AS execution_attempt_id
+FROM {schema}.{table} AS l
 ORDER BY job_runtime DESC
 LIMIT %(row_limit)s;
 """
@@ -280,6 +297,51 @@ LIMIT %(row_limit)s;
 _RUN_PARTITION_JOB_MANUAL_SQL_TEMPLATE = """
 SELECT status, message, execution_duration_ms
   FROM {schema}.{function}(%(job_id)s);
+"""
+
+# Missed-run attention items (Phase 5A) joined with the CURRENT job row so the
+# UI can show the already-advanced normal schedule next to the missed time.
+_ATTENTION_LIST_SQL_TEMPLATE = """
+SELECT
+    a.attention_id,
+    a.job_id,
+    a.job_name,
+    a.table_schema,
+    a.table_name,
+    a.is_create,
+    a.reason,
+    a.missed_run_time,
+    a.detected_at,
+    a.rescheduled_to,
+    a.detail,
+    a.status,
+    a.reviewed_at,
+    a.resolution,
+    a.manual_execution_result,
+    a.manual_execution_message,
+    a.manual_execution_duration_ms,
+    a.manual_executed_at,
+    (to_jsonb(a) ->> 'database_target_id')::integer AS database_target_id,
+    (to_jsonb(a) ->> 'execution_attempt_id')::bigint AS execution_attempt_id,
+    j.next_run_time AS current_next_run_time,
+    j.is_enabled    AS job_is_enabled
+FROM {schema}.{attention_table} AS a
+LEFT JOIN {schema}.{table} AS j ON j.job_id = a.job_id
+WHERE (%(status)s::text IS NULL OR a.status = %(status)s::text)
+  AND (%(attention_id)s::bigint IS NULL OR a.attention_id = %(attention_id)s::bigint)
+ORDER BY a.detected_at DESC, a.attention_id DESC
+LIMIT %(row_limit)s;
+"""
+
+_ATTENTION_RECOVERY_SQL_TEMPLATE = """
+SELECT result_status, result_message, result_duration_ms,
+       attention_status, attention_job_id
+  FROM {schema}.{function}(%(attention_id)s);
+"""
+
+_ATTENTION_ACKNOWLEDGE_SQL_TEMPLATE = """
+SELECT attention_status, attention_job_id, acknowledged_at
+  FROM {schema}.{function}(%(attention_id)s, %(note)s);
 """
 
 # Read-only privilege introspection. to_reg* keeps the check safe when an object
@@ -435,6 +497,18 @@ class PgAgentNotInstalledError(DatabaseError):
     """Raised when pgagent.pga_job is not present."""
 
 
+class DatabaseConflictError(DatabaseError):
+    """The request conflicts with current database state (HTTP 409).
+
+    Examples: target table busy (MANUAL_TARGET_LOCKED), attention item already
+    reviewed or being processed concurrently.
+    """
+
+
+class DatabaseNotFoundError(DatabaseError):
+    """The referenced row does not exist (HTTP 404)."""
+
+
 def _require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -572,6 +646,40 @@ def build_run_partition_job_manual_sql() -> str:
     )
 
 
+def partition_job_attention_table_name() -> str:
+    return _configured_identifier(
+        "PARTITION_JOB_ATTENTION_TABLE", DEFAULT_PARTITION_JOB_ATTENTION_TABLE
+    )
+
+
+def build_attention_list_sql() -> str:
+    return _ATTENTION_LIST_SQL_TEMPLATE.format(
+        schema=partition_job_schema(),
+        attention_table=partition_job_attention_table_name(),
+        table=partition_job_table_name(),
+    )
+
+
+def build_attention_recovery_sql() -> str:
+    return _ATTENTION_RECOVERY_SQL_TEMPLATE.format(
+        schema=partition_job_schema(),
+        function=_configured_identifier(
+            "PARTITION_ATTENTION_RECOVERY_FUNCTION",
+            DEFAULT_ATTENTION_RECOVERY_FUNCTION,
+        ),
+    )
+
+
+def build_attention_acknowledge_sql() -> str:
+    return _ATTENTION_ACKNOWLEDGE_SQL_TEMPLATE.format(
+        schema=partition_job_schema(),
+        function=_configured_identifier(
+            "PARTITION_ATTENTION_ACKNOWLEDGE_FUNCTION",
+            DEFAULT_ATTENTION_ACKNOWLEDGE_FUNCTION,
+        ),
+    )
+
+
 def _main_db_kwargs() -> dict[str, Any]:
     """Connection kwargs for the main database (partition function)."""
     try:
@@ -701,6 +809,14 @@ def _map_psycopg_error(exc: PsycopgError) -> DatabaseError:
         or "no diagnostics available",
     )
 
+    # 55006 object_in_use — Phase 5D job configuration guard (remote attempt
+    # in flight or unresolved). The message is ours and safe to show.
+    if sqlstate == "55006":
+        primary = getattr(getattr(exc, "diag", None), "message_primary", None)
+        text = (primary or "").strip().split("\n")[0][:400]
+        return DatabaseConflictError(
+            text or "The job has a remote execution in progress or unresolved; try again later."
+        )
     # 42501 insufficient_privilege — the only genuine permission classification.
     if sqlstate == "42501":
         return DatabaseError(
@@ -900,7 +1016,7 @@ def get_pgagent_jobs() -> list[dict]:
             return [dict(row) for row in rows]
 
 
-def create_partition_job(data: dict) -> Any:
+def create_partition_job(data: dict, database_target_id: Optional[int] = None) -> Any:
     """
     Call the partition-job insert function and return its result.
 
@@ -925,11 +1041,31 @@ def create_partition_job(data: dict) -> Any:
     }
 
     statement = build_create_partition_job_sql()
+    if database_target_id is None:
+        database_target_id = data.get("database_target_id")
 
     with _connection(_main_db_kwargs) as conn:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    if database_target_id is not None:
+                        # Phase 5D: the legacy insert function is unaware of
+                        # targets; the BEFORE INSERT hook validates and applies
+                        # this transaction-local request. Refuse if the hook is
+                        # missing (the job would silently land on the control DB).
+                        cur.execute(
+                            "SELECT to_regprocedure(%(fn)s) IS NOT NULL",
+                            {"fn": f"{partition_job_schema()}.fn_partops_job_target_on_insert()"},
+                        )
+                        if not cur.fetchone()[0]:
+                            raise DatabaseConflictError(
+                                "Creating jobs on another database target requires "
+                                "migration 20261117_03."
+                            )
+                        cur.execute(
+                            "SELECT set_config('partops.requested_target_id', %(t)s, true)",
+                            {"t": str(int(database_target_id))},
+                        )
                     cur.execute(statement, params)
                     # A void-returning function still produces one row holding
                     # NULL; a statement with no result set must not raise here.
@@ -1587,7 +1723,7 @@ def get_partition_job_logs(limit: int = 100) -> list[dict]:
             raise _map_psycopg_error(exc) from None
 
 
-def update_partition_job(job_id: Any, data: dict) -> Any:
+def update_partition_job(job_id: Any, data: dict, new_target_id: Optional[int] = None) -> Any:
     """
     Update an existing partition-job configuration via the approved DB function.
 
@@ -1615,6 +1751,13 @@ def update_partition_job(job_id: Any, data: dict) -> Any:
         try:
             with conn.transaction():
                 with conn.cursor() as cur:
+                    if new_target_id is not None:
+                        # Phase 5D: guarded move (refused while a remote attempt
+                        # is open); committed together with the edit.
+                        cur.execute(
+                            f"SELECT {partition_job_schema()}.partops_set_job_target(%(j)s, %(t)s)",
+                            {"j": job_id_int, "t": int(new_target_id)},
+                        )
                     cur.execute(statement, params)
                     result = None
                     if cur.description is not None:
@@ -1627,6 +1770,8 @@ def update_partition_job(job_id: Any, data: dict) -> Any:
         except PsycopgError as exc:
             # P0002 / no_data_found style from the update function → not found.
             sqlstate = getattr(exc, "sqlstate", None) or ""
+            if sqlstate == "55006":
+                raise _map_psycopg_error(exc) from None
             if sqlstate in ("P0002", "02000") or "not found" in str(exc).lower():
                 raise DatabaseError(f"Job {job_id_int} not found.") from None
             # 22023 invalid_parameter_value — validation / fail-closed schedule.
@@ -1643,6 +1788,11 @@ def update_partition_job(job_id: Any, data: dict) -> Any:
 
 
 _MANUAL_FAIL_STATUSES = frozenset({"MANUAL_FAIL", "FAIL", "FAILED"})
+# Target table busy (scheduled or another manual run holds the 87421032 lock).
+# Nothing executed and nothing logged by the database.
+MANUAL_TARGET_LOCKED = "MANUAL_TARGET_LOCKED"
+# Phase 5C: job belongs to another managed target; nothing executed here.
+MANUAL_REMOTE_TARGET = "MANUAL_REMOTE_TARGET"
 
 
 def run_partition_job_manual(job_id: Any) -> Any:
@@ -1661,6 +1811,7 @@ def run_partition_job_manual(job_id: Any) -> Any:
     statement = build_run_partition_job_manual_sql()
     result: Optional[dict] = None
     failure_message: Optional[str] = None
+    conflict_message: Optional[str] = None
 
     with _connection(_main_db_kwargs) as conn:
         try:
@@ -1687,13 +1838,27 @@ def run_partition_job_manual(job_id: Any) -> Any:
                 "message": message,
                 "execution_duration_ms": duration_ms,
             }
-            if status.upper() in _MANUAL_FAIL_STATUSES:
+            if status.upper() == MANUAL_REMOTE_TARGET:
+                conflict_message = (
+                    str(message).strip()
+                    if message
+                    else "The job belongs to another database target; nothing was executed."
+                )
+            elif status.upper() == MANUAL_TARGET_LOCKED:
+                conflict_message = (
+                    str(message).strip()
+                    if message
+                    else "The target table is busy; nothing was executed."
+                )
+            elif status.upper() in _MANUAL_FAIL_STATUSES:
                 failure_message = (
                     str(message).strip()
                     if message
                     else "Manual partition job execution failed."
                 )
 
+    if conflict_message:
+        raise DatabaseConflictError(conflict_message)
     if failure_message:
         raise DatabaseError(failure_message)
 
@@ -1793,3 +1958,363 @@ def get_database_readiness() -> dict[str, Any]:
                 return dict(row) if row else {}
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5A — missed-run attention review (DBA workflow)
+# ---------------------------------------------------------------------------
+
+_ATTENTION_MIGRATION_HINT = (
+    "Missed-run review is not available: apply migrations "
+    "20261110_01_partition_job_attention.sql and "
+    "20261110_02_missed_run_reconcile_retry_and_manual_lock.sql."
+)
+
+
+def _validate_attention_id(attention_id: Any) -> int:
+    try:
+        value = int(attention_id)
+    except (TypeError, ValueError) as exc:
+        raise DatabaseError("Attention item ID must be a whole number.") from exc
+    if value < 1:
+        raise DatabaseError("Attention item ID must be greater than zero.")
+    return value
+
+
+def _attention_error(exc: PsycopgError) -> DatabaseError:
+    """Map attention-function errors to safe, specific API errors."""
+    sqlstate = getattr(exc, "sqlstate", None) or ""
+    primary = getattr(getattr(exc, "diag", None), "message_primary", None)
+    text = (primary or "").strip().split("\n")[0][:400]
+    if "password" in text.lower():
+        text = ""
+    if sqlstate == "55P03":
+        return DatabaseConflictError(
+            "This missed run is already being processed by another request. "
+            "Refresh and try again."
+        )
+    if sqlstate == "P0002":
+        return DatabaseNotFoundError(text or "Attention item not found.")
+    if sqlstate == "22023":
+        return DatabaseConflictError(
+            text or "The attention item can no longer be changed."
+        )
+    if sqlstate in ("42P01", "42883"):
+        logger.error("event=attention_objects_missing sqlstate=%s", sqlstate)
+        return DatabaseError(_ATTENTION_MIGRATION_HINT)
+    return _map_psycopg_error(exc)
+
+
+def get_partition_job_attention(
+    status: Optional[str] = ATTENTION_STATUS_PENDING,
+    limit: int = 200,
+    attention_id: Optional[int] = None,
+) -> tuple[list[dict], bool]:
+    """Return attention items (newest first) and whether the table exists.
+
+    ``status=None`` returns every status. Read-only. If the Phase 5A migration
+    has not been applied yet the result is ``([], False)`` so the UI degrades
+    instead of failing.
+    """
+    if status is not None and status not in ATTENTION_STATUSES:
+        raise DatabaseError("Unsupported attention status filter.")
+    try:
+        row_limit = max(1, min(int(limit), 1000))
+    except (TypeError, ValueError):
+        row_limit = 200
+    attention_int = (
+        _validate_attention_id(attention_id) if attention_id is not None else None
+    )
+    params = {
+        "status": status,
+        "attention_id": attention_int,
+        "row_limit": row_limit,
+    }
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(build_attention_list_sql(), params)
+                return [dict(row) for row in cur.fetchall()], True
+        except UndefinedTable:
+            logger.warning("event=attention_table_missing (Phase 5A migration not applied)")
+            return [], False
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def get_partition_job_attention_item(attention_id: Any) -> Optional[dict]:
+    """Return one attention item by id (any status), or None."""
+    items, available = get_partition_job_attention(
+        status=None, limit=1, attention_id=_validate_attention_id(attention_id)
+    )
+    if not available:
+        raise DatabaseError(_ATTENTION_MIGRATION_HINT)
+    return items[0] if items else None
+
+
+def acknowledge_partition_job_attention(
+    attention_id: Any, note: Optional[str] = None
+) -> dict:
+    """Mark a missed run as reviewed WITHOUT executing it. No DDL.
+
+    Never changes next_run_time. Single transaction; commit on success.
+    """
+    attention_int = _validate_attention_id(attention_id)
+    clean_note = (note or "").strip()[:500] or None
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        build_attention_acknowledge_sql(),
+                        {"attention_id": attention_int, "note": clean_note},
+                    )
+                    row = cur.fetchone()
+        except PsycopgError as exc:
+            raise _attention_error(exc) from None
+    logger.info(
+        "event=attention_acknowledged attention_id=%s job_id=%s",
+        attention_int,
+        (row or {}).get("attention_job_id"),
+    )
+    return dict(row) if row else {"attention_status": "ACKNOWLEDGED"}
+
+
+def recover_partition_job_attention(attention_id: Any) -> dict:
+    """Run a missed occurrence manually via the DB recovery function.
+
+    The database executes through run_partition_job_manual (caller privileges,
+    target-table lock, MANUAL_* log row) and records the outcome on the
+    attention row in the SAME transaction, which is committed before any
+    failure is reported. next_run_time is never changed.
+    """
+    attention_int = _validate_attention_id(attention_id)
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(
+                        build_attention_recovery_sql(),
+                        {"attention_id": attention_int},
+                    )
+                    row = cur.fetchone()
+        except PsycopgError as exc:
+            raise _attention_error(exc) from None
+
+    if not row:
+        raise DatabaseError("Missed-run recovery returned no result.")
+    result = {
+        "status": str(row.get("result_status") or ""),
+        "message": row.get("result_message"),
+        "execution_duration_ms": row.get("result_duration_ms"),
+        "attention_status": row.get("attention_status"),
+        "job_id": row.get("attention_job_id"),
+    }
+    logger.info(
+        "event=attention_recovery attention_id=%s job_id=%s result=%s attention_status=%s",
+        attention_int,
+        result["job_id"],
+        result["status"],
+        result["attention_status"],
+    )
+    status_upper = result["status"].upper()
+    if status_upper in (MANUAL_TARGET_LOCKED, MANUAL_REMOTE_TARGET):
+        raise DatabaseConflictError(
+            str(result["message"] or "The target table is busy; nothing was executed.")
+        )
+    if status_upper in _MANUAL_FAIL_STATUSES:
+        raise DatabaseError(
+            str(result["message"] or "Missed-run recovery failed.")
+            + " The failure was recorded; the item remains pending review."
+        )
+    return result
+
+
+
+# ---------------------------------------------------------------------------
+# Phase 5C — hub-local database targets (read over the CONTROL connection)
+# ---------------------------------------------------------------------------
+# CONTROL database connection = _connection(_main_db_kwargs): jobs, registry,
+# attention, history, readiness. MANAGED target connections are only opened by
+# database_targets.open_target_connection (health / framework checks).
+
+_TARGET_MIGRATION_HINT = (
+    "Database targets are not available: apply migration "
+    "20261117_01_partops_database_target.sql."
+)
+
+
+def list_database_targets() -> tuple[list[Any], list[dict], bool]:
+    """Return (valid targets, invalid-row errors, registry_available).
+
+    Each invalid registry row is reported separately (CONFIG_ERROR) and never
+    hides the valid targets.
+    """
+    from database_targets import DatabaseTarget, TargetConfigError, fetch_target_rows
+
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            rows = fetch_target_rows(conn, partition_job_schema())
+        except UndefinedTable:
+            logger.warning("event=target_registry_missing (Phase 5C migration not applied)")
+            return [], [], False
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+    targets: list[Any] = []
+    invalid: list[dict] = []
+    for row in rows:
+        try:
+            targets.append(DatabaseTarget.from_row(row))
+        except (TargetConfigError, KeyError, TypeError, ValueError) as exc:
+            invalid.append({
+                "target_id": row.get("target_id"),
+                "target_key": row.get("target_key"),
+                "error": str(exc)[:300],
+            })
+    return targets, invalid, True
+
+
+def get_database_target(target_id: Any) -> Optional[Any]:
+    """One valid target by id (None if unknown). Raises DatabaseError if invalid."""
+    try:
+        wanted = int(target_id)
+    except (TypeError, ValueError):
+        raise DatabaseError("Database target ID must be a whole number.") from None
+    targets, invalid, available = list_database_targets()
+    if not available:
+        raise DatabaseError(_TARGET_MIGRATION_HINT)
+    for bad in invalid:
+        if bad.get("target_id") == wanted:
+            raise DatabaseError("Database target {} is misconfigured: {}".format(wanted, bad["error"]))
+    for t in targets:
+        if t.target_id == wanted:
+            return t
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Phase 5D — remote execution attempts (CONTROL database; read + resolution)
+# ---------------------------------------------------------------------------
+_ATTEMPT_MIGRATION_HINT = (
+    "Remote execution attempts are not available: apply migrations "
+    "20261117_03 and 20261117_04."
+)
+ATTEMPT_STATES = frozenset(
+    {"PREPARED", "DISPATCHING", "TARGET_SUCCEEDED", "TARGET_FAILED", "OUTCOME_UNKNOWN", "FINALIZED"}
+)
+_ATTEMPT_COLUMNS = (
+    "attempt_id, job_id, database_target_id, target_key_snapshot AS target_key, "
+    "execution_kind, expected_run_time, operation, job_name_snapshot AS job_name, "
+    "table_schema_snapshot AS table_schema, table_name_snapshot AS table_name, "
+    "partition_unit_snapshot AS partition_unit, partition_period_snapshot AS partition_period, "
+    "create_drop_interval_snapshot::text AS create_drop_interval, "
+    "db_config_snapshot AS db_config, planned_next_run_time, attention_id, state, "
+    "failure_count, created_at, updated_at, dispatch_started_at, target_finished_at, "
+    "finalized_at, result, error_class, error_summary, execution_duration_ms"
+)
+
+
+def _validate_attempt_id(attempt_id: Any) -> int:
+    try:
+        value = int(attempt_id)
+    except (TypeError, ValueError) as exc:
+        raise DatabaseError("Execution attempt ID must be a whole number.") from exc
+    if value < 1:
+        raise DatabaseError("Execution attempt ID must be greater than zero.")
+    return value
+
+
+def list_execution_attempts(
+    state: Optional[str] = None,
+    open_only: bool = False,
+    job_id: Optional[int] = None,
+    attempt_id: Optional[int] = None,
+    limit: int = 200,
+) -> tuple[list[dict], bool]:
+    """Remote execution attempts, newest first. Read-only; no credentials.
+
+    Returns ``([], False)`` if the Phase 5D ledger is not installed.
+    """
+    if state is not None and state not in ATTEMPT_STATES:
+        raise DatabaseError("Unsupported execution attempt state filter.")
+    row_limit = max(1, min(int(limit or 200), 1000))
+    sql = (
+        f"SELECT {_ATTEMPT_COLUMNS} FROM {partition_job_schema()}.partops_execution_attempt "
+        "WHERE (%(state)s::text IS NULL OR state = %(state)s::text) "
+        "  AND (NOT %(open_only)s OR state <> 'FINALIZED') "
+        "  AND (%(job_id)s::numeric IS NULL OR job_id = %(job_id)s::numeric) "
+        "  AND (%(attempt_id)s::bigint IS NULL OR attempt_id = %(attempt_id)s::bigint) "
+        "ORDER BY attempt_id DESC LIMIT %(row_limit)s"
+    )
+    params = {
+        "state": state, "open_only": bool(open_only),
+        "job_id": _validate_job_id(job_id) if job_id is not None else None,
+        "attempt_id": _validate_attempt_id(attempt_id) if attempt_id is not None else None,
+        "row_limit": row_limit,
+    }
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(sql, params)
+                return [dict(r) for r in cur.fetchall()], True
+        except UndefinedTable:
+            logger.warning("event=execution_attempt_table_missing (Phase 5D migration not applied)")
+            return [], False
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def get_execution_attempt(attempt_id: Any) -> Optional[dict]:
+    rows, available = list_execution_attempts(attempt_id=_validate_attempt_id(attempt_id), limit=1)
+    if not available:
+        raise DatabaseError(_ATTEMPT_MIGRATION_HINT)
+    return rows[0] if rows else None
+
+
+def get_job_open_attempt_state(job_id: Any) -> Optional[str]:
+    """Most significant open remote attempt state of a job (None = none / pre-5D)."""
+    job_id_int = _validate_job_id(job_id)
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {partition_job_schema()}.partops_job_open_attempt_state(%(j)s)",
+                    {"j": job_id_int},
+                )
+                row = cur.fetchone()
+        except UndefinedFunction:
+            return None
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+    return str(row[0]) if row and row[0] else None
+
+
+def resolve_remote_outcome(attempt_id: Any, resolution: str, note: str) -> dict:
+    """Operator resolution of an OUTCOME_UNKNOWN attempt. No DDL anywhere.
+
+    APPLIED / NOT_APPLIED is the operator's finding after inspecting the target.
+    The attempt is finalized, its attention item acknowledged and automatic
+    scheduling of the job resumed (if enabled).
+    """
+    attempt_int = _validate_attempt_id(attempt_id)
+    clean = (resolution or "").strip().upper()
+    if clean not in ("APPLIED", "NOT_APPLIED"):
+        raise DatabaseError("Resolution must be APPLIED or NOT_APPLIED.")
+    clean_note = (note or "").strip()[:400]
+    if not clean_note:
+        raise DatabaseError("A note describing the inspected target state is required.")
+    sql = (
+        f"SELECT * FROM {partition_job_schema()}.partops_resolve_remote_outcome("
+        "%(a)s, %(r)s, %(n)s)"
+    )
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.transaction():
+                with conn.cursor(row_factory=dict_row) as cur:
+                    cur.execute(sql, {"a": attempt_int, "r": clean, "n": clean_note})
+                    row = cur.fetchone()
+        except PsycopgError as exc:
+            raise _attention_error(exc) from None
+    logger.info("event=remote_outcome_resolved attempt_id=%s result=%s",
+                attempt_int, (row or {}).get("result"))
+    return dict(row) if row else {}

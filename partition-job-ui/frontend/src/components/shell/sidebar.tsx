@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  Database,
   History,
   LayoutDashboard,
   PlusCircle,
@@ -14,16 +15,17 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/badge";
-import type { SchedulerStatus } from "@/lib/types";
+import type { DatabaseTarget, SchedulerStatus } from "@/lib/types";
 import { formatAge } from "@/lib/format";
 
 const NAV = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/jobs", label: "Partition jobs", icon: Activity },
   { href: "/jobs/new", label: "Create job", icon: PlusCircle },
-  { href: "/convert", label: "Convert job", icon: Workflow },
   { href: "/history", label: "History", icon: History },
+  { href: "/targets", label: "Database targets", icon: Database },
   { href: "/system", label: "System", icon: ShieldCheck },
+  { href: "/convert", label: "Convert job", icon: Workflow },
 ] as const;
 
 export function AppSidebar({
@@ -31,17 +33,22 @@ export function AppSidebar({
   scheduler,
   schedulerMessage,
   dbConnected,
+  targets,
   onRefreshScheduler,
 }: {
   schedulerOk: boolean;
   scheduler: SchedulerStatus | null;
   schedulerMessage?: string;
   dbConnected: boolean;
+  targets?: DatabaseTarget[] | null;
   onRefreshScheduler?: () => void;
 }) {
+  const enabledTargets = (targets || []).filter((t) => t.is_enabled);
+  const perTarget = scheduler?.targets || {};
+  const backingOff = enabledTargets.filter((t) => perTarget[t.target_key]?.available === false);
   const pathname = usePathname();
   const active = Boolean(schedulerOk && scheduler?.scheduler_active);
-  const sync = formatAge(scheduler?.last_refresh_at);
+  const sync = formatAge(scheduler?.last_refresh_at, { naiveUtc: true });
 
   return (
     <aside className="flex h-[calc(100vh-52px)] w-[228px] shrink-0 flex-col border-r border-[var(--border-default)] bg-[var(--surface-chrome)]">
@@ -113,8 +120,27 @@ export function AppSidebar({
           </div>
           <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-[var(--content-secondary)]">
             <StatusDot tone={dbConnected ? "green" : "red"} />
-            Database {dbConnected ? "connected" : "unavailable"}
+            Control database {dbConnected ? "connected" : "unavailable"}
           </div>
+          {enabledTargets.length && !schedulerOk ? (
+            <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-[var(--content-secondary)]">
+              <StatusDot tone="mute" />
+              <span>Targets: availability unknown</span>
+            </div>
+          ) : null}
+          {enabledTargets.length && schedulerOk ? (
+            <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-[var(--content-secondary)]">
+              <StatusDot tone={backingOff.length ? "amber" : "green"} />
+              <span>
+                Targets {enabledTargets.length - backingOff.length}/{enabledTargets.length} available
+                {backingOff.length ? (
+                  <span className="sr-only">
+                    {" "}— backing off: {backingOff.map((t) => t.target_key).join(", ")}
+                  </span>
+                ) : null}
+              </span>
+            </div>
+          ) : null}
           <div className="mt-1.5 text-[11px] text-[var(--content-tertiary)]">
             Last sync {schedulerOk ? sync : "unavailable"}
           </div>

@@ -17,7 +17,7 @@ import logging
 import os
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,16 @@ class DatabaseCredentialError(RuntimeError):
     """Fail-closed credential resolution error (never includes secret values)."""
 
 
-# Process-local cache: (username_or_None, password, monotonic_expiry)
+# Process-local cache keyed per secret (Phase 5C):
+#   (provider, region, secret_id) -> (username_or_None, password, monotonic_expiry)
+# Each database target resolves through its own key, so an auth failure /
+# invalidation for one target never clears another target's credentials.
+SecretKey = Tuple[str, str, str]
 _cache_lock = threading.Lock()
-_cached_entry: Optional[Tuple[Optional[str], str, float]] = None
+_cache: Dict[SecretKey, Tuple[Optional[str], str, float]] = {}
 
-# Lazy boto3 client (created only in AWS mode on first fetch).
-_sm_client = None
+# Lazy boto3 clients per region (created only in AWS mode on first fetch).
+_sm_clients: Dict[str, Any] = {}
 _sm_client_lock = threading.Lock()
 
 
@@ -73,12 +77,37 @@ def cache_ttl_seconds() -> float:
     return value
 
 
-def invalidate_database_secret_cache() -> None:
-    """Drop the in-process Secrets Manager cache (e.g. after auth failure)."""
-    global _cached_entry
+def _region_value(region: Optional[str]) -> str:
+    return (region or "").strip()
+
+
+def secret_cache_key(secret_id: str, region: Optional[str] = None) -> SecretKey:
+    """Stable cache key for one Secrets Manager secret."""
+    return (PROVIDER_AWS, _region_value(region), (secret_id or "").strip())
+
+
+def _default_secret_key() -> SecretKey:
+    return secret_cache_key(
+        os.environ.get("PARTITION_DB_SECRET_ID") or "",
+        os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "",
+    )
+
+
+def invalidate_database_secret_cache(key: Optional[SecretKey] = None) -> None:
+    """Drop ONE cached secret (default: the process default secret).
+
+    Used after an authentication failure. Other targets' secrets are untouched.
+    """
+    target_key = key if key is not None else _default_secret_key()
     with _cache_lock:
-        _cached_entry = None
-    logger.info("Database secret cache invalidated")
+        _cache.pop(target_key, None)
+    logger.info("Database secret cache invalidated (one entry)")
+
+
+def cached_secret_keys() -> List[SecretKey]:
+    """Keys currently cached (no secret values) — diagnostics/tests only."""
+    with _cache_lock:
+        return list(_cache.keys())
 
 
 def is_authentication_error(exc: BaseException) -> bool:
@@ -167,6 +196,29 @@ def _resolve_env_credentials() -> Dict[str, str]:
     return {"user": user, "password": password}
 
 
+def resolve_target_credentials(
+    secret_id: str,
+    region: Optional[str] = None,
+    fallback_user: Optional[str] = None,
+) -> Dict[str, str]:
+    """AWS credentials for one database target's own secret (fail closed).
+
+    Never reads DB_PASSWORD. ``fallback_user`` is only used when the secret has
+    no username field.
+    """
+    if not (secret_id or "").strip():
+        raise DatabaseCredentialError("Target uses AWS credentials but has no secret_id.")
+    secret_user, password = _get_aws_secret_cached(secret_cache_key(secret_id, region))
+    user = (secret_user or fallback_user or "").strip()
+    if not user:
+        raise DatabaseCredentialError(
+            "Database username missing: target secret has no username and no fallback user."
+        )
+    if not password:
+        raise DatabaseCredentialError("Database password missing from target secret.")
+    return {"user": user, "password": password}
+
+
 def _resolve_aws_credentials() -> Dict[str, str]:
     secret_user, password = _get_aws_secret_cached()
     env_user = (os.environ.get("DB_USER") or "").strip()
@@ -182,25 +234,31 @@ def _resolve_aws_credentials() -> Dict[str, str]:
     return {"user": user, "password": password}
 
 
-def _get_aws_secret_cached() -> Tuple[Optional[str], str]:
-    global _cached_entry
+def _get_aws_secret_cached(key: Optional[SecretKey] = None) -> Tuple[Optional[str], str]:
+    key = key if key is not None else _default_secret_key()
     now = time.monotonic()
     with _cache_lock:
-        if _cached_entry is not None:
-            user, password, expiry = _cached_entry
+        entry = _cache.get(key)
+        if entry is not None:
+            user, password, expiry = entry
             if now < expiry:
                 return user, password
 
-    user, password = get_database_secret()
+    user, password = get_database_secret(secret_id=key[2], region=key[1] or None)
     ttl = cache_ttl_seconds()
     with _cache_lock:
-        _cached_entry = (user, password, time.monotonic() + ttl)
+        _cache[key] = (user, password, time.monotonic() + ttl)
     logger.info("Database secret cache refreshed (provider=aws)")
     return user, password
 
 
-def get_database_secret() -> Tuple[Optional[str], str]:
+def get_database_secret(
+    secret_id: Optional[str] = None, region: Optional[str] = None
+) -> Tuple[Optional[str], str]:
     """Fetch AWSCURRENT secret from Secrets Manager (uncached).
+
+    Defaults to the process secret (PARTITION_DB_SECRET_ID / AWS_REGION);
+    per-target callers pass their own ``secret_id`` / ``region``.
 
     Returns:
         ``(username_or_None, password)``
@@ -211,7 +269,10 @@ def get_database_secret() -> Tuple[Optional[str], str]:
     # Local import keeps observability optional and avoids import cycles.
     from observability import emit_secrets_refresh, emit_secrets_retrieval_failure
 
-    secret_id = (os.environ.get("PARTITION_DB_SECRET_ID") or "").strip()
+    if secret_id is None:
+        secret_id = os.environ.get("PARTITION_DB_SECRET_ID") or ""
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or region
+    secret_id = (secret_id or "").strip()
     if not secret_id:
         logger.warning("event=secret_retrieval_failed reason=missing_secret_id")
         emit_secrets_retrieval_failure(reason="missing_secret_id")
@@ -220,7 +281,7 @@ def get_database_secret() -> Tuple[Optional[str], str]:
         )
 
     try:
-        client = _secrets_manager_client()
+        client = _secrets_manager_client(_region_value(region) or None)
     except DatabaseCredentialError:
         logger.warning("event=secret_retrieval_failed reason=aws_error")
         emit_secrets_retrieval_failure(reason="aws_error")
@@ -294,31 +355,35 @@ def get_database_secret() -> Tuple[Optional[str], str]:
     return None, password
 
 
-def _secrets_manager_client() -> Any:
-    global _sm_client
-    if _sm_client is not None:
-        return _sm_client
+def _secrets_manager_client(region: Optional[str] = None) -> Any:
+    region = (
+        region
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or ""
+    ).strip() or None
+    cache_key = region or ""
+    client = _sm_clients.get(cache_key)
+    if client is not None:
+        return client
     with _sm_client_lock:
-        if _sm_client is not None:
-            return _sm_client
+        client = _sm_clients.get(cache_key)
+        if client is not None:
+            return client
         try:
             import boto3
         except ImportError as exc:
             raise DatabaseCredentialError(
                 "boto3 is required when PARTITION_DB_SECRET_PROVIDER=aws."
             ) from exc
-        region = (
-            os.environ.get("AWS_REGION")
-            or os.environ.get("AWS_DEFAULT_REGION")
-            or ""
-        ).strip() or None
         # Lazy client — uses EC2 instance role / default credential chain.
         kwargs: Dict[str, Any] = {"service_name": "secretsmanager"}
         if region:
             kwargs["region_name"] = region
-        _sm_client = boto3.client(**kwargs)
+        client = boto3.client(**kwargs)
+        _sm_clients[cache_key] = client
         logger.info("Database credential provider initialized: aws")
-        return _sm_client
+        return client
 
 
 def _aws_error_code(exc: BaseException) -> Optional[str]:
@@ -363,9 +428,8 @@ def _map_aws_error(exc: BaseException) -> DatabaseCredentialError:
 
 
 def _reset_for_tests() -> None:
-    """Clear cache and lazy client — unit tests only."""
-    global _cached_entry, _sm_client
+    """Clear caches and lazy clients — unit tests only."""
     with _cache_lock:
-        _cached_entry = None
+        _cache.clear()
     with _sm_client_lock:
-        _sm_client = None
+        _sm_clients.clear()

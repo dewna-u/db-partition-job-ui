@@ -65,9 +65,25 @@ export function nextRunLabel(job: PartitionJob): string {
   return `in ${label}`;
 }
 
-export function formatAge(moment?: string | null): string {
+/**
+ * Parse a server timestamp. The scheduler status (started_at,
+ * last_refresh_at) and target health (checked_at) are produced by Python as
+ * NAIVE UTC ("2026-11-17 18:35:52.19"); browsers parse zone-less strings as
+ * LOCAL time, which shifted them by the viewer's UTC offset. Pass
+ * { naiveUtc: true } for those fields. Strings with an explicit zone are
+ * parsed as-is. Database timestamps (next_run_time, history) are NOT UTC.
+ */
+export function parseServerDate(value: string, opts?: { naiveUtc?: boolean }): Date {
+  const text = String(value).trim();
+  if (opts?.naiveUtc && !/(Z|[+-]\d{2}:?\d{2})$/i.test(text)) {
+    return new Date(text.replace(" ", "T").replace(/(\.\d{3})\d+$/, "$1") + "Z");
+  }
+  return new Date(text);
+}
+
+export function formatAge(moment?: string | null, opts?: { naiveUtc?: boolean }): string {
   if (!moment) return "—";
-  const dt = new Date(moment);
+  const dt = parseServerDate(moment, opts);
   if (Number.isNaN(dt.getTime())) return "—";
   const secs = Math.max(0, Math.floor((Date.now() - dt.getTime()) / 1000));
   if (secs < 60) return `${secs}s ago`;
@@ -76,9 +92,9 @@ export function formatAge(moment?: string | null): string {
   return `${Math.floor(secs / 86400)}d ago`;
 }
 
-export function formatWhen(moment?: string | null): string {
+export function formatWhen(moment?: string | null, opts?: { naiveUtc?: boolean }): string {
   if (!moment) return "—";
-  const dt = new Date(moment);
+  const dt = parseServerDate(moment, opts);
   if (Number.isNaN(dt.getTime())) return String(moment);
   const today = new Date();
   const sameDay =
@@ -171,6 +187,40 @@ export function runStatusLabel(status?: string | null): string {
   const s = (status || "").trim();
   if (!s) return "—";
   return s.toUpperCase();
+}
+
+export function attentionReasonLabel(reason?: string | null): string {
+  switch ((reason || "").toUpperCase()) {
+    case "MISSED_SCHEDULED_RUN":
+      return "Missed scheduled run";
+    case "RETRY_EXHAUSTED":
+      return "Scheduled run could not complete (retries exhausted)";
+    case "REMOTE_OUTCOME_UNKNOWN":
+      return "Remote outcome unknown";
+    default:
+      return reason || "Needs review";
+  }
+}
+
+export function attentionTarget(item: {
+  table_schema: string | null;
+  table_name: string | null;
+}): string {
+  return `${item.table_schema || ""}.${item.table_name || ""}`;
+}
+
+/** Group pending attention items by job_id. */
+export function attentionByJob<T extends { job_id: number }>(
+  items: T[],
+): Map<number, T[]> {
+  const map = new Map<number, T[]>();
+  for (const item of items) {
+    const key = Number(item.job_id);
+    const list = map.get(key) || [];
+    list.push(item);
+    map.set(key, list);
+  }
+  return map;
 }
 
 export function enabledTone(enabled: boolean): StatusTone {

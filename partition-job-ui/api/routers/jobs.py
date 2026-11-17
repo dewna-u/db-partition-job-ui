@@ -9,15 +9,20 @@ from pydantic import BaseModel, Field
 
 from api.deps import ok, raise_for_domain
 from dashboard_metrics import jobs_to_csv
+from api.remote_manual import is_remote_job, run_remote_manual
 from database import (
+    DatabaseConflictError,
     DatabaseError,
+    list_database_targets,
     create_partition_job,
     get_database_readiness,
+    get_job_open_attempt_state,
     get_partition_job,
     get_partition_jobs,
     run_partition_job_manual,
     update_partition_job,
 )
+from database_targets import HEALTHY, HEALTHY_WITH_WARNINGS, check_target_health
 from job_autofill import calculate_next_run
 from scheduler_client import notify_scheduler_refresh
 from validators import ValidationError, validate_form_data
@@ -40,6 +45,8 @@ class JobCreateBody(BaseModel):
     is_create: bool = True
     create_drop_amount: int = Field(ge=1)
     create_drop_unit: str
+    # Phase 5C: managed database target. None = control database (default).
+    database_target_id: Optional[int] = Field(default=None, ge=1)
 
 
 class JobUpdateBody(BaseModel):
@@ -59,6 +66,8 @@ class JobUpdateBody(BaseModel):
     is_create: bool = True
     create_drop_amount: int = Field(ge=1)
     create_drop_unit: str
+    # Phase 5C: None = keep the job's current target.
+    database_target_id: Optional[int] = Field(default=None, ge=1)
     confirm_dangerous: bool = False
 
 
@@ -79,6 +88,74 @@ def _as_naive(dt: Any) -> Optional[datetime]:
         return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
     except ValueError:
         return None
+
+
+def resolve_job_target(
+    requested: Optional[int],
+    current: Optional[int],
+    confirm_dangerous: bool,
+    *,
+    job_id: Optional[int] = None,
+) -> Optional[int]:
+    """Validate the job's database target (Phase 5C/5D).
+
+    * unknown / misconfigured / disabled target -> 400
+    * changing a job's target -> dangerous (confirm_dangerous=true required)
+      and refused (409) while the job has an open / unresolved remote
+      execution attempt (also enforced atomically in SQL)
+    * a managed (non-control) target must pass its read-only health /
+      target_execution framework check before jobs are assigned to it (409)
+
+    No target requested => no registry lookup: an edit keeps the job's current
+    target and a create gets the control target from the SQL column DEFAULT.
+    """
+    if requested is None:
+        return current
+    targets, invalid, available = list_database_targets()
+    if not available:
+        raise ValidationError(
+            "Database targets are not configured on this installation "
+            "(migration 20261117_01 not applied)."
+        )
+    by_id = {t.target_id: t for t in targets}
+    if requested not in by_id:
+        if any(bad.get("target_id") == requested for bad in invalid):
+            raise ValidationError(f"Database target {requested} is misconfigured.")
+        raise ValidationError(f"Database target {requested} does not exist.")
+    target = by_id[requested]
+    if not target.is_enabled:
+        raise ValidationError(f"Database target {target.target_key} is disabled.")
+    if current is not None and requested != current:
+        old_key = by_id[current].target_key if current in by_id else str(current)
+        if not confirm_dangerous:
+            raise ValidationError(
+                "Dangerous configuration change requires confirm_dangerous=true: "
+                f"database target changes from {old_key} to {target.target_key}"
+            )
+        if job_id is not None:
+            state = get_job_open_attempt_state(job_id)
+            if state:
+                raise DatabaseConflictError(
+                    f"Job {job_id} has a remote execution attempt in state {state}; "
+                    "its database target cannot change until it is finalized or resolved."
+                )
+    if not target.is_control_database:
+        health = check_target_health(target)
+        if health.get("state") not in (HEALTHY, HEALTHY_WITH_WARNINGS):
+            raise DatabaseConflictError(
+                f"Database target {target.target_key} is not ready for execution "
+                f"({health.get('state')}): {health.get('detail') or ''}".strip()
+            )
+    return requested
+
+
+def _is_control_target(target_id: Optional[int]) -> bool:
+    if target_id is None:
+        return True
+    targets, _invalid, available = list_database_targets()
+    if not available:
+        return True
+    return any(t.target_id == target_id and t.is_control_database for t in targets)
 
 
 def _prepare_job_update(
@@ -113,6 +190,15 @@ def _prepare_job_update(
             + "; ".join(reasons)
         )
 
+    # Phase 5C/5D: target change = dangerous, refused while an attempt is open.
+    current_target = existing.get("database_target_id")
+    new_target = resolve_job_target(
+        body.database_target_id,
+        current_target,
+        body.confirm_dangerous,
+        job_id=existing.get("job_id"),
+    )
+
     schedule_changed = str(existing.get("job_schedule") or "") != validated[
         "job_schedule"
     ]
@@ -142,6 +228,8 @@ def _prepare_job_update(
         if calculated is not None:
             validated["next_run_time"] = calculated
 
+    if new_target is not None and new_target != current_target:
+        validated["database_target_change"] = new_target
     return validated
 
 
@@ -182,6 +270,10 @@ def create_job(body: JobCreateBody):
     raw: dict[str, Any] = body.model_dump()
     try:
         validated = validate_form_data(raw)
+        # Phase 5C/5D: new rows default to the control target in SQL; a
+        # managed target is validated (enabled + healthy) before any write.
+        target = resolve_job_target(body.database_target_id, None, False)
+        validated["database_target_id"] = None if _is_control_target(target) else target
         result = create_partition_job(validated)
     except (ValidationError, DatabaseError) as exc:
         raise_for_domain(exc)
@@ -205,7 +297,9 @@ def update_job(job_id: int, body: JobUpdateBody):
         if existing is None:
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
         validated = _prepare_job_update(existing, body)
-        result = update_partition_job(job_id, validated)
+        result = update_partition_job(
+            job_id, validated, new_target_id=validated.pop("database_target_change", None)
+        )
     except HTTPException:
         raise
     except ValidationError as exc:
@@ -258,6 +352,11 @@ def run_job(job_id: int, body: Optional[ManualRunBody] = None):
                 status_code=400,
                 detail="DROP jobs require confirm_drop=true before manual execution.",
             )
+        if is_remote_job(job):
+            # Phase 5D: managed target → the scheduler's remote engine.
+            result = run_remote_manual(job_id, confirm_drop=body.confirm_drop)
+            return ok({"result": result, "message": result.get("message") or (
+                f"Manual run of job {job_id} completed on target {result.get('target_key')}.")})
         result = run_partition_job_manual(job_id)
     except HTTPException:
         raise

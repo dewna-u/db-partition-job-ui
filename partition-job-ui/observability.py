@@ -123,8 +123,29 @@ def normalize_job_status(status: Optional[str]) -> str:
         "skipped_not_due": "skipped_not_due",
         "skipped_circuit_breaker": "skipped_circuit_breaker",
         "not_found": "not_found",
+        "missed_rescheduled": "missed_rescheduled",
+        "skipped_remote_target": "skipped_remote_target",
+        "missed_invalid_schedule": "missed_invalid_schedule",
+        # Phase 5D remote execution (fixed vocabulary; never job/table data).
+        "failed_target_unavailable": "failed_target_unavailable",
+        "failed_target_preflight": "failed_target_preflight",
+        "failed_target_worker": "failed_target_worker",
+        "failed_target_config": "failed_target_config",
+        "remote_finalize_pending": "remote_finalize_pending",
+        "remote_outcome_unknown": "remote_outcome_unknown",
+        "remote_needs_review": "remote_needs_review",
+        "remote_already_finalized": "remote_already_finalized",
+        "remote_already_dispatching": "remote_already_dispatching",
     }
     return mapping.get(text, "other")
+
+
+def normalize_missed_reason(reason: Optional[str]) -> str:
+    """Low-cardinality reason tag for missed-run attention events."""
+    text = (reason or "").strip().lower()
+    if text in ("missed_scheduled_run", "retry_exhausted"):
+        return text
+    return "other"
 
 
 def normalize_operation(is_create: Any) -> Optional[str]:
@@ -352,14 +373,114 @@ def emit_jobs_failed_count(count: int) -> None:
     gauge("jobs.failed_count", int(count))
 
 
+def emit_framework_ready(ready: bool) -> None:
+    """Gauge: 1 when the scheduler's DB framework gate passed, else 0."""
+    gauge("scheduler.framework_ready", 1 if ready else 0)
+
+
+def emit_pending_review_count(count: int) -> None:
+    """Gauge: attention items currently PENDING_REVIEW (missed / exhausted runs)."""
+    gauge("jobs.pending_review_count", int(count))
+
+
+def _with_target(tags: Dict[str, Any], target: Optional[str]) -> Dict[str, Any]:
+    """Add the low-cardinality target tag (registry key, e.g. db01) if known."""
+    if target:
+        tags["target"] = target
+    return tags
+
+
+_REMOTE_OUTCOMES = frozenset({"succeeded", "failed", "not_dispatched", "unknown"})
+
+
+def emit_target_slots(
+    *, target: Optional[str], active: Any, waiting: Any, limit: Any, available: bool
+) -> None:
+    """Per-target concurrency gauges (tag = registry key, e.g. db02)."""
+    if not target:
+        return
+    tags = {"target": target}
+    try:
+        gauge("target.active_jobs", float(active or 0), tags=tags)
+        gauge("target.waiting_jobs", float(waiting or 0), tags=tags)
+        if limit is not None:
+            gauge("target.max_concurrent_jobs", float(limit), tags=tags)
+        gauge("target.available", 1 if available else 0, tags=tags)
+    except (TypeError, ValueError):
+        return
+
+
+def emit_remote_attempt(*, outcome: Optional[str], target: Optional[str]) -> None:
+    """One remote execution attempt finished on the target side.
+
+    outcome: succeeded | failed (proven rollback) | not_dispatched | unknown.
+    Attempt ids are never tags (structured logs only).
+    """
+    text = str(outcome or "").strip().lower()
+    tags = _with_target({"outcome": text if text in _REMOTE_OUTCOMES else "other"}, target)
+    increment("remote.execution_attempt", tags=tags)
+    if text == "unknown":
+        increment("remote.outcome_unknown", tags=_with_target({}, target))
+    elif text == "failed":
+        increment("remote.known_failure", tags=_with_target({}, target))
+
+
+def emit_remote_finalization_retry(*, target: Optional[str]) -> None:
+    """Control-DB finalization / ledger write retried (target DDL NOT re-run)."""
+    increment("remote.finalization_retry", tags=_with_target({}, target))
+
+
+def emit_remote_unknown_outcomes(count: int) -> None:
+    """Gauge: unresolved OUTCOME_UNKNOWN attempts (needs review)."""
+    gauge("remote.unknown_outcomes", float(max(0, int(count))))
+
+
+def emit_target_health(*, target: Optional[str], state: Optional[str]) -> None:
+    """Gauge per managed target: 1 when usable (HEALTHY*), else 0."""
+    if not target:
+        return
+    ok = str(state or "").upper() in ("HEALTHY", "HEALTHY_WITH_WARNINGS")
+    gauge("target.healthy", 1 if ok else 0, tags={"target": target})
+
+
+def emit_missed_occurrence(
+    *, reason: Optional[str], status: Optional[str], target: Optional[str] = None
+) -> None:
+    """A not-executed occurrence was detected and reconciled in the database.
+
+    ``missed_run.detected`` counts detections; ``missed_run.reconciled`` carries
+    the outcome (rescheduled / invalid_schedule). Never tagged with job/table.
+    """
+    reason_tag = normalize_missed_reason(reason)
+    increment("missed_run.detected", tags=_with_target({"reason": reason_tag}, target))
+    outcome = "invalid_schedule" if (status or "").upper() == "MISSED_INVALID_SCHEDULE" else "rescheduled"
+    increment(
+        "missed_run.reconciled",
+        tags=_with_target({"reason": reason_tag, "outcome": outcome}, target),
+    )
+
+
+def emit_retry_scheduled(*, status: Optional[str], target: Optional[str] = None) -> None:
+    """A backed-off re-attempt of the same occurrence was scheduled."""
+    increment("scheduler.retry_scheduled",
+              tags=_with_target({"status": normalize_job_status(status)}, target))
+
+
+def emit_retry_exhausted(*, status: Optional[str], target: Optional[str] = None) -> None:
+    """Retry budget for one occurrence exhausted (handed to DB reconciliation)."""
+    increment("scheduler.retry_exhausted",
+              tags=_with_target({"status": normalize_job_status(status)}, target))
+
+
 def emit_job_execution(
     *,
     status: Optional[str],
     is_create: Any = None,
     duration_ms: Any = None,
+    target: Optional[str] = None,
 ) -> None:
     """Emit job execution counter and optional duration (DB duration only)."""
-    tags: Dict[str, Any] = {"status": normalize_job_status(status)}
+    tags: Dict[str, Any] = _with_target({"status": normalize_job_status(status)}, target)
     operation = normalize_operation(is_create)
     if operation is not None:
         tags["operation"] = operation

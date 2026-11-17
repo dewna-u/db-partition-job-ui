@@ -12,7 +12,19 @@ if str(_ROOT) not in sys.path:
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import cron, dashboard, jobs, logs, pgagent, readiness, scheduler, system
+from api.routers import (
+    attempts,
+    attention,
+    cron,
+    dashboard,
+    jobs,
+    logs,
+    pgagent,
+    readiness,
+    scheduler,
+    system,
+    targets,
+)
 from observability import emit_api_request
 
 app = FastAPI(
@@ -42,6 +54,9 @@ app.include_router(pgagent.router, prefix="/api")
 app.include_router(dashboard.router, prefix="/api")
 app.include_router(cron.router, prefix="/api")
 app.include_router(system.router, prefix="/api")
+app.include_router(attention.router, prefix="/api")
+app.include_router(targets.router, prefix="/api")
+app.include_router(attempts.router, prefix="/api")
 
 
 @app.middleware("http")

@@ -9,7 +9,12 @@ from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from database import DatabaseError, PgAgentNotInstalledError
+from database import (
+    DatabaseConflictError,
+    DatabaseError,
+    DatabaseNotFoundError,
+    PgAgentNotInstalledError,
+)
 from validators import ValidationError
 
 
@@ -33,6 +38,10 @@ def raise_for_domain(exc: Exception) -> None:
         raise HTTPException(status_code=400, detail=exc.message) from exc
     if isinstance(exc, PgAgentNotInstalledError):
         raise HTTPException(status_code=503, detail=exc.message) from exc
+    if isinstance(exc, DatabaseConflictError):
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    if isinstance(exc, DatabaseNotFoundError):
+        raise HTTPException(status_code=404, detail=exc.message) from exc
     if isinstance(exc, DatabaseError):
         raise HTTPException(status_code=502, detail=exc.message) from exc
     raise exc

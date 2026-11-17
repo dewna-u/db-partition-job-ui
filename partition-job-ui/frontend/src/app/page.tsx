@@ -27,6 +27,9 @@ import {
   readinessStatusLabel,
 } from "@/components/ui/badge";
 import { JobDetailPanel } from "@/components/jobs/job-detail-panel";
+import { useHub } from "@/components/hub/hub-context";
+import { TargetBadge } from "@/components/targets/target-badges";
+import { hubStatus, isUnknownOutcomeReason, resolveTarget } from "@/lib/targets";
 
 export default function OverviewPage() {
   const [data, setData] = useState<DashboardSummary | null>(null);
@@ -67,6 +70,30 @@ export default function OverviewPage() {
   useEffect(() => {
     void api.systemReadiness().then(setSystemReady).catch(() => setSystemReady(null));
   }, []);
+
+  // Phase 5A/5D: items awaiting DBA review (best effort).
+  const [pendingReview, setPendingReview] = useState(0);
+  const [unknownReview, setUnknownReview] = useState(0);
+  useEffect(() => {
+    void api
+      .attention("pending")
+      .then((res) => {
+        const items = res.items || [];
+        setPendingReview(items.length);
+        setUnknownReview(items.filter((i) => isUnknownOutcomeReason(i.reason)).length);
+      })
+      .catch(() => {
+        setPendingReview(0);
+        setUnknownReview(0);
+      });
+  }, []);
+  const { targets, scheduler: hubScheduler, schedulerOk: hubSchedulerOk } = useHub();
+  const hub = hubStatus(systemReady);
+  const perTarget = Object.values(hubScheduler?.targets || {});
+  const running = hubSchedulerOk ? hubScheduler?.global_active ?? hubScheduler?.active_job_count : undefined;
+  const waiting = hubSchedulerOk && perTarget.length
+    ? perTarget.reduce((n, t) => n + Number(t.waiting_jobs || 0), 0)
+    : undefined;
 
   const filtered = useMemo(() => {
     const jobs = data?.jobs || [];
@@ -166,6 +193,49 @@ export default function OverviewPage() {
         </div>
       ) : null}
 
+      {unknownReview > 0 ? (
+        <Link
+          href="/history"
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-card border-2 border-[var(--error-fg)] bg-[var(--error-bg)] px-4 py-3"
+        >
+          <div className="flex items-start gap-3">
+            <StatusDot tone="red" className="mt-1.5" />
+            <div>
+              <div className="text-sm font-semibold text-[var(--error-fg)]">
+                {unknownReview} remote outcome{unknownReview === 1 ? "" : "s"} unknown
+              </div>
+              <div className="mt-0.5 text-xs text-[var(--content-primary)]">
+                PartOps cannot confirm whether the target database committed. Do not run those jobs
+                again until the target state has been inspected.
+              </div>
+            </div>
+          </div>
+          <Badge tone="error">Outcome unknown</Badge>
+        </Link>
+      ) : null}
+
+      {pendingReview > 0 ? (
+        <Link
+          href="/jobs"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-[var(--warning-fg)] bg-[var(--warning-bg)] px-4 py-3"
+        >
+          <div className="flex items-start gap-3">
+            <StatusDot tone="amber" className="mt-1.5" />
+            <div>
+              <div className="text-sm font-semibold text-[var(--content-primary)]">
+                {pendingReview} item{pendingReview === 1 ? "" : "s"} need review
+              </div>
+              <div className="mt-0.5 text-xs text-[var(--content-secondary)]">
+                Missed or retry-exhausted occurrences were not executed automatically; remote
+                outcomes that are unknown need inspection. Review on the Jobs page.
+              </div>
+            </div>
+          </div>
+          <Badge tone="warning">Needs review</Badge>
+        </Link>
+      ) : null}
+
       <Link
         href="/system"
         className="flex flex-wrap items-center justify-between gap-3 rounded-card border border-pj-line bg-pj-card px-4 py-3 transition-colors hover:border-pj-primary/40"
@@ -202,32 +272,46 @@ export default function OverviewPage() {
               : "—",
           },
           {
+            label: "Targets healthy",
+            value: systemReady ? (hub.total ? `${hub.healthy} / ${hub.total}` : "—") : "…",
+            detail: systemReady
+              ? hub.total
+                ? hub.healthy < hub.total
+                  ? "One or more targets unhealthy — see Database targets"
+                  : (targets || []).map((t) => t.target_key.toUpperCase()).join(" · ")
+                : "Single-database mode"
+              : "Checking",
+            warn: Boolean(systemReady && hub.total && hub.healthy < hub.total),
+          },
+          {
+            label: "Needs review",
+            value: pendingReview,
+            detail: unknownReview
+              ? `${unknownReview} outcome unknown`
+              : pendingReview
+                ? "Missed / retry exhausted"
+                : "Nothing pending",
+            warn: pendingReview > 0,
+          },
+          {
+            label: "Running",
+            value: running ?? "—",
+            detail: hubSchedulerOk
+              ? `of ${hubScheduler?.global_max ?? hubScheduler?.max_concurrent_jobs ?? "—"} global slots`
+              : "Scheduler not reporting",
+          },
+          {
+            label: "Waiting",
+            value: waiting ?? "—",
+            detail: hubSchedulerOk ? "Waiting for a target or global slot" : "Scheduler not reporting",
+          },
+          {
             label: "Next execution",
             value: data?.next_execution.available
               ? data.next_execution.countdown
               : "—",
             detail: data?.next_execution.detail || "No upcoming jobs",
             warn: String(data?.next_execution.countdown || "").startsWith("Overdue"),
-          },
-          {
-            label: "Success rate",
-            value: data?.success_rate.label ?? "—",
-            detail: data?.success_rate.detail || "Last 30 days",
-          },
-          {
-            label: "Scheduler uptime",
-            value: data?.scheduler_uptime.label ?? "—",
-            detail: data?.scheduler_uptime.detail || "Backend offline",
-          },
-          {
-            label: "Failed executions",
-            value: data?.failed_executions ?? (loading ? "…" : "0"),
-            detail: "In loaded history",
-          },
-          {
-            label: "Average duration",
-            value: data?.average_duration?.label ?? "—",
-            detail: data?.average_duration?.detail || "No runtime data yet",
           },
         ].map((card) => (
           <div
@@ -246,6 +330,13 @@ export default function OverviewPage() {
           </div>
         ))}
       </section>
+
+      <p className="flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-[var(--content-secondary)]">
+        <span>Success rate {data?.success_rate.label ?? "—"}</span>
+        <span>Scheduler uptime {data?.scheduler_uptime.label ?? "—"}</span>
+        <span>Average duration {data?.average_duration?.label ?? "—"}</span>
+        <span>Failed executions in loaded history {data?.failed_executions ?? "—"}</span>
+      </p>
 
       <section className="grid gap-4 xl:grid-cols-[1.55fr_0.95fr]">
         <div className="rounded-card border border-pj-line bg-pj-card p-3">
@@ -297,6 +388,14 @@ export default function OverviewPage() {
                     <tr
                       key={job.job_id}
                       onClick={() => setSelected(job)}
+                      tabIndex={0}
+                      aria-label={`Show ${job.job_name || `job ${job.job_id}`}`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setSelected(job);
+                        }
+                      }}
                       className={`cursor-pointer border-t border-pj-line hover:bg-pj-surface ${
                         isSel ? "bg-[var(--info-bg)]" : ""
                       }`}
@@ -305,8 +404,12 @@ export default function OverviewPage() {
                         <div className="font-bold text-pj-ink">
                           {job.job_name || `Job ${job.job_id}`}
                         </div>
-                        <div className="mt-0.5 text-[0.65rem] text-pj-muted">
-                          {targetTable(job)}
+                        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[0.65rem] text-pj-muted">
+                          <TargetBadge
+                            target={resolveTarget(job.database_target_id, targets)}
+                            fallbackId={job.database_target_id ?? null}
+                          />
+                          <span className="truncate" title={targetTable(job)}>{targetTable(job)}</span>
                         </div>
                       </td>
                       <td className="px-3 py-2.5">

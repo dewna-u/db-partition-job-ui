@@ -567,6 +567,14 @@ If journal shows the same `job_id` + `expected_run_time` executing repeatedly:
 7. Restart the scheduler **only after** root cause is understood and corrected
    SQL + Python are both live.
 
+Phase 5A note: with the 5A Python deployed, an uncommitted outcome
+(`FAILED_DATABASE`, `FAILED_CONNECTION`, `SKIPPED_TARGET_LOCKED`) is retried
+only on the bounded, delayed schedule (defaults: 4 attempts at 15/60/180 s;
+busy table: 5–30 s cooldowns for up to 1 h) and then recorded as a
+`RETRY_EXHAUSTED` review item — look for `event=scheduled_occurrence_retry_*`
+lines. Repeated *immediate* executions of one occurrence indicate pre-5A
+Python is running.
+
 ### 10.2 Scheduler pre-start safety checklist
 
 Before `systemctl start partition-job-scheduler.service`:
@@ -599,6 +607,10 @@ Before `systemctl start partition-job-scheduler.service`:
 - [ ] SQL migration version and Python source version are known-good together
 - [ ] Jobs with `next_run_time IS NULL` after fail-closed are reviewed by an
       operator before re-enabling a schedule
+- [ ] Phase 5A: `20261110_01` and `20261110_02` applied; db_config pre-check
+      (§10.6) run; Python includes `scheduler_backend/retry_policy.py`
+- [ ] Phase 5A: operators know that historical overdue occurrences will be
+      recorded as *Needs review* (not executed) on start
 - [ ] Start scheduler only after the above; watch journal for first executions
       and any rapid-loop breaker CRITICAL lines
 
@@ -759,6 +771,114 @@ Rollback: restore the previous function body from the backup
 (`CREATE OR REPLACE` / prior definition). Do **not** “fix” by granting
 table UPDATE to `partition_job_ui`.
 
+### 10.6 Phase 5A — missed runs, bounded retry, manual lock, db_config allowlist
+
+What changes operationally:
+
+* **Historical occurrences are never executed automatically.** An occurrence
+  the scheduler first sees *already overdue* (more than
+  `PARTITION_SCHEDULER_OVERDUE_TOLERANCE_SECONDS`, default 60 s, past its
+  scheduled time) — typically on start after downtime, or after a DB outage —
+  becomes a *Needs review* item and the job moves to its next future
+  occurrence. Starting the scheduler no longer catches up historical runs.
+* **Owned occurrences are not "missed" just because time passed.** An
+  occurrence seen on time may run late after waiting for a concurrency slot,
+  a busy table or a retry backoff. Hard limits still apply: the retry budget,
+  the target-lock wait budget, and the DB safety ceiling
+  `mubasher_oms.partition_job_max_execution_lateness()` (default 6 hours).
+* Ownership is in memory: **restarting the scheduler turns any overdue
+  occurrence into a historical one** (review item, not executed). Avoid
+  restarting while jobs are queued if you want them to run.
+* DB/connection failure on an owned occurrence: 4 attempts at 15/60/180 s
+  (≈ 4 min), then a `RETRY_EXHAUSTED` review item. Busy target table:
+  5/10/20/30 s cooldowns for up to 1 hour, then a review item. All values are
+  configurable (`.env.realtime.example`); invalid values stop the scheduler at
+  startup. The scheduler never spins on the same occurrence.
+* `partops.jobs.failed_count` no longer counts a job whose failed scheduled run
+  was followed by a successful manual run (Run now / missed-run recovery).
+  `last_run_status` itself is unchanged (latest *scheduled* outcome).
+* Manual "Run now" on a table that is being processed returns HTTP 409
+  (nothing executed).
+* `db_config_para` accepts only allowlisted keys (see README Phase 5A).
+  **Pre-check existing rows before deploying** — rows with other keys will
+  FAIL (logged, schedule advanced) at their next execution until edited:
+
+  ```sql
+  SELECT j.job_id, j.job_name, c.key, c.value
+    FROM mubasher_oms.partitioning_job_table AS j
+    CROSS JOIN LATERAL jsonb_each_text(j.db_config_para) AS c
+   WHERE lower(c.key) NOT IN ('lock_timeout','statement_timeout',
+           'idle_in_transaction_session_timeout','work_mem','maintenance_work_mem',
+           'effective_io_concurrency','random_page_cost',
+           'max_parallel_maintenance_workers','datestyle')
+      OR (lower(c.key) = 'datestyle'
+          AND c.value !~* '^[[:space:]]*iso[[:space:]]*(,[[:space:]]*(dmy|mdy|ymd)[[:space:]]*)?$');
+  ```
+
+Deploy order (operator, DBA window):
+
+1. `sudo systemctl stop partition-job-scheduler.service` (keep it stopped
+   until step 7).
+2. `git pull` (intended revision); review both migrations.
+3. Run the db_config pre-check above (read-only). Fix or record offending jobs.
+4. Back up current definitions (`pg_get_functiondef`) of
+   `run_partition_job_scheduled`, `run_partition_job_manual`,
+   `update_data_to_partition_job_table`.
+5. Apply `sql/migrations/20261110_01_partition_job_attention.sql`, then
+   `sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql`.
+   Then (Phase 5B) `sql/migrations/20261110_03_partops_framework_version.sql`
+   and run the read-only preflight (§16.6). The Phase 5B scheduler will not
+   dispatch anything until the preflight's scheduler scope passes — this
+   includes the legacy functions, which must already exist on the hub.
+6. Verify (read-only):
+   - `to_regclass('mubasher_oms.partition_job_attention')` not NULL
+   - `to_regprocedure('mubasher_oms.reconcile_missed_partition_job(numeric,timestamp without time zone,text,text)')` not NULL
+   - owners `mubasher_oms`; PUBLIC has no EXECUTE on the touched functions;
+     `partition_job_scheduler` has EXECUTE on scheduled + reconcile;
+     `partition_job_ui` has EXECUTE on manual / recovery / acknowledge / update
+   - `SELECT mubasher_oms.partition_job_max_execution_lateness();` → `06:00:00`
+   - `partition_job_scheduler` has SELECT on `partitioning_job_table_log`
+     (read-only; failed-jobs gauge)
+7. Deploy Python + rebuild UI (§8), restart API and UI, then start the
+   scheduler and watch the journal:
+   ```bash
+   sudo journalctl -u partition-job-scheduler.service -f | grep -E \
+     'missed_occurrence_reconciled|retry_scheduled|retry_exhausted|scheduler_refresh_ok'
+   ```
+   After downtime, expect one `historical_occurrence_discovered` and one
+   `missed_occurrence_reconciled` line per job whose next run was in the past —
+   and **no** CREATE/DROP for those.
+8. UI → Jobs: amber banner lists the missed runs. Review each.
+
+DBA review of a missed run (Jobs → job → *Needs review*):
+
+1. Check missed time, operation (CREATE/DROP), target and current partitions.
+2. Either **Run missed occurrence** (confirm; DROP also requires typing
+   `schema.table`) or **Acknowledge without running** (optional note).
+3. Neither action changes the job's next normal run.
+4. A failed recovery attempt stays *Needs review* with the attempt recorded;
+   the job history shows a `MANUAL_FAIL` row.
+
+Emergency behaviour:
+
+* If `retry_exhausted` / `missed_occurrence_reconciled` lines flood the
+  journal, stop the scheduler (§10.1) — the DB already holds the evidence in
+  `partition_job_attention`; nothing is lost by stopping.
+* Pending review count: `SELECT count(*) FROM mubasher_oms.partition_job_attention WHERE status = 'PENDING_REVIEW';`
+* Datadog: `partops.jobs.pending_review_count`, `partops.scheduler.retry_exhausted`.
+
+Rollback:
+
+* Python/UI: redeploy the previous revision (pre-5A Python falls back to
+  pre-5A immediate retries — prefer keeping 5A Python and rolling back only
+  SQL if needed).
+* SQL: re-apply the backed-up bodies (or `20261013_01` + `20261013_02` +
+  the CREATE section of `20260929_03`'s manual body — never its DROP), then
+  drop the three new functions (see migration header). Restoring the pre-5A
+  scheduled body **re-enables automatic execution of overdue occurrences** —
+  keep the scheduler stopped while deciding. Keep `partition_job_attention`
+  unless the evidence is no longer needed.
+
 Manual API start (for debugging):
 
 ```bash
@@ -774,6 +894,119 @@ sudo -u partitionui ./node_modules/.bin/next start --hostname 0.0.0.0 --port 850
 ```
 
 ---
+
+### 10.7 Phase 5C — hub-local database targets (foundation)
+
+Architecture: ONE PARTOPS INSTANCE PER HUB / APPROXIMATELY TWO TARGET DATABASES PER HUB /
+NO GLOBAL MULTI-HUB CONTROL PLANE.
+
+* The PartOps database you already run is the **control database**. It holds
+  the target registry `mubasher_oms.partops_database_target` and all job rows.
+  Migration `20261117_01` registers it automatically as target **`db01`**
+  (`is_control_database = TRUE`, `database_name = current_database()`).
+* Every job gets `database_target_id` (backfilled to `db01`, `NOT NULL`,
+  FK `ON DELETE RESTRICT`). Business configuration, `next_run_time` and
+  `db_config_para` are not touched by the backfill.
+* **Phase 5C does not execute anything on additional targets.** The SQL
+  executors skip jobs of other targets (`SKIPPED_REMOTE_TARGET` /
+  `MANUAL_REMOTE_TARGET`, nothing executed or logged), `get_upcoming` returns
+  only control-database jobs, and the API refuses (HTTP 409) creating or
+  moving jobs to a non-control target. Remote execution is Phase 5D.
+* Registry rows contain **no passwords and no secret values** — only an AWS
+  Secrets Manager secret *identifier* (`secret_id`) for `aws` targets.
+
+Deploy order (after §10.6 is live; disposable validation first):
+
+1. Stop the scheduler (`partition-job-scheduler`). The API may stay up.
+2. Apply `sql/migrations/20261117_01_partops_database_target.sql` as the
+   schema owner. It refuses to finish if any job would be left without a
+   target.
+3. Apply `sql/migrations/20261117_02_target_aware_executors.sql`.
+4. Run the preflight (§16.6). Expected framework version: `20261117_02`;
+   check `control_target` = PASS (exactly one enabled control row naming the
+   connected database).
+5. Deploy the Python code (API + scheduler), restart the API.
+6. Start the scheduler. `GET /health` must show `framework_status: ready`
+   and `control_target_key: db01`. If the control row is missing, disabled or
+   names another database the scheduler stays **blocked** (dispatches nothing).
+7. `GET /api/targets` lists `db01`; `GET /api/targets/1/health` is
+   `HEALTHY_WITH_WARNINGS` while the legacy definitions are not captured
+   (Phase 5B.1 deferred) — warnings, not failures.
+
+Rollback (no data loss; jobs keep their configuration):
+
+1. **Application rollback (usually sufficient):** stop the scheduler, deploy
+   the previous Python build, start it. Older code never selects the new
+   column; every job is on the control target, so the guards never trigger.
+   The older preflight reports the newer database version `20261117_02` as a
+   WARNING (not a failure), so the scheduler gate still passes.
+2. **Full SQL rollback (only if required):** with the scheduler stopped,
+   re-apply `20261110_02_missed_run_reconcile_retry_and_manual_lock.sql`
+   (restores the pre-5C executor bodies), then run the rollback statements in
+   the header of `20261117_01` (FK, column, function, table) and
+   `DELETE FROM mubasher_oms.partops_framework_version WHERE migration_id IN
+   ('20261117_01','20261117_02')`. Do this only together with step 1.
+
+### 10.8 Phase 5D — remote execution on managed targets
+
+Architecture: ONE PARTOPS INSTANCE PER HUB / APPROXIMATELY TWO TARGET DATABASES PER HUB /
+NO GLOBAL MULTI-HUB CONTROL PLANE.
+Design reference: `REMOTE_EXECUTION.md` (diagrams, state machine, rules).
+
+What changes operationally:
+
+* Jobs on enabled managed targets (db02, …) are executed by the scheduler's
+  remote orchestrator; db01 jobs keep `run_partition_job_scheduled`.
+* Every remote attempt is recorded in `mubasher_oms.partops_execution_attempt`
+  (control DB). There is no distributed transaction: a target outcome that
+  cannot be proven becomes **OUTCOME_UNKNOWN** and is **never re-run
+  automatically** — the job is paused, a `REMOTE_OUTCOME_UNKNOWN` review item
+  is created, and edits / re-enable of that job are refused until resolved.
+* Proven failures (no connection, preflight, table busy, worker error with
+  confirmed rollback) use the Phase 5A bounded retry; exhaustion creates a
+  `RETRY_EXHAUSTED` item and moves the schedule.
+* A confirmed target COMMIT is never executed again; only the control
+  finalization is retried (also after a restart).
+* Manual "Run now" / missed-run recovery of a db02+ job is executed by the
+  scheduler (must be running; HTTP 503 otherwise). DROP still needs explicit
+  confirmation. HTTP 502 = outcome unknown → do NOT re-run; inspect the target.
+* db01 also honours `partops_database_target.max_concurrent_jobs` now
+  (default 1). If the hub runs `PARTITION_SCHEDULER_MAX_CONCURRENT_JOBS > 1`
+  for db01 jobs, raise db01's limit first (DBA):
+  `UPDATE mubasher_oms.partops_database_target SET max_concurrent_jobs = <n> WHERE target_key = 'db01';`
+
+Deploy order (after §10.7; disposable validation first):
+
+1. Stop the scheduler (`partition-job-scheduler`).
+2. Apply `sql/migrations/20261117_03_remote_execution_ledger.sql` (schema owner).
+3. Apply `sql/migrations/20261117_04_remote_execution_functions.sql`.
+4. Preflight (§16.6): expected framework version `20261117_04`.
+5. On every managed target that will run jobs: the legacy workers exist and
+   the scheduler login role has USAGE on `mubasher_oms` and EXECUTE on
+   `create_any_table_partition` / `drop_any_table_partition`
+   (`GET /api/targets/{id}/health` → `HEALTHY_WITH_WARNINGS` while Phase 5B.1
+   is deferred; FAIL = blocked). No PartOps tables are installed on targets.
+6. Per-target credentials for the scheduler AND the API (AWS secret id in the
+   registry; `env` only for local development).
+7. Deploy Python, restart the API, start the scheduler. `GET /health` →
+   `framework_status: ready`; status shows `targets`, `global_active`,
+   `unknown_outcomes`.
+8. Enable the target (`is_enabled = true`, DBA) and assign jobs (API:
+   `database_target_id`, target must be healthy).
+
+Rollback:
+
+1. Disable managed targets (`is_enabled = false`, DBA) so no new remote work
+   starts; wait until no attempt is DISPATCHING / TARGET_SUCCEEDED
+   (`GET /api/execution-attempts?open=true`). Resolve any OUTCOME_UNKNOWN.
+2. Stop the scheduler; deploy the Phase 5C build (it discovers only db01 jobs
+   via `get_upcoming_partition_jobs`; remote jobs are skipped, never run
+   locally). The 5C preflight reports the newer DB version as a WARNING.
+3. Full SQL rollback only if required: move remote jobs back to db01 (or keep
+   them disabled), re-apply the `reconcile_missed_partition_job` body from
+   `20261117_02`, drop the 20261117_04 functions, the triggers/functions of
+   20261117_03 (header), and delete version rows `20261117_03/_04`. Keep the
+   ledger and attention evidence unless explicitly no longer needed.
 
 ## 11. Security reminders
 
@@ -882,3 +1115,262 @@ curl -o NUL -w "%{http_code}" http://127.0.0.1:8501/
 ### Stop
 
 Close the terminal windows or stop the PIDs printed by `scripts/dev-local.ps1`.
+---
+
+## 16. Database Framework Capture and Installation
+
+Audience: a DBA who has never seen PartOps. Details and file layout:
+`sql/framework/README.md`. Object list: `sql/framework/INVENTORY.md`
+(generated from `sql/framework/framework_manifest.json`).
+
+### 16.1 What the framework is
+
+Every database object PartOps needs on a hub database, in two groups:
+
+* **PartOps-owned** — defined and versioned in this repository:
+  `run_partition_job_scheduled`, `get_upcoming_partition_jobs`,
+  `reconcile_missed_partition_job`, `run_partition_job_manual`,
+  `update_data_to_partition_job_table`, `run_partition_job_attention_recovery`,
+  `acknowledge_partition_job_attention`, the attention table + trigger, the
+  allowlist / max-lateness helpers and `partops_framework_version`.
+* **Existing / legacy framework** — come from the approved reference database:
+  `cron_to_interval_or_next_run`, `create_any_table_partition`,
+  `drop_any_table_partition`, `insert_data_to_partition_job_table`
+  (and possibly `cron_field_to_int_array`). **Their definitions are not yet
+  in Git** (ISSUE-003, ISSUE-008). Tables, sequences and
+  `cron_schedule_result` are reconstructed by
+  `sql/bootstrap_partition_job_framework.sql`.
+
+Never write a legacy function body from memory, from its callers or from tests.
+
+### 16.2 Capture (read-only, approved reference DB only)
+
+1. Record which database is the authoritative reference and who approved it.
+2. With a read-only DBA login:
+   ```bash
+   psql "host=<ref-host> dbname=<ref-db> user=<dba>" -X -v ON_ERROR_STOP=1 -P pager=off \
+        -f sql/capture_reference_framework.sql -o capture_<ref-db>_<YYYYMMDD>.txt
+   ```
+   The script opens `BEGIN TRANSACTION READ ONLY` and ends with `ROLLBACK`;
+   it cannot modify anything. Last line: "Capture complete …".
+3. Keep the output file local; check function bodies for embedded
+   credentials before sharing (if found: stop and escalate).
+
+### 16.3 Review
+
+1. For each missing object copy the section-5 definition verbatim into
+   `sql/framework/captured/<name>.sql` with the header from
+   `sql/framework/captured/README.md` (include the md5).
+2. Compare owner / SECURITY mode / `proconfig` search_path / EXECUTE grants
+   (sections 3–4) with the manifest.
+3. Complete `sql/framework/SECURITY_REVIEW_CHECKLIST.md` per function
+   (dynamic SQL quoting, DROP behaviour, SET/role switching, transaction
+   control, exception swallowing, EDB `sys` search_path note).
+4. Update the manifest entry (`definition_in_git: yes`, `status: versioned`,
+   security, owner, grants), delete the `.CAPTURE_REQUIRED.md` placeholder,
+   run `python scripts/framework_inventory.py --write`.
+
+### 16.4 Version and validate
+
+* Framework version = `max(migration_id)` in
+  `mubasher_oms.partops_framework_version`; the application expects the
+  manifest's `framework_version` (`20261110_03`). Older/unknown → FAIL, newer →
+  WARNING. Only reviewed migrations write it; PartOps never auto-upgrades.
+* Local proof on a disposable cluster (existing PostgreSQL binaries, nothing
+  installed, nothing shared):
+  ```bash
+  PG_BIN="/path/to/postgres/bin" scripts/disposable_db/run_disposable_db_test.sh --i-understand-this-is-disposable
+  ```
+  With all captures present it also runs the full integration plan
+  (`sql/framework/INTEGRATION_TEST_PLAN.md`); otherwise it reports
+  `FRAMEWORK DEFINITION NOT AVAILABLE`.
+* Backend tests: `python -m unittest discover -s . -p "test_*.py"`.
+* Commit only after human review of the diff.
+
+### 16.5 Install on a new hub database
+
+1. DBA creates roles `mubasher_oms` (NOLOGIN owner), `partition_job_ui`,
+   `partition_job_scheduler`.
+2. `sql/bootstrap_partition_job_framework.sql` (needs the in-session approval
+   TEMP TABLE; refuses on conflicts; tables start empty).
+3. Reviewed `sql/framework/captured/*.sql`.
+4. `sql/realtime_scheduler_v1.sql` (its dependency gate requires step 3).
+5. Migrations in order: `20260929_01`, `20260929_02`, `20260929_03`,
+   `20261013_02`, `20261110_01`, `20261110_02`, `20261110_03`.
+6. Remaining app grants per the manifest (`table_privileges`, `usage_roles`,
+   `execute_roles` on the legacy functions).
+
+### 16.6 Verify (read-only)
+
+```bash
+python scripts/preflight_framework.py --env-file .env.realtime \
+    --expect-database <db> --scope scheduler --only-problems   # as the scheduler role
+python scripts/preflight_framework.py --env-file .env \
+    --expect-database <db> --scope api --only-problems         # as the UI role
+```
+
+Exit 0 = PASS (warnings allowed), 2 = FAIL. Then start the scheduler: its
+startup gate repeats the scheduler-scope check and **dispatches nothing**
+while any check FAILs (`framework_status` on
+`/internal/scheduler/status`, journal `event=framework_check_failed`, metric
+`partops.scheduler.framework_ready`). The System page shows the API-scope
+result ("Database framework (manifest)").
+
+### 16.7 Rollback
+
+* Framework version record: `DELETE FROM mubasher_oms.partops_framework_version
+  WHERE migration_id = '20261110_03';` — the Phase 5B scheduler will then
+  refuse to dispatch (by design) until the version is restored or older Python
+  is redeployed.
+* Captured legacy functions: they already exist on existing hubs and are not
+  replaced by PartOps; on a new hub, drop only what step 3 created.
+* Phase 5A/4 bodies: see §10.5 / §10.6.
+
+## 17. Database targets (Phase 5C)
+
+Architecture: ONE PARTOPS INSTANCE PER HUB / APPROXIMATELY TWO TARGET DATABASES PER HUB /
+NO GLOBAL MULTI-HUB CONTROL PLANE.
+
+### 17.1 Inspect (read-only)
+
+```bash
+curl -s http://127.0.0.1:8501/api/targets          # registry, no secrets
+curl -s http://127.0.0.1:8501/api/targets/1/health # health of ONE target
+```
+
+Health states: `HEALTHY`, `HEALTHY_WITH_WARNINGS`, `DISABLED` (not contacted),
+`CONFIG_ERROR`, `UNREACHABLE`, `AUTH_FAILED`, `WRONG_DATABASE` (connected
+database ≠ registry `database_name`), `FRAMEWORK_INCOMPATIBLE`. Each target is
+checked separately; one failing target never changes another's state. System
+readiness has a "Database targets" category with one item per target.
+
+### 17.2 Register a second target (DBA only; no API write endpoint)
+
+The API has no authentication, so registry writes are DBA-only SQL as the
+schema owner. Example (identifier only — never a password or secret JSON):
+
+```sql
+INSERT INTO mubasher_oms.partops_database_target
+  (target_key, display_name, host, port, database_name,
+   credential_provider, secret_id, aws_region, ssl_mode, environment, is_enabled)
+VALUES ('db02', 'DB-02', 'db02.hub.internal', 5444, 'oms_db02',
+        'aws', 'partops/<hub>/db02', 'eu-west-1', 'require', 'production', false);
+```
+
+* Phase 5D executes jobs on enabled managed targets (§10.8). Keep a new
+  target **disabled** until its health check is `HEALTHY` /
+  `HEALTHY_WITH_WARNINGS` and credentials are deployed to scheduler and API.
+* `credential_provider`: `inherit` (control target only — process creds),
+  `aws` (the target's own secret, fail closed, never `DB_PASSWORD`),
+  `env` (local development only: `PARTOPS_TARGET_<KEY>_DB_USER` /
+  `PARTOPS_TARGET_<KEY>_DB_PASSWORD`).
+* `max_concurrent_jobs` defaults to 1 (range 1..10).
+* A target with jobs cannot be deleted (FK RESTRICT). Disable it instead.
+
+### 17.3 Troubleshooting
+
+| Symptom | Meaning / action |
+|---|---|
+| Scheduler `framework_status: blocked`, failure "control target lookup failed" | Control row missing, disabled, duplicated or naming another DB. Fix the registry (DBA), then wait for the 300 s recheck or restart. |
+| Target `WRONG_DATABASE` | Host/port reach a different database than `database_name`. Fix the registry row; PartOps never runs anything there. |
+| Target `AUTH_FAILED` | That target's secret is wrong/rotated. Only that target's cached secret was invalidated and retried once; others unaffected. |
+| Job status `SKIPPED_REMOTE_TARGET` / `MANUAL_REMOTE_TARGET` | A local executor was asked to run a db02+ job; nothing ran (Phase 5D routes these jobs to the remote orchestrator). |
+| Attention `REMOTE_OUTCOME_UNKNOWN` / attempt `OUTCOME_UNKNOWN` | Target commit could not be confirmed. Inspect the table on that target, then `POST /api/execution-attempts/{id}/resolve` (APPLIED / NOT_APPLIED + note; DROP: type `schema.table`). Never re-run first. |
+| Status `REMOTE_FINALIZE_PENDING` / `finalization_pending > 0` | Target committed; control DB write is being retried. No action unless it persists (check control DB). |
+| Target `available: false` in scheduler status | Target in connection cooldown (15 s → 300 s). Other targets unaffected. |
+| HTTP 409 "remote execution attempt in state …" on edit | The job has an in-flight or unresolved remote attempt; wait / resolve first. Disable is always allowed. |
+
+## 18. Multi-target operations UI (Phase 5E)
+
+One PartOps UI per hub: it shows only this hub's control database and managed
+targets. There is no hub selector or fleet view.
+
+### 18.1 Where things are
+
+| Need | Where |
+|---|---|
+| Target list, health, framework state, concurrency, backoff | **Database targets** (`/targets`) — read-only; click a row for detail, "Refresh health" re-checks each target once |
+| Which database a job runs on | Jobs table **Database** column (+ "All targets" filter, search by key); job drawer **Database target** section |
+| Choose / change a job's database | Create job / Edit configuration → **Database target**. Only enabled targets that pass health are selectable; a change needs its own explicit confirmation |
+| Run a db02+ job now | Job drawer → Run now (goes through the scheduler). DROP keeps its confirmation |
+| Unknown outcomes, open attempts | **History** → red "outcome unknown" banner and "Remote execution attempts"; also Jobs → Needs review |
+| Hub health | **System** → hub status (OPERATIONAL / DEGRADED / DOWN), targets, per-target scheduler concurrency |
+
+### 18.2 What the UI will never do
+
+* Add / edit / delete targets, credentials, hosts or concurrency limits (DBA
+  procedure, §17). The UI has no authentication.
+* Retry, force or "ignore and run" an attempt whose outcome is unknown.
+* Guess an unknown outcome. Resolution is the operator's finding:
+  "applied" or "not applied" + note (+ typed `schema.table` for DROP).
+
+### 18.3 Resolving an unknown outcome
+
+1. Inspect the table on the named target (partitions present / absent).
+2. History → open the attempt (or Jobs → the job → Needs review).
+3. "Record inspection result…" → choose what you found (no default), tick the
+   matching verification sentence, write the note, type the table for DROP,
+   "Record resolution". Nothing is executed; scheduling resumes.
+
+### 18.4 Message guide
+
+| Message | Meaning |
+|---|---|
+| Manual run could not start because the scheduler is unavailable | HTTP 503: nothing executed; start the scheduler |
+| No answer from the scheduler in time | HTTP 504: the run may still be in progress — check History before anything else |
+| Outcome unknown — do not run again | HTTP 502 for a remote run whose commit could not be confirmed |
+| Blocked by an active or unresolved execution | HTTP 409 from the job guard; wait or resolve first |
+| Dangerous change not confirmed | Target / table / operation change without its confirmation |
+| Temporarily backing off after connection failure | Target cooldown (15 s → 300 s); other targets unaffected |
+
+### 18.5 UI verification matrix — executed (Phase 5E.1, 2026-11-18)
+
+Executed end-to-end against the REAL local stack on disposable data only:
+Next.js production build (127.0.0.1:8501) → FastAPI (8001) → realtime
+scheduler (8765) → throwaway PostgreSQL 16 cluster (scratchpad initdb,
+127.0.0.1:55450) with `partops_control` (control DB / db01), `partops_db02`
+(managed target) and `partops_db03` (managed target without workers →
+framework incompatible). Worker / cron / insert functions were TEST-ONLY
+stubs (they validate PartOps orchestration only, never production worker
+logic). The browser was the locally installed Chrome driven headless through
+the DevTools protocol (network requests captured). No production, corporate
+or shared database was touched.
+
+| # | Scenario | Result | Notes |
+|---|---|---|---|
+| 1 | db01 healthy | PASS | "Healthy with warnings" (uncaptured legacy definitions; Phase 5B.1 deferred) |
+| 2 | db02 healthy | PASS | Healthy with warnings |
+| 3 | db02 unreachable | PASS | registry port changed on the disposable control DB; db01 stayed healthy |
+| 4 | db02 disabled | PASS | Disabled badge; healthy again after re-enable |
+| 5 | db02 framework incompatible (db03) | PASS | detail separates 2 blocking problems from warnings; option disabled; API refuses with 409 |
+| 6 | create db01 job | PASS | POST body `database_target_id=1` (default = control) |
+| 7 | create db02 job | PASS | POST body `database_target_id=2`; registry row target 2 |
+| 8 | filter jobs by target | PASS | DB02 filter shows only db02 jobs |
+| 9 | dangerous DB target change | PASS | separate confirmation gates Save; PATCH carries `confirm_dangerous=true`; API rejects an unconfirmed replay with 400 |
+| 10 | target change blocked by open attempt | PASS | API 409; UI shows the exact guard message |
+| 11 | remote manual run succeeds | PASS | one POST; stub call only in db02; attempt FINALIZED / MANUAL_SUCCESS; "Running…" shown, button disabled while running |
+| 12 | scheduler unavailable | PASS | HTTP 503, exact wording, no attempt row, no worker call; db01 manual runs still work (local path) |
+| 13 | missed occurrence | PASS | historical occurrence reconciled by the real scheduler; 0 worker calls |
+| 14 | retry exhausted | PASS | 4 bounded attempts (FAIL history) → RETRY_EXHAUSTED review with attempt link |
+| 15 | OUTCOME_UNKNOWN scenario | PASS | produced through the ledger's own SQL transitions (claim → dispatching → unknown) |
+| 16 | Overview warning | PASS | red "remote outcomes unknown" banner |
+| 17 | Jobs warning | PASS | red banner + OUTCOME UNKNOWN row badges ("since …") |
+| 18 | History warning | PASS | red banner; unknown attempts pinned first |
+| 19 | no retry button | PASS (after fix) | no retry / run-anyway / force control anywhere; review actions disabled; **Run now was enabled → fixed (F4)** |
+| 20 | resolve APPLIED | PASS | no default; choice + verification + note required; one POST to `/execution-attempts/{id}/resolve`; RESOLVED_APPLIED; no worker call |
+| 21 | resolve NOT_APPLIED | PASS | RESOLVED_NOT_APPLIED; no worker call |
+| 22 | DROP resolution | PASS | button disabled until the exact `schema.table` is typed (wrong text rejected); `confirm_target` sent |
+| 23 | history target filter | PASS | |
+| 24 | execution-attempt detail | PASS | human label + exact technical state + fields |
+| 25 | finalized-attempt toggle | PASS | open=0 → with finalized=5 |
+| 26 | manual result wording | PASS | "Last scheduled status" vs "Latest manual run"; no cross-job leakage (job without manual runs shows "None in recent history") |
+| 27 | light mode | PASS | screenshots reviewed (targets, jobs, history, system, overview) |
+| 28 | dark mode | PASS | same pages legible |
+| 7a | 504 (scheduler accepted, never answered) | PASS (after fix) | "No answer from the scheduler in time"; Run now locked with a link to History (F5) |
+| 7b | connection dropped after the request was sent | PASS (after fix) | was 503 "nothing was executed" → now ambiguous 504 (F6) |
+| 10a | db02 unreachable → hub DEGRADED | PASS (after fix) | headline now lists every reason (F2) |
+| 10b | control DB unavailable → DOWN | PASS (after fix) | readiness took 47 s and the UI showed "Internal Server Error" → dependent checks short-circuited, 21 s (F10) |
+| a11y | keyboard smoke | PASS (after fixes) | job rows focusable (F11), focus restored to the row after closing a sheet (F11b), labelled form controls (F3) |
+| poll | request audit | PASS | 65 s idle: scheduler status ×2–3, readiness ×2–3, targets ×≤1, health only on demand; no duplicates |
+| state | refresh stability | PASS | open sheet, resolution note, typed table, edit-form values and target selection survive two refresh cycles; no stray loaders |
+| redact | error redaction | PASS | no password / DSN / secret id / stack trace in UI or health API (`target db02: ConnectionTimeout`) |

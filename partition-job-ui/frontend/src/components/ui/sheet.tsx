@@ -22,11 +22,31 @@ export function Sheet({
   footer?: React.ReactNode;
   wide?: boolean;
 }) {
+  // Sheets are opened programmatically (row click / Enter), not through a
+  // Dialog.Trigger, so Radix cannot know where to return focus on close.
+  // Remember the element that had focus when the sheet opened and restore
+  // it on close (keyboard users keep their place in the table).
+  const returnFocus = React.useRef<HTMLElement | null>(null);
+
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-[var(--surface-overlay)]" />
         <Dialog.Content
+          onOpenAutoFocus={() => {
+            // Fires before Radix moves focus into the sheet: the element that
+            // opened it still has focus here.
+            const active = document.activeElement;
+            returnFocus.current =
+              active instanceof HTMLElement && active !== document.body ? active : null;
+          }}
+          onCloseAutoFocus={(event) => {
+            const el = returnFocus.current;
+            if (el && el.isConnected) {
+              event.preventDefault();
+              el.focus();
+            }
+          }}
           className={cn(
             "fixed inset-y-0 right-0 z-50 flex w-full flex-col border-l border-[var(--border-default)] bg-[var(--surface-primary)] shadow-modal outline-none",
             wide ? "max-w-xl" : "max-w-md",

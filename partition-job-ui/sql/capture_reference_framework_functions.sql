@@ -1,5 +1,8 @@
 -- ============================================================================
 -- capture_reference_framework_functions.sql
+-- SUPERSEDED (Phase 5B) by sql/capture_reference_framework.sql, which captures
+-- the full manifest (functions, grants, tables, triggers, type, pgAgent) in a
+-- READ ONLY transaction. Kept for history; prefer the new script.
 -- ============================================================================
 -- READ-ONLY capture helper.
 --

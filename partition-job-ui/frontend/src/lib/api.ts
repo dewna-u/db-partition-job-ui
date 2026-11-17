@@ -67,7 +67,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   runJob: (id: number, confirmDrop = false) =>
-    request<{ result: unknown; message: string }>(`/api/jobs/${id}/run`, {
+    request<{ result: import("./types").ManualRunResult | unknown; message: string }>(`/api/jobs/${id}/run`, {
       method: "POST",
       body: JSON.stringify({ confirm_drop: confirmDrop }),
     }),
@@ -105,6 +105,56 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ job_schedule }),
     }),
+  attention: (status: "pending" | "acknowledged" | "manually_rerun" | "all" = "pending") =>
+    request<import("./types").AttentionListResponse>(
+      `/api/attention?status=${status}`,
+    ),
+  acknowledgeAttention: (id: number, note?: string) =>
+    request<{ result: unknown; message: string }>(
+      `/api/attention/${id}/acknowledge`,
+      { method: "POST", body: JSON.stringify({ confirm: true, note: note || null }) },
+    ),
+  recoverAttention: (
+    id: number,
+    opts: { confirmDrop?: boolean; confirmTarget?: string } = {},
+  ) =>
+    request<{
+      result: {
+        status: string;
+        message: string | null;
+        execution_duration_ms: number | null;
+        attention_status: string;
+        job_id: number;
+        attempt_id?: number | null;
+      };
+      message: string;
+    }>(`/api/attention/${id}/recover`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirm: true,
+        confirm_drop: Boolean(opts.confirmDrop),
+        confirm_target: opts.confirmTarget ?? null,
+      }),
+    }),
+  // Phase 5C/5D — hub-local database targets (read-only) and remote attempts.
+  targets: () => request<import("./types").TargetsResponse>("/api/targets"),
+  targetHealth: (id: number) =>
+    request<import("./types").TargetHealthResponse>(`/api/targets/${id}/health`),
+  attempts: (opts: { open?: boolean; state?: string; jobId?: number; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.open) q.set("open", "true");
+    if (opts.state) q.set("state", opts.state);
+    if (opts.jobId != null) q.set("job_id", String(opts.jobId));
+    q.set("limit", String(opts.limit ?? 200));
+    return request<import("./types").AttemptsResponse>(`/api/execution-attempts?${q.toString()}`);
+  },
+  attempt: (id: number) =>
+    request<{ attempt: import("./types").ExecutionAttempt }>(`/api/execution-attempts/${id}`),
+  resolveAttempt: (id: number, body: import("./types").ResolveAttemptPayload) =>
+    request<{ result: Record<string, unknown>; message: string }>(
+      `/api/execution-attempts/${id}/resolve`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   exportCsvUrl: () => `${API_BASE}/api/jobs/export.csv`,
 };
 

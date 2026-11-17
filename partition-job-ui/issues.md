@@ -84,6 +84,11 @@ Remaining Risk:
     Production behaviour after controlled deploy not yet observed.
     Cron helper still not versioned (ISSUE-003).
 
+Update (2026-11-10, Phase 5A):
+    The Job 33 *committed-success* loop above was fixed in Phase 0. A related
+    but different loop for UNcommitted outcomes (FAILED_DATABASE,
+    FAILED_CONNECTION, SKIPPED_TARGET_LOCKED) remained — see ISSUE-007.
+
 
 ## ISSUE-002 — Edit / Enable-Disable persistence (privilege + update security)
 
@@ -188,6 +193,13 @@ Remaining Risk:
     Helper behaviour drift between environments until versioned.
 
 
+Update 2026-11-17 (Phase 5C):
+    Phase 5B.1 (import of the authoritative captured definitions) is
+    DEFERRED. The only authoritative source is production, and production
+    capture is not permitted. No definition was reconstructed or invented;
+    this issue stays OPEN. Phase 5C does not depend on the bodies (its SQL
+    guards return before any worker is called).
+
 ## ISSUE-004 — Local partops_dev bootstrap blocked (auth + missing function bodies)
 
 Severity:
@@ -250,7 +262,11 @@ Severity:
     Medium
 
 Status:
-    Open — documented; not in Phase 2 scope
+    Fixed in source (Phase 5A, 2026-11-10) — production verification pending.
+    `run_partition_job_manual` now takes the same `pg_try_advisory_xact_lock(
+    87421032, …)` with an identical key; a busy target returns
+    `MANUAL_TARGET_LOCKED` (nothing executed, no log row; API HTTP 409).
+    Migration `20261110_02_missed_run_reconcile_retry_and_manual_lock.sql`.
 
 Component:
     `mubasher_oms.run_partition_job_manual` vs
@@ -323,3 +339,271 @@ Fix (future):
 
 Deployment Notes:
     No change required for Phase 3 observability rollout.
+
+
+## ISSUE-007 — Scheduler immediate retry loop on uncommitted outcomes (CPU)
+
+Severity:
+    Critical
+
+Status:
+    Fixed in source (Phase 5A, 2026-11-10) — production verification pending.
+
+Component:
+    Realtime Scheduler (`scheduler_backend/scheduler.py`,
+    `scheduler_backend/retry_policy.py`, `run_partition_job_scheduled`)
+
+Detected:
+    2026-11-09 onboarding audit (source inspection) — matches the historical
+    high-CPU / ~19k `partops.job.execution` events observation and the live
+    `psycopg.InterfaceError: unexpected DateStyle: Redwood, SHOW_TIME` trigger.
+
+Description:
+    For an overdue occurrence whose outcome the database did NOT commit
+    (`FAILED_DATABASE`, `FAILED_CONNECTION`) or that was skipped because the
+    target table was busy (`SKIPPED_TARGET_LOCKED`), `next_run_time` stayed
+    unchanged and the outcome was deliberately not cached. Task completion
+    requested a refresh, the refresh rediscovered the same overdue occurrence
+    with `delay <= 0`, and it was dispatched again immediately — no delay, no
+    attempt limit. Each cycle opened ~3 connections and, for FAILED_DATABASE,
+    re-ran the partition DDL and rolled it back. The refresh-failure backoff
+    only applied when the refresh itself failed.
+
+Root Cause:
+    No per-occurrence retry state; refresh path had no minimum interval;
+    overdue occurrences were always executed immediately.
+    DateStyle trigger: a transaction-local DateStyle change (db_config_para or
+    a worker) made psycopg's text timestamp loader reject the RESULT row after
+    the work ran → exception → rollback → FAILED_DATABASE → loop.
+
+Fix (source):
+    - `OccurrenceRetryTracker` keyed by `(job_id, expected_run_time)`:
+      FAILED_DATABASE/FAILED_CONNECTION → 5 s, 15 s, 30 s, then exhausted
+      (4 attempts total); exhausted occurrences are never executed again — the
+      DB `reconcile_missed_partition_job(..., 'RETRY_EXHAUSTED')` records a
+      review item and advances `next_run_time`.
+    - SKIPPED_TARGET_LOCKED / SKIPPED_LOCKED → contention cooldown
+      5/10/20/30 s (not a failure), bounded by the DB missed-run grace window
+      and a hard cap.
+    - Every other non-committed outcome → minimum 1 s cooldown.
+    - Queue rebuild honours per-occurrence `not_before`; refresh signals are
+      coalesced (≤ 1 signal-driven refresh per second).
+    - Scheduled result timestamps are rendered with `to_char` (DateStyle
+      independent); db_config_para allowlist restricts DateStyle to ISO.
+    - Overdue occurrences beyond the grace window are no longer executed at
+      all (missed-run policy).
+
+Tests:
+    `test_phase5a_missed_run_and_retry.py` (`SchedulerLoopRegressionTests`
+    run the real loop with an always-overdue occurrence: exactly one execution
+    in the observation window for each of FAILED_DATABASE, FAILED_CONNECTION,
+    SKIPPED_TARGET_LOCKED; bounded attempts; shutdown during backoff).
+
+Deployment Notes:
+    Apply 20261110_01 then 20261110_02, then deploy Python; scheduler stays
+    STOPPED in between. See RUNBOOK §10.6.
+
+Remaining Risk:
+    SQL bodies parsed with libpg_query but not executed against PostgreSQL/EDB
+    in this repo (no safe local DB — ISSUE-004).
+
+Update (2026-11-10, Phase 5A hardening — CHANGE-014):
+    The fixed 10-minute "grace" rule from the first 5A pass was replaced by
+    ownership-based classification (historical vs scheduler-owned occurrence)
+    plus a 6-hour DB safety ceiling. Retry defaults are now 4 attempts at
+    15/60/180 s; target-lock contention cools down 5–30 s for up to 1 h; both
+    configurable. Migrations smoke-tested on a disposable PostgreSQL 16
+    cluster (framework worker/cron functions not available — not versioned).
+
+Update (2026-11-10, Phase 5B) — ISSUE-003 remains OPEN:
+    Capture tooling now exists (`sql/capture_reference_framework.sql`,
+    READ-ONLY) and `cron_to_interval_or_next_run(text)` is listed in
+    `sql/framework/framework_manifest.json` with status `capture_required`
+    (placeholder `sql/framework/captured/cron_to_interval_or_next_run.CAPTURE_REQUIRED.md`).
+    `cron_field_to_int_array` is tracked under this issue too (existence and
+    signature unverified). Closes only when the reviewed captured definition
+    is committed.
+
+Update (2026-11-10, Phase 5B) — ISSUE-004:
+    Local end-to-end testing no longer depends on the laptop's PostgreSQL
+    service password: `scripts/disposable_db/run_disposable_db_test.sh` builds a
+    throwaway `initdb` cluster from existing binaries. Still blocked on the
+    missing authoritative definitions (ISSUE-003, ISSUE-008) for the full path.
+
+
+## ISSUE-008 — Partition workers and insert function not version-controlled
+
+Severity:
+    High (blocks reproducible hub installation, full integration tests, handover)
+
+Status:
+    OPEN — capture required from the approved reference database.
+
+Component:
+    `mubasher_oms.create_any_table_partition(character varying, character varying, character varying, integer, interval)`
+    `mubasher_oms.drop_any_table_partition(character varying, character varying, interval)`
+    `mubasher_oms.insert_data_to_partition_job_table(<12 args>)`
+
+Description:
+    PartOps executes partition DDL only through these legacy functions and
+    creates jobs only through the insert function, but their authoritative
+    definitions are not in Git. Their security mode, owner, grants, dynamic SQL
+    and DROP semantics are unreviewed. `realtime_scheduler_v1.sql` cannot be
+    applied to a fresh database without them (dependency gate), so
+    `get_upcoming_partition_jobs` is also absent in disposable tests.
+
+Evidence:
+    `sql/framework/framework_manifest.json` (status `capture_required`);
+    disposable PostgreSQL 16 run: preflight FAIL for exactly these objects;
+    `test_framework_phase5b.ManifestRepositoryConsistencyTests` guards that no
+    body for them appears in `sql/` until captured.
+
+Fix:
+    DBA capture per RUNBOOK §16 → `sql/framework/captured/<name>.sql` →
+    SECURITY_REVIEW_CHECKLIST.md → manifest update → disposable integration run.
+
+Do not close:
+    on placeholders, capture scripts or partial tests — only when the reviewed
+    definitions are committed and the integration plan passes.
+
+
+Update 2026-11-17 (Phase 5C):
+    Phase 5B.1 (import of the authoritative captured definitions) is
+    DEFERRED. The only authoritative source is production, and production
+    capture is not permitted. No definition was reconstructed or invented;
+    this issue stays OPEN. Phase 5C does not depend on the bodies (its SQL
+    guards return before any worker is called).
+
+## ISSUE-009 — EDB Postgres Advanced Server not tested
+
+Severity:
+    Medium
+
+Status:
+    OPEN
+
+Description:
+    All SQL validation so far ran on PostgreSQL 16 (disposable cluster). No
+    PartOps SQL has executed on EDB. See `sql/framework/EDB_COMPATIBILITY.md`
+    (DateStyle default, `varchar2` reporting, `edb_redwood_*` settings, pgAgent
+    vs DBMS_SCHEDULER, identity columns / `prokind` version requirements).
+
+Fix:
+    Run the disposable harness and preflight on a disposable EDB instance of
+    the production version; record results.
+
+
+## ISSUE-010 — Possible EDB `sys` search_path conflict in the DEFINER edit function
+
+Severity:
+    Medium (potential; unproven)
+
+Status:
+    OPEN — verify after capture
+
+Description:
+    `update_data_to_partition_job_table` is SECURITY DEFINER with
+    `search_path = pg_catalog, mubasher_oms, pg_temp` and calls
+    `cron_to_interval_or_next_run`. On EDB, Oracle-compatible built-ins live
+    in schema `sys`. If the captured cron helper uses them unqualified, edits
+    that need a schedule recalculation would fail on EDB. Not a proven
+    incompatibility — Phase 5A semantics were NOT changed.
+
+Fix (only if confirmed):
+    A separate, reviewed change to the pinned search_path (e.g. adding `sys`
+    before `pg_temp`) with a security review.
+
+## ISSUE-011 — Jobs cannot yet execute on additional database targets (Phase 5D)
+
+Severity:
+    Medium (functional gap; safe by design)
+
+Status:
+    CLOSED — 2026-11-17 (Phase 5D, in source; not deployed)
+
+Resolution:
+    Remote orchestrator with a control-database execution-attempt ledger
+    (claim → target transaction → finalization), conservative unknown-outcome
+    handling (never auto-retried), restart recovery, global + per-target
+    concurrency, target cooldowns, manual remote runs through the same engine,
+    target-aware discovery. Validated on throwaway databases with TEST-ONLY
+    stub workers (orchestration only). See REMOTE_EXECUTION.md, CHANGE-017.
+
+Description:
+    Phase 5C introduced the hub-local target registry and `database_target_id`
+    on every job. The existing SQL executors run DDL in the database they are
+    called in, so PartOps can only execute jobs on the control database
+    (target `db01`). For any other target, the executors return
+    `SKIPPED_REMOTE_TARGET` / `MANUAL_REMOTE_TARGET` without executing or
+    logging, `get_upcoming_partition_jobs` ignores such jobs, and the API
+    refuses (409) creating or moving jobs to non-control targets.
+
+Required for Phase 5D:
+    - Per-target dispatch: execute the worker over a connection to the target
+      database (control DB keeps job metadata, history and attention).
+    - Workers installed on each target from CAPTURED definitions only
+      (blocked by Phase 5B.1 / ISSUE-008).
+    - Per-target concurrency (`max_concurrent_jobs`), backoff and health gating
+      so one failed target never blocks the others.
+    - Cross-database outcome recording (DDL on target, log in control DB).
+
+
+## ISSUE-012 — Remote execution review is API-only (multi-target UI pending)
+
+Severity:
+    Low
+
+Status:
+    CLOSED — 2026-11-17 (Phase 5E, in source; not deployed)
+
+Resolution:
+    Database targets page, target-aware jobs / history / review, attempts
+    list and detail, deliberate OUTCOME_UNKNOWN resolution workflow (APPLIED /
+    NOT_APPLIED + note + typed table for DROP), hub status on System. The API
+    is still unauthenticated (separate existing risk, see PROJECT_CONTEXT).
+
+Description:
+    Execution attempts and the resolution of OUTCOME_UNKNOWN attempts
+    (APPLIED / NOT_APPLIED + note) are available through
+    `/api/execution-attempts`; the Needs-review UI lists REMOTE_OUTCOME_UNKNOWN
+    items but has no target filter, attempt view or resolve dialog yet. The API
+    remains unauthenticated (existing risk).
+
+## ISSUE-013 — Rollback classification depends on unverified legacy worker behaviour
+
+Severity:
+    Medium (potential)
+
+Status:
+    OPEN — blocked by Phase 5B.1 (definitions only in production)
+
+Description:
+    Phase 5D treats "worker raised + ROLLBACK succeeded" as proven not applied.
+    That holds for ordinary transactional PL/pgSQL. If a captured worker uses
+    EDB autonomous transactions (PRAGMA AUTONOMOUS_TRANSACTION), dblink or other
+    non-transactional side effects, partial changes could survive a rollback
+    and a retry could repeat them.
+
+Fix (after capture):
+    Review the captured worker bodies; if any non-transactional behaviour is
+    found, classify worker errors as OUTCOME_UNKNOWN (no retry) for that worker.
+
+## ISSUE-014 — No application authentication / authorization (access-control dependency)
+
+Severity:
+    High (operational risk; unchanged by Phase 5E/5E.1)
+
+Status:
+    OPEN — requires an approved authentication architecture (not homemade)
+
+Description:
+    The UI (:8501), API (:8001) and the scheduler's internal endpoints (:8765,
+    localhost) have no authentication. Anyone who can reach them can create /
+    edit / run jobs, run DROP jobs (with the UI confirmation only), recover or
+    acknowledge review items and record OUTCOME_UNKNOWN resolutions.
+
+Mitigation until fixed:
+    PartOps must be network-restricted / protected by approved access controls
+    (admin network only, host firewall, no public exposure, scheduler bound to
+    127.0.0.1) until an authentication architecture is approved. Do not add an
+    ad-hoc login.

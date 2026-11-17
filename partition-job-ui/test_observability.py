@@ -280,7 +280,11 @@ class FailedJobsGaugeTests(unittest.TestCase):
         self.assertIn("is_enabled IS TRUE", source)
         self.assertIn("last_run_status = 'FAIL'", source)
         self.assertIn("COUNT(*)", source)
-        self.assertNotIn("partitioning_job_table_log", source)
+        # Phase 5A hardening: the log table is consulted ONLY to see whether a
+        # later manual run succeeded (one row per job; never counts attempts).
+        self.assertIn("FROM {schema}.{table} AS j", source)
+        self.assertIn("LIMIT 1", source)
+        self.assertNotIn("COUNT(*)::bigint AS failed_count FROM {schema}.{log_table}", source)
         self.assertIn("gauge", inspect.getsource(emit_jobs_failed_count))
 
     def _refresh_with_failed_count(self, failed_count: int) -> list[str]:
@@ -321,16 +325,22 @@ class FailedJobsGaugeTests(unittest.TestCase):
         self.assertTrue(any("partops.jobs.failed_count:2|g" in s for s in sent))
 
     def test_count_helper_excludes_disabled_success_null(self) -> None:
-        """SQL contract: only enabled FAIL rows; not disabled/SUCCESS/NULL."""
+        """SQL contract: only enabled FAIL rows; not disabled/SUCCESS/NULL.
+
+        Phase 5A hardening: a FAIL row is no longer counted once a LATER
+        manual run succeeded (latest actual execution = success).
+        """
         source = inspect.getsource(scheduler_database.count_failed_jobs)
-        sql_start = source.index('sql = (')
-        sql_block = source[sql_start:]
-        self.assertIn("j.is_enabled IS TRUE", sql_block)
-        self.assertIn("j.last_run_status = 'FAIL'", sql_block)
+        base_block = source[source.index("base = ("): source.index("recovered_filter = (")]
+        self.assertIn("j.is_enabled IS TRUE", base_block)
+        self.assertIn("j.last_run_status = 'FAIL'", base_block)
         # Equality to FAIL excludes NULL and SUCCESS without needing OR clauses.
-        self.assertNotIn("SUCCESS", sql_block)
-        self.assertNotIn("is_enabled IS FALSE", sql_block)
-        self.assertNotIn("IS NULL", sql_block)
+        self.assertNotIn("SUCCESS", base_block)
+        self.assertNotIn("is_enabled IS FALSE", base_block)
+        self.assertNotIn("IS NULL", base_block)
+        recovered = source[source.index("recovered_filter = ("):]
+        self.assertIn("l.job_runtime > j.last_run_time", recovered)
+        self.assertIn("<> 'MANUAL_SUCCESS'", recovered)
 
     def test_count_query_failure_does_not_crash_or_emit_zero(self) -> None:
         config = SchedulerConfig(reconcile_seconds=60)

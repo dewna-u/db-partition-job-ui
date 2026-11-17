@@ -506,3 +506,63 @@ class BrandingSourceContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ControlDatabaseDownShortCircuitTests(unittest.TestCase):
+    """Phase 5E.1: with the control DB down, DB-dependent checks are not run
+    (each would wait for its own connect timeout); they report 'unknown'."""
+
+    def test_dependent_checks_skipped_when_connection_failed(self):
+        import system_readiness as sr
+
+        failed = sr._check("database_connection", "Database connection", "database",
+                           sr.STATUS_FAILED, "Unable to connect to the database.")
+        called = []
+
+        def boom(*_a, **_k):
+            called.append(True)
+            raise AssertionError("control-DB dependent check must not run")
+
+        with patch.object(sr, "check_database_connection", return_value=failed), \
+                patch.object(sr, "check_required_tables", side_effect=boom), \
+                patch.object(sr, "check_required_functions", side_effect=boom), \
+                patch.object(sr, "check_framework_manifest", side_effect=boom), \
+                patch.object(sr, "check_database_targets", side_effect=boom), \
+                patch.object(sr, "check_database_privileges", side_effect=boom), \
+                patch.object(sr, "check_scheduler", return_value=[]), \
+                patch.object(sr, "check_systemd_services", return_value=[]), \
+                patch.object(sr, "check_local_ports", return_value=[]), \
+                patch.object(sr, "check_runtime_configuration", return_value=[]), \
+                patch.object(sr, "check_legacy_conflicts", return_value=[]), \
+                patch.object(sr, "check_pgagent_access", return_value=[]), \
+                patch.object(sr, "check_frontend_runtime", return_value=[]):
+            checks = sr._collect_all_checks()
+        self.assertEqual(called, [])
+        by_key = {c["key"]: c for c in checks}
+        self.assertEqual(by_key["database_connection"]["status"], sr.STATUS_FAILED)
+        for key in ("required_tables", "required_functions", "framework_manifest",
+                    "target_registry", "database_privileges"):
+            self.assertEqual(by_key[key]["status"], sr.STATUS_UNKNOWN, key)
+            self.assertIn("control database is unavailable", by_key[key]["summary"])
+        self.assertEqual(by_key["target_registry"]["category"], "targets")
+
+    def test_dependent_checks_run_when_connected(self):
+        import system_readiness as sr
+
+        ok = sr._check("database_connection", "Database connection", "database", sr.STATUS_READY, "ok")
+        with patch.object(sr, "check_database_connection", return_value=ok), \
+                patch.object(sr, "check_required_tables", return_value=[]) as t, \
+                patch.object(sr, "check_required_functions", return_value=[]), \
+                patch.object(sr, "check_framework_manifest", return_value=[]), \
+                patch.object(sr, "check_database_targets", return_value=[]) as g, \
+                patch.object(sr, "check_database_privileges", return_value=[]), \
+                patch.object(sr, "check_scheduler", return_value=[]), \
+                patch.object(sr, "check_systemd_services", return_value=[]), \
+                patch.object(sr, "check_local_ports", return_value=[]), \
+                patch.object(sr, "check_runtime_configuration", return_value=[]), \
+                patch.object(sr, "check_legacy_conflicts", return_value=[]), \
+                patch.object(sr, "check_pgagent_access", return_value=[]), \
+                patch.object(sr, "check_frontend_runtime", return_value=[]):
+            sr._collect_all_checks()
+        t.assert_called_once()
+        g.assert_called_once()

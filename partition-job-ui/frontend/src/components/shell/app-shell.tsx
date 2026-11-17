@@ -1,44 +1,21 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { AppSidebar } from "@/components/shell/sidebar";
+import { HubProvider, useHub } from "@/components/hub/hub-context";
 import { ThemeProvider } from "@/components/theme/theme-provider";
 import { ThemeToggle } from "@/components/theme/theme-toggle";
-import { api } from "@/lib/api";
-import type { SchedulerStatus } from "@/lib/types";
 
 function AppShellInner({ children }: { children: React.ReactNode }) {
-  const [schedulerOk, setSchedulerOk] = useState(false);
-  const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
-  const [schedulerMessage, setSchedulerMessage] = useState("");
-  const [dbConnected, setDbConnected] = useState(false);
-
-  const refresh = useCallback(async () => {
-    try {
-      const sched = await api.schedulerStatus();
-      setSchedulerOk(sched.ok);
-      setScheduler(sched.status);
-      setSchedulerMessage(sched.message);
-    } catch (err) {
-      setSchedulerOk(false);
-      setScheduler(null);
-      setSchedulerMessage(err instanceof Error ? err.message : "Unavailable");
-    }
-    try {
-      await api.readiness();
-      setDbConnected(true);
-    } catch {
-      setDbConnected(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-    const id = window.setInterval(() => void refresh(), 30000);
-    return () => window.clearInterval(id);
-  }, [refresh]);
+  const {
+    schedulerOk,
+    scheduler,
+    schedulerMessage,
+    dbConnected,
+    targets,
+    refreshScheduler,
+  } = useHub();
 
   const heartbeat =
     schedulerOk
@@ -81,13 +58,14 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
           scheduler={scheduler}
           schedulerMessage={schedulerMessage}
           dbConnected={dbConnected}
-          onRefreshScheduler={() => void refresh()}
+          targets={targets}
+          onRefreshScheduler={() => void refreshScheduler()}
         />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <main className="flex-1 px-5 py-4 md:px-6">{children}</main>
           <footer className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--border-default)] px-5 py-2 text-[11px] text-[var(--content-tertiary)] md:px-6">
             <span className="font-medium text-[var(--content-secondary)]">PartOps</span>
-            <span>GTN EDB Partition Operations Platform</span>
+            <span>GTN EDB Partition Operations Platform · this hub only</span>
             <span>
               {schedulerOk && scheduler?.scheduler_active
                 ? "Scheduler online"
@@ -105,7 +83,9 @@ function AppShellInner({ children }: { children: React.ReactNode }) {
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider>
-      <AppShellInner>{children}</AppShellInner>
+      <HubProvider>
+        <AppShellInner>{children}</AppShellInner>
+      </HubProvider>
     </ThemeProvider>
   );
 }

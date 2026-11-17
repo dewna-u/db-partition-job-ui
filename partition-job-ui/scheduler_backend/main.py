@@ -86,14 +86,34 @@ class ProcessSingletonLock:
             self._fh = None
 
 
+_MAX_BODY_BYTES = 4096
+
+
 async def _read_http_request(reader: asyncio.StreamReader) -> tuple[str, str]:
+    method, path, _header = await _read_http_request_full(reader)
+    return method, path
+
+
+async def _read_http_request_full(reader: asyncio.StreamReader) -> tuple[str, str, str]:
     header = await reader.readuntil(b"\r\n\r\n")
     text = header.decode("iso-8859-1", errors="replace")
     first = text.split("\r\n", 1)[0]
     parts = first.split()
     method = parts[0] if parts else ""
     path = parts[1] if len(parts) > 1 else "/"
-    return method, path
+    return method, path, text
+
+
+async def _read_http_body(reader: asyncio.StreamReader, header_text: str) -> bytes:
+    """Read a small JSON body (bounded; Content-Length required)."""
+    length = 0
+    for line in header_text.split("\r\n")[1:]:
+        name, _, value = line.partition(":")
+        if name.strip().lower() == "content-length":
+            length = int(value.strip())
+    if length < 0 or length > _MAX_BODY_BYTES:
+        raise ValueError("body too large")
+    return await reader.readexactly(length) if length else b""
 
 
 async def _write_http(
@@ -122,9 +142,35 @@ async def _handle_client(
     scheduler: PartitionScheduler,
 ) -> None:
     try:
-        method, path = await _read_http_request(reader)
+        method, path, header_text = await _read_http_request_full(reader)
     except Exception:  # noqa: BLE001
         writer.close()
+        return
+
+    if method == "POST" and path.startswith("/internal/scheduler/manual-run"):
+        # Phase 5D: manual run of a job on a MANAGED target through the single
+        # remote execution engine. Localhost/private bind only (same trust
+        # boundary as the API). The API enforced DROP confirmation; the claim
+        # enforces it again in SQL.
+        try:
+            body = await _read_http_body(reader, header_text)
+            payload = json.loads(body or b"{}")
+            job_id = int(payload["job_id"])
+            attention_id = payload.get("attention_id")
+            attention_id = int(attention_id) if attention_id is not None else None
+            confirm_drop = bool(payload.get("confirm_drop", False))
+            if job_id < 1:
+                raise ValueError("job_id")
+        except Exception:  # noqa: BLE001
+            await _write_http(
+                writer, 400,
+                {"status": "BAD_REQUEST",
+                 "message": "job_id (and optional confirm_drop / attention_id) required"},
+                reason="Bad Request")
+            return
+        result = await scheduler.run_manual_remote(
+            job_id, confirm_drop=confirm_drop, attention_id=attention_id)
+        await _write_http(writer, 200, result)
         return
 
     if method == "GET" and path.startswith("/health"):

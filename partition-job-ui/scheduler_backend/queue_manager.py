@@ -6,7 +6,7 @@ import heapq
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable, Optional
+from typing import Iterable, Mapping, Optional, Tuple
 
 from scheduler_backend.models import ScheduledJob
 
@@ -37,24 +37,43 @@ class ScheduleQueue:
         self._active.clear()
 
     def replace_from_jobs(
-        self, jobs: Iterable[ScheduledJob], *, now_mono: Optional[float] = None
+        self,
+        jobs: Iterable[ScheduledJob],
+        *,
+        now_mono: Optional[float] = None,
+        not_before: Optional[Mapping[Tuple[int, datetime], float]] = None,
     ) -> None:
-        """Rebuild the authoritative set from a fresh DB snapshot."""
+        """Rebuild the authoritative set from a fresh DB snapshot.
+
+        ``not_before`` maps occurrence keys to the earliest monotonic time they
+        may be dispatched (retry backoff / cooldown). The due time is the later
+        of the DB-derived time and that bound — a refresh can never make an
+        occurrence under backoff due immediately.
+        """
         now = time.monotonic() if now_mono is None else now_mono
+        bounds = not_before or {}
         self._heap.clear()
         self._active.clear()
         for job in jobs:
-            due_mono = now + float(job.delay_seconds)
             key = job.key
-            self._active[key] = due_mono
-            heapq.heappush(
-                self._heap,
-                _HeapItem(
-                    due_monotonic=due_mono,
-                    expected_run_time=job.expected_run_time,
-                    job_id=job.job_id,
-                ),
-            )
+            due_mono = now + float(job.delay_seconds)
+            bound = bounds.get(key)
+            if bound is not None and bound > due_mono:
+                due_mono = bound
+            self.push(job.job_id, job.expected_run_time, due_mono)
+
+    def push(self, job_id: int, expected_run_time: datetime, due_mono: float) -> None:
+        """Insert or move one occurrence to ``due_mono`` (lazy heap update)."""
+        key = (job_id, expected_run_time)
+        self._active[key] = due_mono
+        heapq.heappush(
+            self._heap,
+            _HeapItem(
+                due_monotonic=due_mono,
+                expected_run_time=expected_run_time,
+                job_id=job_id,
+            ),
+        )
 
     def peek(self) -> Optional[tuple[float, int, datetime]]:
         """Return (due_monotonic, job_id, expected_run_time) for the next active item."""

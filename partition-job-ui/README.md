@@ -528,9 +528,13 @@ Important properties:
   no worker runs, `next_run_time` is cleared (`NULL`), and an operator must
   correct the schedule. PartOps does **not** invent arbitrary dates
   (no automatic `+1 day` / frequency fallback for invalid cron results).
-* Overdue semantics: discover overdue jobs, execute the current occurrence
-  **once** when the next state is valid, then advance — not an uncontrolled
-  miss-by-miss catch-up storm.
+* Overdue semantics (Phase 5A): an occurrence the scheduler first discovers
+  **already overdue** (beyond a small jitter tolerance — e.g. after downtime)
+  is **never executed automatically**. It is recorded in
+  `partition_job_attention` for DBA review and the job advances to its first
+  legitimate future occurrence. An occurrence the scheduler discovered on time
+  ("owned") may still run late after waiting for a slot / busy table / retry.
+  See "Phase 5A" below.
 * Streamlit/Next.js UI is **not** the scheduler.
 * No Redis, Celery, Kafka, RabbitMQ, LISTEN/NOTIFY, or connection pools.
 * DB connections are open → one logical operation → close immediately.
@@ -546,17 +550,21 @@ Important properties:
 * UI refresh HTTP is a wake-up signal only; the backend always rereads PostgreSQL.
 * Periodic reconciliation (`PARTITION_SCHEDULER_RECONCILE_SECONDS`) catches direct SQL edits.
 * Lookahead window: `PARTITION_SCHEDULER_LOOKAHEAD_SECONDS` (default 120).
-* Overdue jobs remain discoverable after downtime (`delay_seconds <= 0` → run immediately after revalidation).
+* Overdue jobs remain discoverable after downtime (`delay_seconds <= 0`); the
+  scheduler classifies them as historical and has the database reconcile them
+  as missed — no historical catch-up.
 * Same-time jobs are ordered by `next_run_time`, then `job_id`, then executed
   under a bounded concurrency limit (see Phase 2 below).
 * OS singleton lock prevents two backends; DB uses `FOR UPDATE` + two
   transaction advisory locks (per-job and per-target-table).
 * Secondary Python rapid-loop breaker is a short-lived process-local cache
   (TTL 300s, max 512) of recently **committed** occurrence transitions
-  (`EXECUTED` / SQL `FAILED` / `FAILED_INVALID_SCHEDULE` only).
+  (`EXECUTED` / SQL `FAILED` / `FAILED_INVALID_SCHEDULE` /
+  `MISSED_RESCHEDULED` / `MISSED_INVALID_SCHEDULE`).
   `FAILED_DATABASE`, `FAILED_CONNECTION`, ordinary skips (including
-  `SKIPPED_TARGET_LOCKED`), and exceptions are not cached; the database
-  remains the scheduling source of truth.
+  `SKIPPED_TARGET_LOCKED`), and exceptions are not cached; instead they go
+  through the bounded per-occurrence retry policy (Phase 5A) — never an
+  immediate re-run. The database remains the scheduling source of truth.
 
 ### Phase 2 — controlled parallel scheduled execution
 
@@ -649,6 +657,198 @@ UI → FastAPI PATCH /api/jobs/{id}
   stale/NULL or the schedule changes. Invalid schedules fail closed (rollback).
 * After a successful save the API returns the refreshed job row; the Jobs page
   reloads so Enabled/Disabled and next run update without a fake success.
+
+### Phase 5A — missed runs, bounded retry, manual target lock, db_config allowlist
+
+**Missed-run policy (no historical catch-up) — ownership, not a fixed window.**
+
+The scheduler classifies every occurrence `(job_id, expected_run_time)` once,
+at its first sighting, using the database clock (`delay_seconds`):
+
+* **Owned** — first seen before it was due (lookahead) or at most
+  `PARTITION_SCHEDULER_OVERDUE_TOLERANCE_SECONDS` (default 60 s, timer/refresh
+  jitter only) after it. The scheduler is responsible for it: it may execute
+  late after waiting for a concurrency slot, a busy target table or a retry
+  backoff — it does **not** become "missed" because the wall clock passed some
+  threshold.
+* **Historical** — first seen later than that (scheduler start after downtime,
+  refreshes failing during a DB outage). It is **never executed**.
+
+```text
+refresh → classify new occurrences (sticky)
+historical → reconcile_missed_partition_job(..., 'MISSED_SCHEDULED_RUN'):
+               job lock → FOR UPDATE → enabled / still-current / due checks
+               INSERT partition_job_attention (PENDING_REVIEW, missed_run_time = T)
+               next_run_time := first future occurrence (cron helper; NULL = fail closed)
+               NO CREATE/DROP; last_run_time / last_run_status untouched
+               → MISSED_RESCHEDULED / MISSED_INVALID_SCHEDULE
+owned      → run_partition_job_scheduled: full revalidation, target lock,
+               future-next validation, worker, log.
+               DB safety ceiling: if now > T + partition_job_max_execution_lateness()
+               (default 6 h, DBA-tunable) it reconciles as missed instead —
+               defence against stale/buggy callers and unbounded waits.
+```
+
+Ownership is process memory: after a scheduler restart, occurrences that are
+already overdue are historical by design. Startup requires
+`LOOKAHEAD_SECONDS >= RECONCILE_SECONDS` so normal occurrences are always seen
+before they are due.
+
+A missed run is not an execution failure: `last_run_status` keeps the result
+of the last real execution. The UI shows it as amber **Needs review**.
+
+**DBA review** (Jobs page banner / job detail panel):
+
+* All settings are `PARTITION_SCHEDULER_*` in `.env.realtime` (see
+  `.env.realtime.example`); invalid values stop the scheduler at startup.
+* **Run missed occurrence** → `POST /api/attention/{id}/recover`
+  → `run_partition_job_attention_recovery(id)` → `run_partition_job_manual`
+  (same privileges, target lock and MANUAL_* logging as "Run now").
+  `next_run_time` is **never** changed: missed 20 Oct 02:00, next normal run
+  27 Oct 02:00, manual recovery on 26 Oct 14:00 → next run stays 27 Oct 02:00.
+  Success → `MANUALLY_RERUN`; failure/busy target → stays `PENDING_REVIEW`
+  with the attempt recorded. DROP recovery requires `confirm_drop` **and**
+  typing the exact `schema.table`.
+* **Acknowledge without running** → `POST /api/attention/{id}/acknowledge`
+  (`ACKNOWLEDGED`, optional note, no DDL).
+* `GET /api/attention?status=pending|acknowledged|manually_rerun|all`.
+
+**Bounded retry/backoff** (per `(job_id, expected_run_time)`, scheduler memory):
+
+| Outcome | Behaviour |
+|---|---|
+| EXECUTED / FAILED / FAILED_INVALID_SCHEDULE / MISSED_* | committed; done (retry state cleared) |
+| FAILED_DATABASE / FAILED_CONNECTION | `RETRY_MAX_ATTEMPTS` (default 4) execution attempts, `RETRY_DELAYS_SECONDS` between them (default 15, 60, 180 s ≈ 4 min — rides out a DB restart/failover), then **exhausted** → DB `reconcile_missed_partition_job(..., 'RETRY_EXHAUSTED')` (review item; next_run_time advanced); never executed again |
+| SKIPPED_TARGET_LOCKED / SKIPPED_LOCKED | table busy, not a failure: cooldown `TARGET_LOCK_COOLDOWN_SECONDS` (default 5/10/20/30 s, last repeats) for up to `TARGET_LOCK_MAX_WAIT_SECONDS` (default 1 h), then RETRY_EXHAUSTED review item. The occurrence stays owned meanwhile. |
+| any other non-committed status | ≥ 1 s cooldown |
+
+No zero-delay path remains: the queue rebuild honours each occurrence's
+`not_before`, and signal-driven refreshes are coalesced to at most one per
+second. Waits are `asyncio` timeouts (no `time.sleep`), so shutdown and HTTP
+refresh stay responsive during backoff.
+
+**Manual run lock.** `run_partition_job_manual` takes the same target-table
+advisory lock (`87421032`, identical key) as scheduled execution. Busy →
+`MANUAL_TARGET_LOCKED`, nothing executed, API HTTP 409.
+
+**db_config_para allowlist** (Python `validators.py` + SQL
+`partition_job_config_param_allowed`, enforced on create/edit and before every
+`set_config`): `lock_timeout`, `statement_timeout`,
+`idle_in_transaction_session_timeout`, `work_mem`, `maintenance_work_mem`,
+`effective_io_concurrency`, `random_page_cost`,
+`max_parallel_maintenance_workers`, and `datestyle` with ISO output only
+(`ISO`, `ISO, DMY|MDY|YMD`). Anything else (e.g. `role`,
+`session_authorization`, `search_path`) is rejected.
+
+**Failed-jobs gauge.** `last_run_status` keeps its established meaning (latest
+*scheduled* execution; manual runs never change it). `partops.jobs.failed_count`
+counts enabled jobs with `last_run_status = 'FAIL'` **unless a later manual run
+(e.g. a DBA fix via Run now) succeeded** — so a successful recovery clears the
+gauge without rewriting execution history. A later `MANUAL_FAIL` counts again.
+
+**Metrics** (low-cardinality): `partops.jobs.pending_review_count` (gauge),
+`partops.missed_run.detected` {reason}, `partops.missed_run.reconciled`
+{reason, outcome}, `partops.scheduler.retry_scheduled` {status},
+`partops.scheduler.retry_exhausted` {status}.
+
+### Phase 5B — database framework (version-controlled model)
+
+* Every database object PartOps needs is listed in
+  `sql/framework/framework_manifest.json` (rendered as
+  `sql/framework/INVENTORY.md`), split into **PartOps-owned** objects (in Git)
+  and **existing/legacy framework** objects.
+* **Not yet in Git (capture required, never invented):**
+  `cron_to_interval_or_next_run`, `create_any_table_partition`,
+  `drop_any_table_partition`, `insert_data_to_partition_job_table`
+  (+ `cron_field_to_int_array`, unverified). Capture with the READ-ONLY
+  `sql/capture_reference_framework.sql` — workflow in `sql/framework/README.md`
+  and RUNBOOK §16.
+* Framework version: `mubasher_oms.partops_framework_version` (migration
+  `20261110_03`); the application expects the manifest's `framework_version`.
+* READ-ONLY preflight: `python scripts/preflight_framework.py --expect-database <db>`
+  (PASS / WARNING / FAIL). The scheduler runs the same check for its scope at
+  startup and dispatches nothing while it fails.
+* Disposable end-to-end test:
+  `scripts/disposable_db/run_disposable_db_test.sh --i-understand-this-is-disposable`
+  (PostgreSQL 16 tested; **EDB not yet tested**).
+
+### Phase 5C — hub-local database targets (foundation)
+
+Architecture: ONE PARTOPS INSTANCE PER HUB / APPROXIMATELY TWO TARGET DATABASES PER HUB /
+NO GLOBAL MULTI-HUB CONTROL PLANE.
+
+* Target registry `mubasher_oms.partops_database_target` in the existing
+  PartOps (control) database; the control database itself is target `db01`.
+  No passwords or secret values are stored — only a Secrets Manager secret
+  identifier for `aws` targets.
+* Every job has `database_target_id` (migration `20261117_01` backfills
+  existing jobs to `db01`). `db_config_para` stays session configuration only.
+* `database_targets.py`: validated `DatabaseTarget` model, per-target
+  credentials (`inherit` / `aws` / `env`), per-secret credential cache,
+  short-lived target connections verified with `current_database()`, and a
+  read-only per-target health check that reuses the Phase 5B manifest
+  (`target_execution` scope for managed targets).
+* Read-only API: `GET /api/targets`, `/api/targets/{id}`,
+  `/api/targets/{id}/health`. Job create/edit accept `database_target_id`;
+  changing it is a dangerous change and is refused (409) until Phase 5D.
+* Scheduler: blocked unless exactly one enabled control target matches the
+  connected database; occurrences carry the target; metrics get a
+  low-cardinality `target` tag (registry key, e.g. `db01`).
+* **Not in 5C:** executing jobs on additional targets (Phase 5D), multi-target
+  UI (Phase 5E). Phase 5B.1 (capturing the legacy definitions) stays deferred:
+  production is the only source and production capture is not permitted.
+
+See RUNBOOK §10.7 (deploy/rollback) and §17 (targets).
+
+### Phase 5D — target-aware scheduler and safe remote execution
+
+Architecture: ONE PARTOPS INSTANCE PER HUB / APPROXIMATELY TWO TARGET DATABASES PER HUB /
+NO GLOBAL MULTI-HUB CONTROL PLANE.
+Design: `REMOTE_EXECUTION.md`.
+
+* The scheduler discovers due jobs of **all enabled targets** from the control
+  database (`partops_get_upcoming_jobs`) and runs db01 jobs with the existing
+  executor and db02+ jobs with a remote orchestrator: control claim → target
+  transaction (advisory lock, allowlisted settings, legacy worker, COMMIT) →
+  control finalization, recorded in `partops_execution_attempt`.
+* No distributed transaction is assumed. Unprovable target outcomes become
+  `OUTCOME_UNKNOWN` and are never retried automatically (review item, job
+  paused). Known failures use the Phase 5A bounded retry; a confirmed commit
+  is only finalized, never re-executed. Restart recovery classifies leftovers.
+* Global + per-target concurrency (target slot first, then global slot),
+  per-target availability cooldown, cached per-target preflight.
+* Manual runs / missed-run recovery of db02+ jobs go through the scheduler's
+  engine. API: job create/edit accept healthy managed targets; target moves
+  are dangerous and refused while an attempt is open;
+  `GET /api/execution-attempts`, `POST /api/execution-attempts/{id}/resolve`;
+  history rows carry `database_target_id` / `target_key` / `execution_attempt_id`.
+* Migrations `20261117_03` (ledger, guards) and `20261117_04` (control
+  functions); framework version `20261117_04`. RUNBOOK §10.8.
+* Not in 5D: multi-target UI (Phase 5E). Phase 5B.1 stays deferred.
+
+### Phase 5E — hub-local multi-target operations UI
+
+* New read-only **Database targets** page (`/targets`): target, database,
+  environment, role, health (Healthy / with warnings / Disabled / Unreachable /
+  Authentication failed / Wrong database / Framework incompatible /
+  Configuration error), framework problems vs warnings, concurrency, waiting,
+  backoff. No target administration in the UI (DBA-only, RUNBOOK §17).
+* Jobs: Database column + target filter; job drawer shows the target, its
+  health and contextual isolation warnings; "Last scheduled status" and the
+  latest manual result are shown separately.
+* Create / edit: database target selector (only usable targets selectable);
+  a target change has its own explicit confirmation block.
+* Remote manual runs go through the scheduler; 503 / 504 / unknown outcomes
+  have specific operator messages.
+* History: Target column + filter, attempt links, remote execution attempts.
+* OUTCOME_UNKNOWN: red banners everywhere it matters; resolution only through
+  a deliberate APPLIED / NOT_APPLIED workflow with note (+ typed table for
+  DROP). No retry action exists.
+* System: hub status OPERATIONAL / DEGRADED / DOWN (a managed target failing
+  is DEGRADED; only the control database connection is DOWN) and per-target
+  scheduler concurrency. Overview: Jobs, Targets healthy, Needs review,
+  Running, Waiting, Next execution.
+* RUNBOOK §18 (UI guide, message guide, manual verification matrix).
 
 ### New database configuration (production-copy / sensitive)
 

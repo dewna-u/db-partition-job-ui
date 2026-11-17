@@ -657,3 +657,443 @@ Behavioural Impact:
 
 Notes:
     No commit/push; no server/DB/AWS access.
+
+## CHANGE-013 — Phase 5A: missed-run policy, bounded retry/backoff, manual target lock, db_config allowlist
+
+Date:
+    2026-11-10
+
+Reason:
+    Make the single-database scheduler safe before any multi-host work:
+    stop the immediate retry loop (ISSUE-007), stop automatic execution of
+    historical overdue occurrences, make missed work reviewable by the DBA,
+    close the manual-vs-scheduled target race (ISSUE-005) and restrict
+    db_config_para to safe session parameters.
+
+Related Issues:
+    ISSUE-007 (fixed in source), ISSUE-005 (fixed in source), ISSUE-001 (note)
+
+Files Changed:
+    - `sql/migrations/20261110_01_partition_job_attention.sql` (new)
+    - `sql/migrations/20261110_02_missed_run_reconcile_retry_and_manual_lock.sql` (new)
+    - `sql/realtime_scheduler_v1.sql` (canonical scheduled body + reconcile)
+    - `sql/migrations/README.md`
+    - `scheduler_backend/retry_policy.py` (new)
+    - `scheduler_backend/scheduler.py`, `scheduler_database.py`,
+      `queue_manager.py`, `models.py`
+    - `observability.py`
+    - `validators.py` (db_config allowlist)
+    - `database.py` (attention review, conflict/not-found errors,
+      MANUAL_TARGET_LOCKED → 409)
+    - `api/deps.py`, `api/main.py`, `api/routers/attention.py` (new)
+    - `frontend/src/components/jobs/attention-review.tsx` (new),
+      `job-detail-panel.tsx`, `app/jobs/page.tsx`, `app/page.tsx`,
+      `lib/api.ts`, `lib/types.ts`, `lib/format.ts`
+    - `.env.realtime.example`
+    - `test_phase5a_missed_run_and_retry.py` (new);
+      `test_scheduler_phase0_safety.py`, `test_scheduler_phase2_concurrency.py`
+      (canonical body now tracks the Phase 5A migration; handled-status set)
+    - `README.md`, `RUNBOOK.md`, `issues.md`, `changes.md`, `../PROJECT_CONTEXT.md`
+
+Database Changes (prepared, NOT applied):
+    - New table `mubasher_oms.partition_job_attention` (+ guard trigger, indexes).
+    - New helpers `partition_job_missed_run_grace()` (10 min) and
+      `partition_job_config_param_allowed(text, text)`.
+    - New `reconcile_missed_partition_job`, `run_partition_job_attention_recovery`,
+      `acknowledge_partition_job_attention`.
+    - `CREATE OR REPLACE` of `run_partition_job_scheduled`,
+      `run_partition_job_manual`, `update_data_to_partition_job_table`.
+    - PUBLIC EXECUTE revoked on all touched functions; narrow role grants.
+
+Behavioural Impact:
+    - Overdue occurrence later than expected + grace: NOT executed; attention
+      item recorded; `next_run_time` → first future occurrence (fail closed to
+      NULL if none). `last_run_status` / `last_run_time` untouched.
+    - FAILED_DATABASE / FAILED_CONNECTION: retries at 5/15/30 s, then
+      RETRY_EXHAUSTED attention item; never immediate, never unbounded.
+    - SKIPPED_TARGET_LOCKED: contention cooldown 5/10/20/30 s within grace.
+    - Manual run: `MANUAL_TARGET_LOCKED` (HTTP 409) while the table is busy.
+    - db_config_para: only allowlisted keys; DateStyle ISO-only. Existing rows
+      with other keys fail closed at execution (FAILED, logged) until edited.
+    - New UI: amber "Needs review" on Jobs/Overview; detail-panel review card
+      with "Run missed occurrence" / "Acknowledge without running".
+      Recovery never changes `next_run_time`; DROP recovery requires typing
+      `schema.table`.
+
+Environment Variables (optional, scheduler):
+    `PARTITION_SCHEDULER_RETRY_DELAYS_SECONDS` (5,15,30),
+    `PARTITION_SCHEDULER_CONTENTION_DELAYS_SECONDS` (5,10,20,30),
+    `PARTITION_SCHEDULER_EXHAUSTED_RETRY_SECONDS` (60),
+    `PARTITION_RECONCILE_MISSED_FUNCTION`, `PARTITION_JOB_ATTENTION_TABLE`.
+
+Metrics (new, low-cardinality):
+    `partops.jobs.pending_review_count` (gauge),
+    `partops.missed_run.detected` {reason},
+    `partops.missed_run.reconciled` {reason, outcome},
+    `partops.scheduler.retry_scheduled` {status},
+    `partops.scheduler.retry_exhausted` {status}.
+
+Tests:
+    470 backend tests OK (`python -m unittest discover -s . -p "test_*.py"`).
+    `npm run lint` clean. `npm run build` passes (verified from a copy outside
+    OneDrive; the in-place build hit an OneDrive `EINVAL readlink` on the
+    generated `.next` cache — environmental, not a code error).
+    SQL parsed with libpg_query (pglast 7.22, scratch only) — grammar only.
+
+Deployment / Rollback:
+    RUNBOOK §10.6. No commit/push; no server/DB/AWS/Datadog access.
+
+Note:
+    The 10-minute grace rule, `partition_job_missed_run_grace()`, the
+    5/15/30 s retry defaults and `PARTITION_SCHEDULER_CONTENTION_DELAYS_SECONDS`
+    described above were replaced before release by CHANGE-014.
+
+## CHANGE-014 — Phase 5A hardening: ownership-based missed runs, configurable retry, failed-gauge fix
+
+Date:
+    2026-11-10
+
+Reason:
+    Review of CHANGE-013 before acceptance. A fixed "scheduled time + 10 min"
+    rule could turn an occurrence the scheduler had already queued on time —
+    and that was only waiting for a concurrency slot or a busy target table —
+    into a "missed" run. Retry defaults (≈50 s total) were too short for a
+    DB restart/failover. A successful manual recovery left
+    `partops.jobs.failed_count` raised until the next scheduled run.
+
+Related Issues:
+    ISSUE-007 (hardened), ISSUE-005 (unchanged; fixed in CHANGE-013)
+
+Design:
+    - Ownership, decided once at first sighting from the DB clock:
+      OWNED = first seen before due or ≤ `PARTITION_SCHEDULER_OVERDUE_TOLERANCE_SECONDS`
+      (default 60 s, jitter only) after it; HISTORICAL = first seen later.
+      HISTORICAL → `reconcile_missed_partition_job(..., 'MISSED_SCHEDULED_RUN')`
+      (never executed). OWNED → `run_partition_job_scheduled` (full DB
+      revalidation), may run late after waiting for slot / lock / backoff.
+    - DB safety ceiling `partition_job_max_execution_lateness()` (default
+      6 h) replaces `partition_job_missed_run_grace()` (10 min): the DB never
+      executes an occurrence later than that, whatever the caller claims.
+    - Startup check: `LOOKAHEAD_SECONDS >= RECONCILE_SECONDS`.
+    - Retry: `PARTITION_SCHEDULER_RETRY_MAX_ATTEMPTS` (4),
+      `PARTITION_SCHEDULER_RETRY_DELAYS_SECONDS` (15,60,180; last repeats),
+      `PARTITION_SCHEDULER_TARGET_LOCK_COOLDOWN_SECONDS` (5,10,20,30),
+      `PARTITION_SCHEDULER_TARGET_LOCK_MAX_WAIT_SECONDS` (3600). Strictly
+      validated; invalid values stop the scheduler at startup.
+    - Failed-jobs gauge: `last_run_status` semantics unchanged (latest
+      scheduled outcome). `partops.jobs.failed_count` excludes a FAIL row when
+      a LATER manual run succeeded (latest manual outcome wins). Scheduler
+      role gets read-only SELECT on the log table; falls back to the legacy
+      rule if the grant is missing.
+    - Attention guard: `MANUALLY_RERUN` only with a recorded `MANUAL_SUCCESS`.
+      `acknowledge_partition_job_attention` gets a fixed `search_path`.
+
+Files Changed:
+    - `sql/migrations/20261110_01_partition_job_attention.sql`,
+      `20261110_02_missed_run_reconcile_retry_and_manual_lock.sql`,
+      `sql/realtime_scheduler_v1.sql`, `sql/migrations/README.md`
+    - `scheduler_backend/retry_policy.py`, `scheduler.py`,
+      `scheduler_database.py`, `models.py`
+    - `.env.realtime.example`
+    - `test_phase5a_missed_run_and_retry.py` (+ hardening tests),
+      `test_observability.py` (failed-gauge contract updated)
+    - `README.md`, `RUNBOOK.md`, `issues.md`, `changes.md`, `../PROJECT_CONTEXT.md`
+
+Validation:
+    - 493 backend tests OK.
+    - Disposable PostgreSQL 16 smoke test (throwaway `initdb` cluster in the
+      session scratchpad, 127.0.0.1:55439, destroyed afterwards): repo
+      bootstrap + migrations 20260929_01/02/03, 20261013_02, 20261110_01/02
+      applied (5A migrations applied twice — idempotent); catalog/security
+      matrix, allowlist, historical reconcile, DB ceiling, 30-min-late owned
+      occurrence NOT treated as missed, attention immutability and single
+      resolution, recovery keeps next_run_time, config-drift refusal,
+      manual/scheduled target lock, failed-gauge semantics — all passed.
+      Not covered (authoritative bodies not version-controlled):
+      `cron_to_interval_or_next_run`, `create_any_table_partition`,
+      `drop_any_table_partition`, `insert_data_to_partition_job_table`,
+      `get_upcoming_partition_jobs` (realtime_scheduler_v1.sql dependency gate).
+
+Notes:
+    No commit/push; no server/production DB/AWS/Datadog access.
+
+## CHANGE-015 — Phase 5B: version-controlled database framework model, capture, preflight, version gate
+
+Date:
+    2026-11-10
+
+Reason:
+    PartOps depends on legacy database functions whose authoritative source is
+    not in Git, which blocks reproducible hub deployment, full integration
+    testing and handover. This change makes the framework explicit and
+    checkable without inventing any production function body.
+
+Related Issues:
+    ISSUE-003 (open), ISSUE-004 (update), ISSUE-008 (new, open),
+    ISSUE-009 (new, open), ISSUE-010 (new, open)
+
+Files Added:
+    - `sql/framework/framework_manifest.json` (source of truth), `README.md`,
+      `INVENTORY.md` (generated), `SECURITY_REVIEW_CHECKLIST.md`,
+      `EDB_COMPATIBILITY.md`, `INTEGRATION_TEST_PLAN.md`,
+      `captured/README.md`, `captured/*.CAPTURE_REQUIRED.md` (5)
+    - `sql/capture_reference_framework.sql` (READ ONLY transaction)
+    - `sql/migrations/20261110_03_partops_framework_version.sql`
+    - `sql/tests/disposable/00_roles.sql`, `10_post_bootstrap_grants.sql`,
+      `20_phase5a_smoke.sql`, `30_target_lock.sql`, `40_integration_full.sql`
+    - `framework_manifest.py` (load/validate/read-only snapshot/evaluate)
+    - `scripts/preflight_framework.py`, `scripts/framework_inventory.py`,
+      `scripts/disposable_db/run_disposable_db_test.sh`
+    - `test_framework_phase5b.py`, `test_framework_integration.py`
+
+Files Changed:
+    - `scheduler_backend/scheduler.py`, `scheduler_database.py`, `models.py`
+      (framework start gate), `observability.py` (`scheduler.framework_ready`)
+    - `system_readiness.py` (manifest check)
+    - `sql/capture_reference_framework_functions.sql` (marked superseded)
+    - `sql/migrations/README.md`, `.env.realtime.example`, `README.md`,
+      `RUNBOOK.md` (§10.6 + new §16), `issues.md`, `changes.md`,
+      `../PROJECT_CONTEXT.md`
+
+Behavioural Impact:
+    - Scheduler: before dispatching anything it runs a READ-ONLY gate
+      (scheduler scope of the manifest as its own role). On FAIL/unknown it
+      dispatches nothing and re-checks every
+      `PARTITION_SCHEDULER_FRAMEWORK_RECHECK_SECONDS` (300). Requires migration
+      20261110_03 and the legacy functions to be present.
+    - No Phase 5A semantics changed.
+
+Validation:
+    - Backend unit tests (see final report); integration tests SKIP with
+      "FRAMEWORK DEFINITION NOT AVAILABLE".
+    - Disposable PostgreSQL 16 run of the repository harness: all runnable
+      stages pass; preflight FAILs exactly on the uncaptured legacy functions
+      (+ get_upcoming_partition_jobs, which v1 cannot install without them);
+      capture script runs read-only on PostgreSQL 16.
+
+Notes:
+    No commit/push; no server, live/reference DB, AWS or Datadog access.
+
+## CHANGE-016 — Phase 5C: hub-local multi-database foundation
+
+Date:
+    2026-11-17
+
+Reason:
+    ONE PARTOPS INSTANCE PER HUB / APPROXIMATELY TWO TARGET DATABASES PER HUB /
+    NO GLOBAL MULTI-HUB CONTROL PLANE. Jobs need an explicit database target
+    before per-target execution (Phase 5D) can be built safely.
+
+Related Issues:
+    ISSUE-011 (new, open: remote-target execution). ISSUE-003 / ISSUE-008 /
+    ISSUE-009 / ISSUE-010 stay OPEN — Phase 5B.1 is DEFERRED (production is the
+    only source of the legacy definitions; production capture not permitted).
+
+Files Added:
+    - `sql/migrations/20261117_01_partops_database_target.sql` (registry,
+      default control target db01, job column + backfill + NOT NULL + FK)
+    - `sql/migrations/20261117_02_target_aware_executors.sql` (control-target
+      guards; framework version 20261117_02)
+    - `database_targets.py`, `api/routers/targets.py`
+    - `sql/tests/disposable/15_pre5c_jobs.sql`, `25_phase5c_targets.sql`,
+      `scripts/disposable_db/target_routing_check.py`
+    - `test_phase5c_database_targets.py` (49 tests)
+
+Files Changed:
+    - `db_credentials.py` (per-secret keyed cache, per-target AWS resolution)
+    - `database.py` (target column in job queries, pre-5C tolerant; registry
+      reads; MANUAL_REMOTE_TARGET → 409), `api/main.py`, `api/routers/jobs.py`
+      (`database_target_id`, validation, dangerous change, 409 until 5D)
+    - `scheduler_backend/models.py`, `scheduler.py`, `scheduler_database.py`,
+      `retry_policy.py` (control-target gate, occurrence target, target tag,
+      SKIPPED_REMOTE_TARGET clears retry state)
+    - `observability.py` (`target` tag, `target.healthy` gauge),
+      `system_readiness.py` ("Database targets" category)
+    - `framework_manifest.py`, `sql/framework/framework_manifest.json`,
+      `INVENTORY.md` (regenerated), `realtime_scheduler_v1.sql` (canonical
+      bodies synced), `sql/capture_reference_framework.sql`
+    - Tests updated for the new canonical migration/version; harness
+      `run_disposable_db_test.sh` (stages 5c/6c), `20_phase5a_smoke.sql` (T9b)
+    - Docs: `README.md`, `RUNBOOK.md` (§10.7, §17), `sql/migrations/README.md`,
+      `sql/framework/README.md`, `INTEGRATION_TEST_PLAN.md`, `.env*.example`,
+      `issues.md`, `../PROJECT_CONTEXT.md`
+
+Behavioural Impact:
+    - Existing single-database installations: unchanged behaviour; all jobs
+      belong to db01 (the control database).
+    - Jobs of non-control targets are never executed in the control DB
+      (SKIPPED_REMOTE_TARGET / MANUAL_REMOTE_TARGET); API refuses them (409).
+    - Scheduler stays blocked unless exactly one enabled control target
+      matches the connected database.
+    - Health check of a target that connects but whose role cannot read the
+      framework schema reports FRAMEWORK_INCOMPATIBLE (not a crash).
+    - No Phase 5A semantics changed; no legacy function body invented or
+      modified.
+
+Validation:
+    - Backend suite: 590 tests, 589 passed, 0 failed, 1 skipped
+      (integration: FRAMEWORK DEFINITION NOT AVAILABLE).
+    - Disposable PostgreSQL 16 harness (throwaway initdb, second DB
+      partops_target2): all runnable stages pass; 5C migrations idempotent;
+      U1–U5 and routing/health checks pass. It found and fixed an invalid
+      PostgreSQL regex bound (`{1,512}` > 255) in the registry secret CHECK.
+
+Notes:
+    No commit/push; no server, production, AWS or Datadog access.
+
+## CHANGE-017 — Phase 5D: target-aware scheduler + safe remote database execution
+
+Date:
+    2026-11-17
+
+Reason:
+    Execute partition jobs on the hub's managed target databases (db02, …)
+    safely. ONE PARTOPS INSTANCE PER HUB / ~2 TARGET DATABASES PER HUB / NO
+    GLOBAL MULTI-HUB CONTROL PLANE. No distributed transaction is assumed.
+
+Related Issues:
+    ISSUE-011 CLOSED. New: ISSUE-012 (review UI, Phase 5E), ISSUE-013 (rollback
+    classification depends on unverified legacy worker behaviour). ISSUE-003 /
+    008 / 009 / 010 stay OPEN (Phase 5B.1 deferred; EDB not validated).
+
+Files Added:
+    - `sql/migrations/20261117_03_remote_execution_ledger.sql`
+    - `sql/migrations/20261117_04_remote_execution_functions.sql`
+    - `scheduler_backend/remote_execution.py` (target transaction + classification)
+    - `scheduler_backend/target_runtime.py` (slots, availability, preflight cache)
+    - `api/routers/attempts.py`, `api/remote_manual.py`
+    - `REMOTE_EXECUTION.md` (architecture / state machine / rules)
+    - `sql/tests/disposable/stubs/test_only_stub_workers.sql`,
+      `test_only_stub_cron_helper.sql` (DISPOSABLE ONLY)
+    - `scripts/disposable_db/remote_execution_check.py`
+    - `test_phase5d_remote_execution.py` (62 tests)
+
+Files Changed:
+    - `scheduler_backend/scheduler.py` (remote orchestrator, slots, recovery,
+      pending finalization, per-target status), `scheduler_database.py`
+      (target-aware discovery, ledger calls, config), `models.py`, `main.py`
+      (`/internal/scheduler/manual-run`), `retry_policy.py` (remote statuses)
+    - `database.py` (target on create/edit, attempts, resolution, history /
+      attention target columns, 55006 → 409), `api/routers/jobs.py`,
+      `attention.py`, `logs.py`, `api/main.py`, `scheduler_client.py`
+    - `observability.py` (target slot / remote attempt / finalization / unknown
+      metrics), `framework_manifest.py` (internal helpers), manifest +
+      `INVENTORY.md` (version 20261117_04), `realtime_scheduler_v1.sql`
+      (canonical reconcile), `sql/capture_reference_framework.sql`
+    - Tests adjusted for the new version / handled statuses / lifted 5C 409;
+      harness stage 11; `25_phase5c_targets.sql` U3
+    - Docs: README, RUNBOOK (§10.8, §17), migrations / framework docs, EDB and
+      security checklists, integration plan, env examples, issues, PROJECT_CONTEXT
+
+Behavioural Impact:
+    - db01 jobs: unchanged local executor; db01 now also honours its own
+      `max_concurrent_jobs` (default 1).
+    - db02+ jobs: claim → target transaction → finalization; unknown outcomes
+      never retried (job paused + review); proven failures bounded retry;
+      confirmed commits finalized only; restart recovery.
+    - Manual runs / recovery of db02+ jobs require the scheduler (503 otherwise).
+    - Job target change allowed with confirmation, healthy target, no open attempt.
+
+Validation:
+    - Backend suite: 652 tests, 651 passed, 0 failed, 1 skipped
+      (integration: FRAMEWORK DEFINITION NOT AVAILABLE).
+    - Disposable PostgreSQL 16 harness (control + partops_target2; db03
+      disabled; db04 unreachable): all stages pass; 5C/5D migrations applied
+      twice; stage 11: Part A (A0–A10) and Part B (real scheduler, B1/B2) all
+      OK. Found and fixed: un-escaped '%' in the target lock statement.
+    - Test-only stub workers validate PartOps orchestration only, never
+      production worker logic.
+
+Notes:
+    No commit/push; no production, corporate DB, server, AWS or Datadog access.
+
+## CHANGE-018 — Phase 5E: hub-local multi-target operations UI
+
+Date:
+    2026-11-17
+
+Reason:
+    Make the Phase 5C/5D architecture (one PartOps per hub, ~2 database targets,
+    safe remote execution) understandable and operable by DBAs in the existing
+    Next.js UI, without weakening any remote-execution rule.
+
+Related Issues:
+    ISSUE-012 CLOSED. ISSUE-003 / 008 / 009 / 010 / 013 remain OPEN.
+
+Files Added (frontend/src):
+    - `lib/targets.ts` (health / attempt / review vocabulary, hub status, error mapping)
+    - `components/hub/hub-context.tsx` (shared scheduler / targets / health state)
+    - `components/targets/target-badges.tsx`, `components/targets/scheduler-targets-table.tsx`
+    - `components/attempts/attempt-review.tsx` (attempt detail, OUTCOME_UNKNOWN panel + resolution)
+    - `app/targets/page.tsx` (read-only Database targets page)
+
+Files Changed (frontend/src):
+    - `lib/types.ts`, `lib/api.ts`, `lib/format.ts`
+    - `components/shell/app-shell.tsx`, `components/shell/sidebar.tsx`
+    - `components/jobs/job-form.tsx`, `job-detail-panel.tsx`, `attention-review.tsx`
+    - `app/page.tsx`, `app/jobs/page.tsx`, `app/history/page.tsx`, `app/system/page.tsx`
+
+Backend:
+    - `database_targets.py`: `to_public_dict()["executable"]` = `is_enabled`
+      (was the stale Phase 5C rule "enabled AND control"); test updated.
+
+Behavioural Impact:
+    - UI only. No new endpoints, no target administration, no retry / force
+      action for unknown outcomes. Health checks are on demand (cached 60 s);
+      no new aggressive polling.
+
+Validation:
+    - `npm run lint`: no warnings or errors. `npm run build`: success (11 routes).
+    - Backend suite: 652 tests, 651 passed, 0 failed, 1 skipped (integration:
+      FRAMEWORK DEFINITION NOT AVAILABLE).
+    - Manual UI verification matrix documented (RUNBOOK §18.5); not executed
+      against a live API in this change.
+
+Notes:
+    No commit/push; no production, server, AWS or Datadog access.
+
+## CHANGE-019 — Phase 5E.1: integrated local UI/API verification and contract hardening
+
+Date:
+    2026-11-18
+
+Reason:
+    Exercise the Phase 5E UI end-to-end against the real API, scheduler and
+    disposable databases before Phase 5F, and fix what that revealed.
+
+Findings and fixes:
+    - F1 frontend: scheduler / health timestamps are naive UTC; the sidebar
+      showed "Last sync 5h ago" (UTC+05:30). `parseServerDate(..., {naiveUtc})`.
+    - F2 frontend: hub headline hid managed-target failures behind a control
+      framework failure; now lists every degraded reason.
+    - F3 frontend: job-form labels were not associated with their controls.
+    - F4 frontend: Run now was enabled on a job with an OUTCOME_UNKNOWN /
+      DISPATCHING / TARGET_SUCCEEDED attempt (backend refused with 409);
+      now disabled with the reason and a link to History.
+    - F5 frontend: after a 504 / unknown outcome Run now stayed clickable
+      (duplicate-run risk); now locked for that drawer session.
+    - F6 backend (`scheduler_client.py`): a connection dropped AFTER the
+      request was sent (RemoteDisconnected / reset / 5xx) was reported as 503
+      "nothing was executed"; only a refused connection is now 503, everything
+      else is the ambiguous 504 path. Tests added.
+    - F7/F8 frontend: review wording for unknown outcomes ("1 item", "since").
+    - F10 backend (`system_readiness.py`): with the control DB down a full
+      readiness refresh took 47 s (each DB check waited its own connect
+      timeout) and the UI proxy returned 500; dependent checks now report
+      "not checked" (21 s). Tests added.
+    - F11 frontend: job rows were not keyboard-focusable; sheets did not
+      restore focus to the opener (`Sheet` now restores it).
+    - F12/F13 frontend: History error column clipped the Details column;
+      sidebar claimed target availability while the scheduler was down.
+
+Validation:
+    - RUNBOOK §18.5: 28/28 required scenarios PASS on the real local stack
+      (several after the fixes above), plus 504 / drop / degraded / down /
+      keyboard / polling / stability / redaction checks.
+    - `npm run lint`: clean. `npm run build`: success.
+    - Backend suite: 657 tests, 656 passed, 0 failed, 1 skipped (integration:
+      FRAMEWORK DEFINITION NOT AVAILABLE).
+
+Notes:
+    No production / corporate DB; disposable cluster destroyed; no commit,
+    push, server, AWS or Datadog access. No authentication added (ISSUE-014).

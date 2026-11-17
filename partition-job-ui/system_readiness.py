@@ -118,6 +118,7 @@ WHERE s.jstkind = 's';
 
 _CATEGORY_META: Tuple[Tuple[str, str], ...] = (
     ("database", "Database"),
+    ("targets", "Database targets"),
     ("scheduler", "Realtime scheduler"),
     ("host", "Host services"),
     ("configuration", "Runtime configuration"),
@@ -527,6 +528,111 @@ def check_required_functions() -> List[Dict[str, Any]]:
             )
         )
     return checks
+
+
+def check_database_targets() -> List[Dict[str, Any]]:
+    """Phase 5C: one READ-ONLY health item per managed target.
+
+    The control database and every additional target get their own item; one
+    unreachable target never turns the others (or the control DB) red.
+    """
+    category = "targets"
+    from database import list_database_targets
+    from database_targets import (
+        DISABLED,
+        HEALTHY,
+        HEALTHY_WITH_WARNINGS,
+        check_target_health,
+    )
+    from observability import emit_target_health
+
+    try:
+        targets, invalid, available = list_database_targets()
+    except DatabaseError as exc:
+        return [_check("target_registry", "Database target registry", category,
+                       STATUS_FAILED, exc.message)]
+    if not available:
+        return [_check("target_registry", "Database target registry", category, STATUS_WARNING,
+                       "Single-database mode: target registry not installed.",
+                       remediation_hint="Apply migration 20261117_01_partops_database_target.sql.")]
+    checks: List[Dict[str, Any]] = []
+    status_map = {HEALTHY: STATUS_READY, HEALTHY_WITH_WARNINGS: STATUS_WARNING,
+                  DISABLED: STATUS_NOT_REQUIRED}
+    for target in targets:
+        try:
+            health = check_target_health(target)
+        except Exception as exc:  # noqa: BLE001 — isolate per target
+            health = {"state": "CONFIG_ERROR", "detail": type(exc).__name__}
+        state = str(health.get("state"))
+        emit_target_health(target=target.target_key, state=state)
+        role = "Control database" if target.is_control_database else "Managed target"
+        checks.append(_check(
+            "target_{}".format(target.target_key),
+            "{} {} ({})".format(role, target.display_name, target.target_key),
+            category,
+            status_map.get(state, STATUS_FAILED),
+            "{}: {}".format(state, health.get("detail") or ""),
+            details={"target": target.to_public_dict(), "health": health},
+        ))
+    for bad in invalid:
+        checks.append(_check(
+            "target_invalid_{}".format(bad.get("target_id")),
+            "Database target {}".format(bad.get("target_key")),
+            category, STATUS_FAILED, "CONFIG_ERROR: " + str(bad.get("error")),
+        ))
+    return checks
+
+
+def check_framework_manifest() -> List[Dict[str, Any]]:
+    """Phase 5B: compare the database with sql/framework/framework_manifest.json.
+
+    READ-ONLY (SET TRANSACTION READ ONLY + rollback). Evaluated for the API
+    scope as the API role (EXECUTE on the functions the API calls). The
+    scheduler runs its own gate for the scheduler scope.
+    """
+    category = "database"
+    try:
+        from framework_manifest import (
+            FAIL as FW_FAIL,
+            WARNING as FW_WARNING,
+            evaluate_snapshot,
+            fetch_catalog_snapshot,
+            load_manifest,
+        )
+
+        manifest = load_manifest()
+        with _connection(_main_db_kwargs) as conn:
+            snapshot = fetch_catalog_snapshot(conn, manifest)
+        report = evaluate_snapshot(
+            manifest, snapshot, scope="api", check_current_user_execute=True
+        )
+    except DatabaseError as exc:
+        return [_check("framework_manifest", "Database framework (manifest)", category,
+                       STATUS_FAILED, exc.message)]
+    except Exception as exc:  # noqa: BLE001 — readiness must never crash
+        logger.exception("framework manifest check failed")
+        return [_check("framework_manifest", "Database framework (manifest)", category,
+                       STATUS_UNKNOWN, "Framework check could not run ({}).".format(type(exc).__name__))]
+    counts = report.counts()
+    problems = [r.as_dict() for r in report.results if r.status in (FW_FAIL, FW_WARNING)][:40]
+    if report.failures:
+        status = STATUS_FAILED
+    elif report.warnings:
+        status = STATUS_WARNING
+    else:
+        status = STATUS_READY
+    summary = "Framework {}: PASS={} WARNING={} FAIL={}; application expects {}, database reports {}.".format(
+        report.overall, counts["PASS"], counts["WARNING"], counts["FAIL"],
+        report.expected_version, report.database_version or "unknown",
+    )
+    return [_check(
+        "framework_manifest", "Database framework (manifest)", category, status, summary,
+        details={"problems": problems},
+        remediation_hint=(
+            "Run scripts/preflight_framework.py as a DBA; capture missing legacy "
+            "definitions per sql/framework/README.md; apply pending migrations."
+        ) if status != STATUS_READY else None,
+    )]
 
 
 def check_database_privileges() -> List[Dict[str, Any]]:
@@ -1089,12 +1195,39 @@ def check_frontend_runtime() -> List[Dict[str, Any]]:
         ]
 
 
+# Checks that need the CONTROL database. When the connection check already
+# failed they can only fail the same way, each after its own connect timeout
+# (measured: ~47 s for a full refresh with the control DB down, longer than
+# the UI proxy waits). Phase 5E.1: report them as "not checked" instead.
+_CONTROL_DB_DEPENDENT: Tuple[Tuple[str, str, str], ...] = (
+    ("required_tables", "Required tables", "database"),
+    ("required_functions", "Required functions", "database"),
+    ("framework_manifest", "Database framework (manifest)", "database"),
+    ("target_registry", "Database target registry", "targets"),
+    ("database_privileges", "Database privileges", "database"),
+)
+
+
+def _control_db_unavailable_checks() -> List[Dict[str, Any]]:
+    return [
+        _check(key, label, category, STATUS_UNKNOWN,
+               "Not checked: the control database is unavailable (see Database connection).")
+        for key, label, category in _CONTROL_DB_DEPENDENT
+    ]
+
+
 def _collect_all_checks() -> List[Dict[str, Any]]:
     checks: List[Dict[str, Any]] = []
-    checks.append(check_database_connection())
-    checks.extend(check_required_tables())
-    checks.extend(check_required_functions())
-    checks.extend(check_database_privileges())
+    connection = check_database_connection()
+    checks.append(connection)
+    if connection.get("status") == STATUS_FAILED:
+        checks.extend(_control_db_unavailable_checks())
+    else:
+        checks.extend(check_required_tables())
+        checks.extend(check_required_functions())
+        checks.extend(check_framework_manifest())
+        checks.extend(check_database_targets())
+        checks.extend(check_database_privileges())
     checks.extend(check_scheduler())
     checks.extend(check_systemd_services())
     checks.extend(check_local_ports())

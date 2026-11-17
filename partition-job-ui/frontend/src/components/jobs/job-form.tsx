@@ -1,11 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { AlertTriangle } from "lucide-react";
+import { useHub } from "@/components/hub/hub-context";
 import { Button } from "@/components/ui/button";
 import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Label, Select, Textarea } from "@/components/ui/input";
 import { api, ApiError } from "@/lib/api";
-import type { JobCreatePayload, JobUpdatePayload } from "@/lib/types";
+import { friendlyError, healthInfo, targetRole } from "@/lib/targets";
+import type { DatabaseTarget, JobCreatePayload, JobUpdatePayload } from "@/lib/types";
 
 const FREQUENCY_UNITS = ["minute", "hour", "day", "week", "month", "year"] as const;
 const PARTITION_UNITS = ["day", "week", "month", "year"] as const;
@@ -27,6 +30,8 @@ export type JobFormValues = {
   create_drop_amount: number;
   create_drop_unit: string;
   db_config: string;
+  /** Phase 5D/5E: hub-local database target (null = not chosen / control default). */
+  database_target_id: number | null;
 };
 
 const DEFAULTS: JobFormValues = {
@@ -45,6 +50,7 @@ const DEFAULTS: JobFormValues = {
   create_drop_amount: 1,
   create_drop_unit: "month",
   db_config: "{}",
+  database_target_id: null,
 };
 
 export function JobForm({
@@ -77,6 +83,33 @@ export function JobForm({
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [confirmDangerous, setConfirmDangerous] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState(false);
+  const { targets, targetsAvailable, health, healthLoading, loadHealth } = useHub();
+  const targetList = useMemo(() => targets || [], [targets]);
+
+  // Health of managed targets is needed to offer them (cached 60 s, no polling).
+  useEffect(() => {
+    for (const t of targetList) {
+      if (t.is_enabled && !t.is_control_database) void loadHealth(t.target_id);
+    }
+  }, [targetList, loadHealth]);
+
+  // Create: default to the control database once the registry is known.
+  useEffect(() => {
+    if (mode !== "create" || values.database_target_id != null) return;
+    const ctl = targetList.find((t) => t.is_control_database && t.is_enabled);
+    if (ctl) setValues((v) => ({ ...v, database_target_id: ctl.target_id }));
+  }, [mode, targetList, values.database_target_id]);
+
+  function targetUsability(t: DatabaseTarget): { ok: boolean; reason: string } {
+    if (!t.is_enabled) return { ok: false, reason: "disabled by DBA" };
+    if (t.is_control_database) return { ok: true, reason: "" };
+    const h = health[t.target_id];
+    if (!h || healthLoading[t.target_id]) return { ok: false, reason: "checking health…" };
+    if (!h.health) return { ok: false, reason: "health check failed" };
+    const info = healthInfo(h.health.state);
+    return info.usable ? { ok: true, reason: info.tone === "warning" ? "warnings" : "" } : { ok: false, reason: info.label.toLowerCase() };
+  }
 
   useEffect(() => {
     if (initial) setValues((v) => ({ ...v, ...initial }));
@@ -120,7 +153,14 @@ export function JobForm({
     };
   }, [values]);
 
+
   const base = baseline || initial || DEFAULTS;
+  const baseTargetId = base.database_target_id ?? null;
+  const targetChanged =
+    mode === "edit" && values.database_target_id != null && values.database_target_id !== baseTargetId;
+  const fromTarget = targetList.find((t) => t.target_id === baseTargetId) || null;
+  const toTarget = targetList.find((t) => t.target_id === values.database_target_id) || null;
+  const selectedUsable = toTarget ? targetUsability(toTarget).ok : true;
   const dangerous =
     mode === "edit" &&
     (Boolean(base.is_create) !== values.is_create ||
@@ -143,6 +183,7 @@ export function JobForm({
       "create_drop_amount",
       "create_drop_unit",
       "db_config",
+      "database_target_id",
     ];
     if (!values.auto_next_run) {
       keys.push("next_run_time");
@@ -168,31 +209,48 @@ export function JobForm({
       setError("Confirm the dangerous configuration change before saving.");
       return;
     }
+    if (targetChanged && !confirmTarget) {
+      setError("Confirm the database target change before saving.");
+      return;
+    }
+    if ((mode === "create" || targetChanged) && toTarget && !selectedUsable) {
+      setError(`Database target ${toTarget.target_key.toUpperCase()} is not usable right now.`);
+      return;
+    }
     setBusy(true);
     setError(null);
     setOk(null);
     try {
       if (mode === "edit" && jobId != null) {
+        const needsConfirm = dangerous || targetChanged;
         const body: JobUpdatePayload = {
           ...payload,
-          confirm_dangerous: confirmDangerous,
+          // Only send a target when it changes (unchanged → backend keeps it).
+          ...(targetChanged ? { database_target_id: values.database_target_id } : {}),
+          confirm_dangerous:
+            needsConfirm &&
+            (!dangerous || confirmDangerous) &&
+            (!targetChanged || confirmTarget),
         };
         const res = await api.updateJob(jobId, body);
         setOk(res.message);
         onSuccess?.(res.message);
       } else {
-        const res = await api.createJob(payload);
+        const res = await api.createJob(
+          targetsAvailable && values.database_target_id != null
+            ? { ...payload, database_target_id: values.database_target_id }
+            : payload,
+        );
         setOk(res.message);
         onSuccess?.(res.message);
       }
     } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? err.message
-          : mode === "edit"
-            ? "Update failed"
-            : "Create failed",
-      );
+      if (err instanceof ApiError) {
+        const f = friendlyError(err, "save");
+        setError(f.title === "Request failed" ? f.detail : `${f.title}: ${f.detail}`);
+      } else {
+        setError(mode === "edit" ? "Update failed" : "Create failed");
+      }
     } finally {
       setBusy(false);
     }
@@ -207,6 +265,7 @@ export function JobForm({
     setError(null);
     setOk(null);
     setConfirmDangerous(false);
+    setConfirmTarget(false);
   }
 
   return (
@@ -221,7 +280,7 @@ export function JobForm({
               required
             />
           </Field>
-          <Field label="Enabled">
+          <Field label="Enabled" group>
             <label className="flex h-8 items-center gap-3 text-sm font-semibold">
               <span
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
@@ -271,6 +330,46 @@ export function JobForm({
             </p>
           ) : null}
         </div>
+      </section>
+
+      <section className="rounded-card border border-pj-line bg-pj-card p-3">
+        <SectionTitle>Database target</SectionTitle>
+        {targetsAvailable && targetList.length ? (
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            <Field label="Database target">
+              <Select
+                value={values.database_target_id ?? ""}
+                onChange={(e) =>
+                  set("database_target_id", e.target.value === "" ? null : Number(e.target.value))
+                }
+                aria-describedby="target-help"
+              >
+                {values.database_target_id == null ? <option value="">Select a target…</option> : null}
+                {targetList.map((t) => {
+                  const u = targetUsability(t);
+                  const isCurrent = mode === "edit" && t.target_id === baseTargetId;
+                  return (
+                    <option key={t.target_id} value={t.target_id} disabled={!u.ok && !isCurrent}>
+                      {t.target_key.toUpperCase()} — {targetRole(t)}
+                      {u.reason ? ` (${u.reason})` : ""}
+                      {isCurrent ? " · current" : ""}
+                    </option>
+                  );
+                })}
+              </Select>
+            </Field>
+            <p id="target-help" className="self-end text-[11px] text-[var(--content-secondary)]">
+              The database this job&apos;s CREATE / DROP runs on. Only enabled targets that pass their
+              health check can be chosen. Targets are registered by a DBA, not here.
+            </p>
+          </div>
+        ) : (
+          <p className="mt-2 text-[11px] text-[var(--content-secondary)]">
+            {targets === null
+              ? "Loading targets…"
+              : "Single-database installation: jobs run on the control database."}
+          </p>
+        )}
       </section>
 
       <section className="rounded-card border border-pj-line bg-pj-card p-3">
@@ -428,6 +527,45 @@ export function JobForm({
         ) : null}
       </section>
 
+      {targetChanged ? (
+        <section
+          role="group"
+          aria-labelledby="target-change-title"
+          className="rounded-[6px] border-2 border-[var(--warning-fg)] bg-[var(--warning-bg)] px-3 py-3"
+        >
+          <div id="target-change-title" className="flex items-center gap-1.5 text-[13px] font-semibold text-[var(--content-primary)]">
+            <AlertTriangle className="h-4 w-4 text-[var(--warning-fg)]" aria-hidden />
+            Database target changed
+          </div>
+          <p className="mt-1 text-[12px] text-[var(--content-primary)]">
+            This job will execute against a different database.
+          </p>
+          <dl className="mt-2 grid grid-cols-[110px_1fr] gap-y-1 text-[12px]">
+            <dt className="text-[var(--content-secondary)]">Current</dt>
+            <dd className="font-mono">{fromTarget ? `${fromTarget.target_key.toUpperCase()} — ${fromTarget.display_name}` : String(baseTargetId ?? "—")}</dd>
+            <dt className="text-[var(--content-secondary)]">New</dt>
+            <dd className="font-mono">{toTarget ? `${toTarget.target_key.toUpperCase()} — ${toTarget.display_name}` : "—"}</dd>
+            <dt className="text-[var(--content-secondary)]">Schema.table</dt>
+            <dd className="break-all font-mono">{`${values.table_schema}.${values.table_name}`}</dd>
+            <dt className="text-[var(--content-secondary)]">Operation</dt>
+            <dd className="font-mono">{values.is_create ? "CREATE" : "DROP"}</dd>
+          </dl>
+          <p className="mt-2 text-[11px] text-[var(--content-secondary)]">
+            The table must exist with the same partitioning on the new database. The change is refused
+            while this job has an active or unresolved execution.
+          </p>
+          <label className="mt-2 flex items-start gap-2 text-[12px] font-semibold text-[var(--content-primary)]">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={confirmTarget}
+              onChange={(e) => setConfirmTarget(e.target.checked)}
+            />
+            I confirm this job will run against {toTarget ? toTarget.target_key.toUpperCase() : "the new target"} instead of {fromTarget ? fromTarget.target_key.toUpperCase() : "its current target"}.
+          </label>
+        </section>
+      ) : null}
+
       {dangerous ? (
         <label className="flex items-start gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--warning-bg)] px-3 py-3 text-xs font-semibold text-[var(--warning-fg)]">
           <input
@@ -447,7 +585,9 @@ export function JobForm({
             busy ||
             Boolean(preview && !preview.valid) ||
             (mode === "edit" && !dirty) ||
-            (dangerous && !confirmDangerous)
+            (dangerous && !confirmDangerous) ||
+            (targetChanged && !confirmTarget) ||
+            ((mode === "create" || targetChanged) && !selectedUsable)
           }
           aria-busy={busy}
         >
@@ -487,17 +627,32 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   );
 }
 
+/**
+ * Wraps the control in a <label> so it gets an accessible name (screen
+ * readers / click-to-focus). `group` is for compound controls that already
+ * contain their own label (e.g. the Enabled switch).
+ */
 function Field({
   label,
   children,
+  group = false,
 }: {
   label: string;
   children: React.ReactNode;
+  group?: boolean;
 }) {
+  if (group) {
+    return (
+      <div role="group" aria-label={label}>
+        <Label>{label}</Label>
+        {children}
+      </div>
+    );
+  }
   return (
-    <div>
-      <Label>{label}</Label>
+    <label className="block">
+      <span className="mb-1 block text-[11px] font-medium text-[var(--content-secondary)]">{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
