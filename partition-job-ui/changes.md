@@ -1097,3 +1097,96 @@ Validation:
 Notes:
     No production / corporate DB; disposable cluster destroyed; no commit,
     push, server, AWS or Datadog access. No authentication added (ISSUE-014).
+
+## CHANGE-020 — Phase 5F.1: performance / resource optimization (readiness, pagination, drawer data, polling)
+
+Date:
+    2026-11-18
+
+Reason:
+    Phase 5E.1 measured a 21–27 s readiness refresh with the control database
+    down, unbounded client-side history scans (newest 200 rows, filtered in
+    the browser), a job drawer that searched those 200 rows for the job's
+    latest manual run (missing older ones), and one DB connection per
+    readiness check / dashboard section. Keep it small: no architecture change.
+
+Changes:
+    - `system_readiness.py`:
+      - Independent check groups run concurrently (thread pool per build).
+      - Control-DB checks (tables, functions, manifest, target registry,
+        privileges) share ONE connection; if it cannot be opened they are not
+        run and report "not checked" (5E.1 behaviour kept).
+      - Readiness-only bounds: DB connect `PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS`
+        (default 3, clamped 2..10), scheduler HTTP 1.5 s, port probes 1 s
+        (parallel), target health connects clamped and run in parallel.
+      - Cache: 30 s TTL (was 10 s), successes AND failures, single-flight lock,
+        stamped when the build FINISHES (the old cache was stamped at the
+        start, so a build slower than 10 s was never served from cache).
+        `?refresh=true` bypasses and replaces it. `duration_ms` in payload.
+    - `database.py`:
+      - `query_partition_job_logs`: paged history (limit ≤500, offset
+        ≤100000, filters target_id / status / job / operation / since /
+        until, fixed SQL fragments + bound parameters, LIMIT n+1, order
+        `job_runtime DESC, job_log_id DESC`). The control target id is
+        resolved once per request (a per-row function call made the target
+        filter 2.4× slower).
+      - `page_execution_attempts`: paged attempts + `unknown_count`.
+      - `get_job_runtime_context` / `get_job_pending_attention`: per-job data
+        on one connection. `get_dashboard_snapshot`: jobs + logs + privilege
+        readiness on one connection, sections fail independently.
+      - Recent-logs query (dashboard): `to_jsonb()` only for the returned
+        rows (was evaluated for every row before the sort).
+      - `get_database_readiness(conn=None)` / `list_database_targets(conn=None)`
+        accept an open connection.
+    - API: `GET /api/logs` (paged + filters, validated → 422),
+      `GET /api/execution-attempts` (+ target_id, offset, unknown_count),
+      `GET /api/jobs/{id}/runtime-context`, `GET /api/jobs/{id}/attention`;
+      dashboard uses the snapshot.
+    - Frontend (appearance unchanged except a Previous/Next pager and an
+      operation filter on History):
+      - History: server-side filters and pages (100 rows; job filter
+        debounced); attempts paged (50); unknown-outcome banner uses
+        `unknown_count`.
+      - Job drawer: one `runtime-context` request (was `logs(200)` + attempts);
+        Overview drawer now shows the job's pending review items.
+      - Hub polling: scheduler 30 s, control-DB dot 60 s (was 30 s), targets
+        5 min, health on demand; no polling while the tab is hidden, one
+        catch-up refresh when it becomes visible.
+    - Metrics (DogStatsD, existing no-op when disabled): `readiness.duration_ms`
+      (tag `overall`), `history.query_duration_ms`, `attempts.query_duration_ms`.
+      No job / target / host tags.
+
+Measurements (local; disposable PostgreSQL 16 on 127.0.0.1, 500 000 log rows,
+60 jobs; before = HEAD adad25d extracted with `git archive`):
+    - Readiness, control DB + scheduler not answering (blackhole): 27.31 s → 3.12 s
+      (in-process); over HTTP 3.11 s, cached 0.010 s, refresh 3.12 s.
+      Refused ports: 27.38 s → 3.05 s.
+    - Connections per request: readiness refresh 9 → 4; readiness within TTL
+      9 → 0; dashboard 3 → 1; job drawer 3 → 1; history page 2 → 2.
+    - Dashboard recent logs (200): 1747 ms → 278 ms median.
+    - Latest manual run, job 7: old 200-row scan did NOT find it; new query
+      finds it (0.16 ms execution, index `job_id, job_runtime`); drawer
+      request 1569 ms → 131 ms median.
+    - History page (100 rows): 276–318 ms median incl. ~100 ms local connect;
+      target filter 833 ms → 345 ms; job filter 98 ms.
+    - Global history ordering has no index: parallel seq scan ≈138 ms at
+      500k rows. A `(job_runtime DESC, job_log_id DESC)` index made it
+      0.3 ms (offset 10000: 1.2 ms; status filter 2.8 ms); 15 MB. Not added —
+      see ISSUE-015.
+
+Validation:
+    - New `test_phase5f_performance.py` (28) + readiness tests (short-circuit,
+      shared connection, connection lost midway, slow DB bounded, timeout
+      bounds, cache hit / expiry / refresh / invalidate / single-flight).
+    - Backend suite: 694 tests, OK (1 skipped: integration, framework
+      definitions not available).
+    - `npm run lint`: clean. `npm run build`: success.
+    - Multi-DB harness not rerun: scheduler, remote-execution and transaction
+      code unchanged.
+
+Notes:
+    No migration, framework version unchanged (20261117_04). No connection
+    pool, Redis, WebSockets or authentication (ISSUE-014 open). Remote
+    execution state machine and OUTCOME_UNKNOWN handling unchanged. Phase
+    5B.1 still deferred. No commit, push, server, production, AWS or Datadog
+    access. Disposable perf cluster destroyed.

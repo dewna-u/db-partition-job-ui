@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any, Generator, Optional
 
 from dotenv import load_dotenv
@@ -273,9 +275,13 @@ SELECT
     execution_duration_ms,
     (to_jsonb(l) ->> 'database_target_id')::integer AS database_target_id,
     (to_jsonb(l) ->> 'execution_attempt_id')::bigint AS execution_attempt_id
-FROM {schema}.{table} AS l
-ORDER BY job_runtime DESC
-LIMIT %(row_limit)s;
+FROM (
+    -- Phase 5F.1: to_jsonb() only for the rows returned, not every row sorted.
+    SELECT * FROM {schema}.{table}
+    ORDER BY job_runtime DESC, job_log_id DESC
+    LIMIT %(row_limit)s
+) AS l
+ORDER BY job_runtime DESC, job_log_id DESC;
 """
 
 _PARTITION_JOB_LOGS_SQL_TEMPLATE_LEGACY = """
@@ -329,6 +335,7 @@ FROM {schema}.{attention_table} AS a
 LEFT JOIN {schema}.{table} AS j ON j.job_id = a.job_id
 WHERE (%(status)s::text IS NULL OR a.status = %(status)s::text)
   AND (%(attention_id)s::bigint IS NULL OR a.attention_id = %(attention_id)s::bigint)
+  AND (%(job_id)s::numeric IS NULL OR a.job_id = %(job_id)s::numeric)
 ORDER BY a.detected_at DESC, a.attention_id DESC
 LIMIT %(row_limit)s;
 """
@@ -1646,21 +1653,25 @@ def _validate_job_id(job_id: Any) -> int:
     return value
 
 
+def _query_jobs(conn: Connection) -> list[dict]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        try:
+            cur.execute(build_partition_jobs_sql(include_duration=True))
+        except UndefinedColumn:
+            conn.rollback()
+            cur.execute(build_partition_jobs_sql(include_duration=False))
+        rows = [dict(row) for row in cur.fetchall()]
+    for row in rows:
+        row.setdefault("last_execution_duration_ms", None)
+        row.setdefault("avg_execution_duration_ms", None)
+    return rows
+
+
 def get_partition_jobs() -> list[dict]:
     """Return every parameterised configuration row. Read-only."""
     with _connection(_main_db_kwargs) as conn:
         try:
-            with conn.cursor(row_factory=dict_row) as cur:
-                try:
-                    cur.execute(build_partition_jobs_sql(include_duration=True))
-                except UndefinedColumn:
-                    conn.rollback()
-                    cur.execute(build_partition_jobs_sql(include_duration=False))
-                rows = [dict(row) for row in cur.fetchall()]
-                for row in rows:
-                    row.setdefault("last_execution_duration_ms", None)
-                    row.setdefault("avg_execution_duration_ms", None)
-                return rows
+            return _query_jobs(conn)
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
 
@@ -1703,24 +1714,22 @@ def get_partition_job_logs(limit: int = 100) -> list[dict]:
 
     with _connection(_main_db_kwargs) as conn:
         try:
-            with conn.cursor(row_factory=dict_row) as cur:
-                try:
-                    cur.execute(
-                        build_partition_job_logs_sql(include_duration=True),
-                        {"row_limit": row_limit},
-                    )
-                except UndefinedColumn:
-                    conn.rollback()
-                    cur.execute(
-                        build_partition_job_logs_sql(include_duration=False),
-                        {"row_limit": row_limit},
-                    )
-                rows = [dict(row) for row in cur.fetchall()]
-                for row in rows:
-                    row.setdefault("execution_duration_ms", None)
-                return rows
+            return _query_recent_logs(conn, row_limit)
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+
+def _query_recent_logs(conn: Connection, row_limit: int) -> list[dict]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        try:
+            cur.execute(build_partition_job_logs_sql(include_duration=True), {"row_limit": row_limit})
+        except UndefinedColumn:
+            conn.rollback()
+            cur.execute(build_partition_job_logs_sql(include_duration=False), {"row_limit": row_limit})
+        rows = [dict(row) for row in cur.fetchall()]
+    for row in rows:
+        row.setdefault("execution_duration_ms", None)
+    return rows
 
 
 def update_partition_job(job_id: Any, data: dict, new_target_id: Optional[int] = None) -> Any:
@@ -1932,11 +1941,12 @@ def get_generic_partition_schedulers() -> dict[str, Any]:
     return found
 
 
-def get_database_readiness() -> dict[str, Any]:
+def get_database_readiness(conn: Optional[Connection] = None) -> dict[str, Any]:
     """
     Report whether the current role can use the partition-job objects.
 
     Read-only introspection only — this never grants or changes any privilege.
+    ``conn``: reuse an already-open short-lived connection (Phase 5F.1).
     """
     schema = partition_job_schema()
     _fn_schema, function_name = partition_job_function_identity()
@@ -1950,14 +1960,19 @@ def get_database_readiness() -> dict[str, Any]:
         "sequence_name": f"{schema}.{partition_job_sequence_name()}",
     }
 
-    with _connection(_main_db_kwargs) as conn:
+    def _run(c: Connection) -> dict[str, Any]:
         try:
-            with conn.cursor(row_factory=dict_row) as cur:
+            with c.cursor(row_factory=dict_row) as cur:
                 cur.execute(_DATABASE_READINESS_SQL, params)
                 row = cur.fetchone()
                 return dict(row) if row else {}
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+    if conn is not None:
+        return _run(conn)
+    with _connection(_main_db_kwargs) as own:
+        return _run(own)
 
 
 # ---------------------------------------------------------------------------
@@ -2025,21 +2040,31 @@ def get_partition_job_attention(
     attention_int = (
         _validate_attention_id(attention_id) if attention_id is not None else None
     )
-    params = {
-        "status": status,
-        "attention_id": attention_int,
-        "row_limit": row_limit,
-    }
     with _connection(_main_db_kwargs) as conn:
         try:
-            with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(build_attention_list_sql(), params)
-                return [dict(row) for row in cur.fetchall()], True
+            return _attention_rows(conn, status=status, limit=row_limit,
+                                   attention_id=attention_int), True
         except UndefinedTable:
             logger.warning("event=attention_table_missing (Phase 5A migration not applied)")
             return [], False
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+
+def _attention_rows(
+    conn: Connection,
+    *,
+    status: Optional[str],
+    limit: int,
+    attention_id: Optional[int] = None,
+    job_id: Optional[int] = None,
+) -> list[dict]:
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(build_attention_list_sql(), {
+            "status": status, "attention_id": attention_id, "job_id": job_id,
+            "row_limit": max(1, min(int(limit), 1000)),
+        })
+        return [dict(row) for row in cur.fetchall()]
 
 
 def get_partition_job_attention_item(attention_id: Any) -> Optional[dict]:
@@ -2144,7 +2169,7 @@ _TARGET_MIGRATION_HINT = (
 )
 
 
-def list_database_targets() -> tuple[list[Any], list[dict], bool]:
+def list_database_targets(conn: Optional[Connection] = None) -> tuple[list[Any], list[dict], bool]:
     """Return (valid targets, invalid-row errors, registry_available).
 
     Each invalid registry row is reported separately (CONFIG_ERROR) and never
@@ -2152,14 +2177,24 @@ def list_database_targets() -> tuple[list[Any], list[dict], bool]:
     """
     from database_targets import DatabaseTarget, TargetConfigError, fetch_target_rows
 
-    with _connection(_main_db_kwargs) as conn:
+    def _rows(c: Connection) -> Optional[list]:
         try:
-            rows = fetch_target_rows(conn, partition_job_schema())
+            return fetch_target_rows(c, partition_job_schema())
         except UndefinedTable:
             logger.warning("event=target_registry_missing (Phase 5C migration not applied)")
-            return [], [], False
+            if conn is not None:
+                c.rollback()
+            return None
         except PsycopgError as exc:
             raise _map_psycopg_error(exc) from None
+
+    if conn is not None:
+        rows = _rows(conn)
+    else:
+        with _connection(_main_db_kwargs) as own:
+            rows = _rows(own)
+    if rows is None:
+        return [], [], False
     targets: list[Any] = []
     invalid: list[dict] = []
     for row in rows:
@@ -2264,6 +2299,66 @@ def list_execution_attempts(
             raise _map_psycopg_error(exc) from None
 
 
+def page_execution_attempts(
+    *,
+    state: Optional[str] = None,
+    open_only: bool = False,
+    job_id: Optional[int] = None,
+    target_id: Optional[int] = None,
+    limit: Any = 50,
+    offset: Any = 0,
+) -> dict[str, Any]:
+    """One page of remote execution attempts (newest first) + unknown count.
+
+    ``unknown_count`` counts ALL unresolved OUTCOME_UNKNOWN attempts (not just
+    this page) so unknown outcomes stay visible regardless of paging/filters.
+    """
+    if state is not None and state not in ATTEMPT_STATES:
+        raise DatabaseError("Unsupported execution attempt state filter.")
+    lim, off = _page_args(limit, offset, default_limit=50)
+    where = []
+    params: dict[str, Any] = {"lim": lim + 1, "off": off}
+    if state:
+        where.append("state = %(state)s")
+        params["state"] = state
+    if open_only:
+        where.append("state <> 'FINALIZED'")
+    if job_id is not None:
+        where.append("job_id = %(job_id)s")
+        params["job_id"] = _validate_job_id(job_id)
+    if target_id is not None:
+        where.append("database_target_id = %(target_id)s")
+        params["target_id"] = int(target_id)
+    table = f"{partition_job_schema()}.partops_execution_attempt"
+    cond = (" WHERE " + " AND ".join(where)) if where else ""
+    started = time.monotonic()
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(f"SELECT {_ATTEMPT_COLUMNS} FROM {table}{cond} "
+                            "ORDER BY attempt_id DESC LIMIT %(lim)s OFFSET %(off)s", params)
+                rows = [dict(r) for r in cur.fetchall()]
+                cur.execute(f"SELECT count(*) AS n FROM {table} WHERE state = 'OUTCOME_UNKNOWN'")
+                unknown = int((cur.fetchone() or {}).get("n") or 0)
+        except UndefinedTable:
+            return {"attempts": [], "available": False, "has_more": False, "limit": lim,
+                    "offset": off, "next_offset": None, "previous_offset": None, "unknown_count": 0}
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+    _emit_query_timing("attempts.query_duration_ms", started)
+    has_more = len(rows) > lim
+    return {
+        "attempts": rows[:lim],
+        "available": True,
+        "has_more": has_more,
+        "limit": lim,
+        "offset": off,
+        "next_offset": off + lim if has_more else None,
+        "previous_offset": max(0, off - lim) if off > 0 else None,
+        "unknown_count": unknown,
+    }
+
+
 def get_execution_attempt(attempt_id: Any) -> Optional[dict]:
     rows, available = list_execution_attempts(attempt_id=_validate_attempt_id(attempt_id), limit=1)
     if not available:
@@ -2318,3 +2413,259 @@ def resolve_remote_outcome(attempt_id: Any, resolution: str, note: str) -> dict:
     logger.info("event=remote_outcome_resolved attempt_id=%s result=%s",
                 attempt_int, (row or {}).get("result"))
     return dict(row) if row else {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 5F.1 — bounded, paginated reads (one short-lived connection each)
+# ---------------------------------------------------------------------------
+HISTORY_MAX_LIMIT = 500
+HISTORY_MAX_OFFSET = 100_000
+MANUAL_RUN_STATUSES = ("MANUAL_SUCCESS", "MANUAL_FAIL", "MANUAL_OUTCOME_UNKNOWN")
+_STATUS_FILTER_RE = re.compile(r"^[A-Z_]{1,40}$")
+
+# Column list with the Phase 5D history columns read directly (index-friendly
+# filters). The legacy fallback derives them with to_jsonb for databases that
+# predate the columns (filtering by target then requires 20261117_03).
+_HISTORY_COLUMNS = (
+    "l.job_log_id, l.job_id, l.job_name, l.last_run_status, l.job_runtime, l.job_error, "
+    "l.execution_duration_ms, l.database_target_id, l.execution_attempt_id"
+)
+_HISTORY_COLUMNS_LEGACY = (
+    "l.job_log_id, l.job_id, l.job_name, l.last_run_status, l.job_runtime, l.job_error, "
+    "(to_jsonb(l) ->> 'execution_duration_ms')::bigint AS execution_duration_ms, "
+    "(to_jsonb(l) ->> 'database_target_id')::integer AS database_target_id, "
+    "(to_jsonb(l) ->> 'execution_attempt_id')::bigint AS execution_attempt_id"
+)
+
+
+def _page_args(limit: Any, offset: Any, default_limit: int = 100) -> tuple[int, int]:
+    try:
+        lim = int(limit) if limit is not None else default_limit
+        off = int(offset) if offset is not None else 0
+    except (TypeError, ValueError) as exc:
+        raise DatabaseError("limit and offset must be whole numbers.") from exc
+    if lim < 1 or lim > HISTORY_MAX_LIMIT:
+        raise DatabaseError(f"limit must be between 1 and {HISTORY_MAX_LIMIT}.")
+    if off < 0 or off > HISTORY_MAX_OFFSET:
+        raise DatabaseError(f"offset must be between 0 and {HISTORY_MAX_OFFSET}.")
+    return lim, off
+
+
+def query_partition_job_logs(
+    *,
+    limit: Any = 100,
+    offset: Any = 0,
+    target_id: Optional[int] = None,
+    status: Optional[str] = None,
+    job: Optional[str] = None,
+    operation: Optional[str] = None,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """One page of execution history, newest first (deterministic order).
+
+    Filters are combined from FIXED SQL fragments with bound parameters.
+    ``job``: a job id (digits) or a case-insensitive name fragment.
+    ``operation``: CREATE / DROP of the job as currently configured.
+    ``target_id``: NULL history rows (local executors, pre-5D) belong to the
+    control database. Uses LIMIT n+1 for ``has_more`` (no COUNT(*) scan).
+    """
+    lim, off = _page_args(limit, offset)
+    where: list[str] = []
+    params: dict[str, Any] = {"lim": lim + 1, "off": off}
+    if status:
+        s = str(status).strip().upper()
+        if not _STATUS_FILTER_RE.match(s):
+            raise DatabaseError("Unsupported status filter.")
+        where.append("l.last_run_status = %(status)s")
+        params["status"] = s
+    if job:
+        j = str(job).strip()[:100]
+        if j.isdigit():
+            where.append("l.job_id = %(job_id)s")
+            params["job_id"] = int(j)
+        elif j:
+            where.append("l.job_name ILIKE %(job_name)s")
+            params["job_name"] = "%" + j.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    if operation:
+        op = str(operation).strip().upper()
+        if op not in ("CREATE", "DROP"):
+            raise DatabaseError("operation must be CREATE or DROP.")
+        where.append(
+            f"EXISTS (SELECT 1 FROM {partition_job_schema()}.{partition_job_table_name()} AS jj "
+            "WHERE jj.job_id = l.job_id AND jj.is_create = %(is_create)s)"
+        )
+        params["is_create"] = op == "CREATE"
+    if since is not None:
+        where.append("l.job_runtime >= %(since)s")
+        params["since"] = since
+    if until is not None:
+        where.append("l.job_runtime < %(until)s")
+        params["until"] = until
+    if target_id is not None:
+        params["target_id"] = int(target_id)
+
+    def build(columns: str, target_clause: Optional[str]) -> str:
+        clauses = list(where) + ([target_clause] if target_clause else [])
+        cond = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return (
+            f"SELECT {columns} FROM {partition_job_schema()}.{partition_job_log_table_name()} AS l"
+            f"{cond} ORDER BY l.job_runtime DESC, l.job_log_id DESC LIMIT %(lim)s OFFSET %(off)s"
+        )
+
+    started = time.monotonic()
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            with conn.cursor(row_factory=dict_row) as cur:
+                target_clause = None
+                if target_id is not None:
+                    # Resolve the control target ONCE (not per row): NULL
+                    # history rows (local executors, pre-5D) belong to it.
+                    try:
+                        cur.execute(f"SELECT {partition_job_schema()}.partops_control_target_id() AS id")
+                    except UndefinedFunction:
+                        conn.rollback()
+                        raise DatabaseError(
+                            "Filtering history by database target requires migration 20261117_03."
+                        ) from None
+                    control_row = cur.fetchone() or {}
+                    target_clause = (
+                        "(l.database_target_id = %(target_id)s OR l.database_target_id IS NULL)"
+                        if control_row.get("id") == params["target_id"]
+                        else "l.database_target_id = %(target_id)s"
+                    )
+                try:
+                    cur.execute(build(_HISTORY_COLUMNS, target_clause), params)
+                except (UndefinedColumn, UndefinedFunction):
+                    conn.rollback()
+                    if target_clause is not None:
+                        raise DatabaseError(
+                            "Filtering history by database target requires migration 20261117_03."
+                        ) from None
+                    cur.execute(build(_HISTORY_COLUMNS_LEGACY, None), params)
+                rows = [dict(r) for r in cur.fetchall()]
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+    _emit_query_timing("history.query_duration_ms", started)
+    has_more = len(rows) > lim
+    rows = rows[:lim]
+    return {
+        "logs": rows,
+        "limit": lim,
+        "offset": off,
+        "has_more": has_more,
+        "next_offset": off + lim if has_more else None,
+        "previous_offset": max(0, off - lim) if off > 0 else None,
+    }
+
+
+def _emit_query_timing(metric: str, started: float) -> None:
+    try:
+        from observability import timing
+
+        timing(metric, (time.monotonic() - started) * 1000.0)
+    except Exception:  # noqa: BLE001 — metrics never break reads
+        logger.debug("query timing emit failed", exc_info=True)
+
+
+_LATEST_MANUAL_RUN_SQL = """
+SELECT l.job_log_id, l.job_id, l.last_run_status, l.job_runtime, l.job_error,
+       (to_jsonb(l) ->> 'execution_duration_ms')::bigint AS execution_duration_ms,
+       (to_jsonb(l) ->> 'database_target_id')::integer AS database_target_id
+  FROM {schema}.{log_table} AS l
+ WHERE l.job_id = %(job_id)s
+   AND l.last_run_status IN ('MANUAL_SUCCESS', 'MANUAL_FAIL', 'MANUAL_OUTCOME_UNKNOWN')
+ ORDER BY l.job_runtime DESC, l.job_log_id DESC
+ LIMIT 1
+"""
+
+
+def _latest_manual_run(conn: Connection, job_id: int) -> Optional[dict]:
+    """Latest MANUAL_* history row of THIS job only (index: job_id, job_runtime)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            _LATEST_MANUAL_RUN_SQL.format(
+                schema=partition_job_schema(), log_table=partition_job_log_table_name()),
+            {"job_id": job_id},
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def get_job_runtime_context(job_id: Any) -> dict[str, Any]:
+    """Everything the job drawer needs about one job, on ONE connection:
+
+    latest manual run (that job only), the most significant open remote
+    attempt state, and pending review items. ``last_run_status`` (latest
+    SCHEDULED result) is not touched or redefined.
+    """
+    job_id_int = _validate_job_id(job_id)
+    schema = partition_job_schema()
+    out: dict[str, Any] = {
+        "job_id": job_id_int,
+        "latest_manual_run": None,
+        "open_attempt_state": None,
+        "pending_attention": [],
+        "attention_available": True,
+    }
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            out["latest_manual_run"] = _latest_manual_run(conn, job_id_int)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT {schema}.partops_job_open_attempt_state(%(j)s)", {"j": job_id_int})
+                    row = cur.fetchone()
+                out["open_attempt_state"] = str(row[0]) if row and row[0] else None
+            except UndefinedFunction:
+                conn.rollback()
+            try:
+                out["pending_attention"] = _attention_rows(
+                    conn, status=ATTENTION_STATUS_PENDING, limit=50, job_id=job_id_int)
+            except UndefinedTable:
+                conn.rollback()
+                out["attention_available"] = False
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+    return out
+
+
+def get_job_pending_attention(job_id: Any) -> tuple[list[dict], bool]:
+    """Pending review items of ONE job (partial index on job_id, PENDING)."""
+    job_id_int = _validate_job_id(job_id)
+    with _connection(_main_db_kwargs) as conn:
+        try:
+            return _attention_rows(conn, status=ATTENTION_STATUS_PENDING, limit=50,
+                                   job_id=job_id_int), True
+        except UndefinedTable:
+            return [], False
+        except PsycopgError as exc:
+            raise _map_psycopg_error(exc) from None
+
+
+def get_dashboard_snapshot(log_limit: int = 200) -> dict[str, Any]:
+    """Jobs + recent history + privilege readiness on ONE connection.
+
+    Each section fails independently (its error is reported, the others still
+    load). Previously three separate connections per dashboard request.
+    """
+    out: dict[str, Any] = {"jobs": [], "logs": [], "readiness": None,
+                           "jobs_error": None, "logs_error": None, "readiness_error": None}
+    try:
+        with _connection(_main_db_kwargs) as conn:
+            for key, fn in (("jobs", lambda: _query_jobs(conn)),
+                            ("logs", lambda: _query_recent_logs(conn, log_limit)),
+                            ("readiness", lambda: get_database_readiness(conn))):
+                try:
+                    out[key] = fn()
+                except DatabaseError as exc:
+                    out[f"{key}_error"] = exc.message
+                except PsycopgError as exc:
+                    out[f"{key}_error"] = _map_psycopg_error(exc).message
+                try:
+                    conn.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+    except DatabaseError as exc:
+        for key in ("jobs", "logs", "readiness"):
+            out[f"{key}_error"] = exc.message
+    return out

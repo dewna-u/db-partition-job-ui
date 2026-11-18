@@ -20,7 +20,9 @@ from api.deps import ok, raise_for_domain
 from database import (
     DatabaseError,
     get_execution_attempt,
-    list_execution_attempts,
+    HISTORY_MAX_LIMIT,
+    HISTORY_MAX_OFFSET,
+    page_execution_attempts,
     resolve_remote_outcome,
 )
 from scheduler_client import notify_scheduler_refresh
@@ -41,19 +43,20 @@ def list_attempts(
     state: Optional[str] = Query(default=None, max_length=20),
     open: bool = Query(default=False),
     job_id: Optional[int] = Query(default=None, ge=1),
-    limit: int = Query(default=200, ge=1, le=1000),
+    target_id: Optional[int] = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=HISTORY_MAX_LIMIT),
+    offset: int = Query(default=0, ge=0, le=HISTORY_MAX_OFFSET),
 ):
+    """Phase 5F.1: one page of attempts + ``unknown_count`` across all pages."""
     try:
-        attempts, available = list_execution_attempts(
-            state=state.upper() if state else None, open_only=open, job_id=job_id, limit=limit)
+        page = page_execution_attempts(
+            state=state.upper() if state else None, open_only=open, job_id=job_id,
+            target_id=target_id, limit=limit, offset=offset)
     except DatabaseError as exc:
         raise_for_domain(exc)
-    return ok({
-        "attempts": attempts,
-        "available": available,
-        "message": None if available else
-        "Remote execution attempts require migrations 20261117_03 / 20261117_04.",
-    })
+    page["message"] = None if page["available"] else (
+        "Remote execution attempts require migrations 20261117_03 / 20261117_04.")
+    return ok(page)
 
 
 @router.get("/execution-attempts/{attempt_id}")

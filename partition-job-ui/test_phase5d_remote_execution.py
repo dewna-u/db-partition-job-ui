@@ -868,7 +868,7 @@ class RemoteApiTests(unittest.TestCase):
     def test_history_identifies_target_without_secrets(self):
         logs = [{"job_log_id": 1, "job_id": 5, "database_target_id": 2, "execution_attempt_id": 41},
                 {"job_log_id": 2, "job_id": 9, "database_target_id": None, "execution_attempt_id": None}]
-        with patch("api.routers.logs.get_partition_job_logs", return_value=logs), \
+        with patch("api.routers.logs.query_partition_job_logs", return_value={"logs": logs, "limit": 100, "offset": 0, "has_more": False, "next_offset": None, "previous_offset": None}), \
                 patch("api.routers.logs.list_database_targets",
                       return_value=([ctl(), remote(credential_provider="aws", secret_id="s/db02",
                                                    aws_region="eu-west-1")], [], True)):

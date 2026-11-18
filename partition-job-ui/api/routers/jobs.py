@@ -17,6 +17,8 @@ from database import (
     create_partition_job,
     get_database_readiness,
     get_job_open_attempt_state,
+    get_job_pending_attention,
+    get_job_runtime_context,
     get_partition_job,
     get_partition_jobs,
     run_partition_job_manual,
@@ -263,6 +265,27 @@ def get_job(job_id: int):
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found.")
     return ok({"job": job})
+
+
+@router.get("/jobs/{job_id}/attention")
+def get_job_attention(job_id: int):
+    """Pending review items of ONE job (Phase 5F.1; no global list scan)."""
+    try:
+        items, available = get_job_pending_attention(job_id)
+    except DatabaseError as exc:
+        raise_for_domain(exc)
+    return ok({"items": items, "available": available, "pending_count": len(items)})
+
+
+@router.get("/jobs/{job_id}/runtime-context")
+def get_job_context(job_id: int):
+    """Job drawer data on ONE connection: latest manual run of THIS job,
+    open remote attempt state and pending review items. ``last_run_status``
+    on the job stays the latest SCHEDULED result."""
+    try:
+        return ok(get_job_runtime_context(job_id))
+    except DatabaseError as exc:
+        raise_for_domain(exc)
 
 
 @router.post("/jobs")

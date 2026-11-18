@@ -313,7 +313,7 @@ class DurationApiAndManualPathTests(unittest.TestCase):
             },
         ]
         client = TestClient(app)
-        with patch("api.routers.logs.get_partition_job_logs", return_value=logs):
+        with patch("api.routers.logs.query_partition_job_logs", return_value={"logs": logs, "limit": 100, "offset": 0, "has_more": False, "next_offset": None, "previous_offset": None}):
             res = client.get("/api/logs?limit=10")
         self.assertEqual(res.status_code, 200)
         body = res.json()["logs"]

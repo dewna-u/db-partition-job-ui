@@ -72,7 +72,23 @@ export const api = {
       body: JSON.stringify({ confirm_drop: confirmDrop }),
     }),
   logs: (limit = 100) =>
-    request<{ logs: import("./types").JobLog[] }>(`/api/logs?limit=${limit}`),
+    request<import("./types").LogsPage>(`/api/logs?limit=${limit}`),
+  // Phase 5F.1 — server-side filtered / paginated history.
+  logsPage: (opts: import("./types").LogsQuery = {}) => {
+    const q = new URLSearchParams();
+    q.set("limit", String(opts.limit ?? 100));
+    q.set("offset", String(opts.offset ?? 0));
+    if (opts.targetId != null) q.set("target_id", String(opts.targetId));
+    if (opts.status) q.set("status", opts.status);
+    if (opts.job) q.set("job", opts.job);
+    if (opts.operation) q.set("operation", opts.operation);
+    return request<import("./types").LogsPage>(`/api/logs?${q.toString()}`);
+  },
+  // Phase 5F.1 — job drawer data for ONE job (replaces the 200-row history scan).
+  jobRuntimeContext: (id: number) =>
+    request<import("./types").JobRuntimeContext>(`/api/jobs/${id}/runtime-context`),
+  jobAttention: (id: number) =>
+    request<import("./types").AttentionListResponse>(`/api/jobs/${id}/attention`),
   readiness: () =>
     request<{ readiness: Record<string, unknown> }>("/api/readiness"),
   systemReadiness: (refresh?: boolean) => {
@@ -140,12 +156,23 @@ export const api = {
   targets: () => request<import("./types").TargetsResponse>("/api/targets"),
   targetHealth: (id: number) =>
     request<import("./types").TargetHealthResponse>(`/api/targets/${id}/health`),
-  attempts: (opts: { open?: boolean; state?: string; jobId?: number; limit?: number } = {}) => {
+  attempts: (
+    opts: {
+      open?: boolean;
+      state?: string;
+      jobId?: number;
+      targetId?: number;
+      limit?: number;
+      offset?: number;
+    } = {},
+  ) => {
     const q = new URLSearchParams();
     if (opts.open) q.set("open", "true");
     if (opts.state) q.set("state", opts.state);
     if (opts.jobId != null) q.set("job_id", String(opts.jobId));
-    q.set("limit", String(opts.limit ?? 200));
+    if (opts.targetId != null) q.set("target_id", String(opts.targetId));
+    q.set("limit", String(opts.limit ?? 50));
+    q.set("offset", String(opts.offset ?? 0));
     return request<import("./types").AttemptsResponse>(`/api/execution-attempts?${q.toString()}`);
   },
   attempt: (id: number) =>

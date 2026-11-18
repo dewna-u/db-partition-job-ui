@@ -122,6 +122,9 @@ DB_USER=partition_job_ui
 DB_PASSWORD=<secret>
 DB_SSLMODE=prefer
 DB_CONNECT_TIMEOUT=5
+# Optional (Phase 5F.1): connect timeout for readiness probes only
+# (default 3 s, clamped 2..10). API/scheduler connections keep DB_CONNECT_TIMEOUT.
+# PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS=3
 ```
 
 AWS Secrets Manager provider (after IAM + secret exist):

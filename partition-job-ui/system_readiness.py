@@ -8,12 +8,16 @@ import os
 import re
 import socket
 import subprocess
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 
+from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
 
 from database import (
@@ -22,6 +26,7 @@ from database import (
     PgAgentNotInstalledError,
     _connection,
     _main_db_kwargs,
+    _map_psycopg_error,
     _pgagent_db_kwargs,
     get_database_readiness,
     manual_run_function_name,
@@ -32,7 +37,7 @@ from database import (
     partition_job_update_function_identity,
 )
 from db_credentials import credential_provider_status, secret_provider
-from observability import observability_status
+from observability import observability_status, timing
 from scheduler_client import fetch_scheduler_status, scheduler_status_url
 
 logger = logging.getLogger(__name__)
@@ -59,9 +64,83 @@ _OVERALL_LABELS = {
     STATUS_NOT_REQUIRED: "Not required",
 }
 
-_CACHE_TTL_SECONDS = 10.0
+# Phase 5F.1: bounded in-process cache (failures cached too). The System page
+# and Overview load readiness on demand; "Refresh checks" bypasses the cache.
+_CACHE_TTL_SECONDS = 30.0
 _cache_payload: Optional[Dict[str, Any]] = None
 _cache_monotonic_at: float = 0.0
+# Single-flight: concurrent requests wait for one computation instead of
+# each running every check (each check may wait on a connect timeout).
+_cache_lock = threading.Lock()
+
+# Readiness-only bounds (Phase 5F.1). A readiness probe must answer quickly
+# even when dependencies are down; normal API / scheduler connections keep
+# DB_CONNECT_TIMEOUT. Bounded so a typo cannot make the probe hang.
+_READINESS_HTTP_TIMEOUT = 1.5
+_READINESS_PORT_TIMEOUT = 1.0
+
+
+def readiness_connect_timeout() -> int:
+    """Connect timeout (s) for readiness DB probes: env, bounded 2..10, default 3."""
+    raw = (os.getenv("PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS") or "").strip()
+    try:
+        value = int(raw) if raw else 3
+    except ValueError:
+        value = 3
+    return max(2, min(value, 10))
+
+
+def _clamp_connect_timeout(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(kwargs)
+    current = out.get("connect_timeout")
+    limit = readiness_connect_timeout()
+    out["connect_timeout"] = limit if current is None else max(1, min(int(current), limit))
+    return out
+
+
+def _readiness_main_kwargs() -> Dict[str, Any]:
+    return _clamp_connect_timeout(_main_db_kwargs())
+
+
+def _readiness_pgagent_kwargs() -> Dict[str, Any]:
+    return _clamp_connect_timeout(_pgagent_db_kwargs())
+
+
+# One CONTROL-database connection is shared by the dependent checks of a
+# single readiness build (thread-local; never kept across requests).
+_shared = threading.local()
+
+
+def _shared_conn() -> Any:
+    """The readiness build's shared control connection, or None (standalone)."""
+    return getattr(_shared, "conn", None)
+
+
+def _reset_shared() -> None:
+    conn = _shared_conn()
+    if conn is not None:
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@contextmanager
+def _control_connection() -> Generator[Any, None, None]:
+    conn = getattr(_shared, "conn", None)
+    if conn is None:
+        with _connection(_readiness_main_kwargs) as own:
+            yield own
+        return
+    try:
+        yield conn
+    except PsycopgError as exc:
+        raise _map_psycopg_error(exc) from None
+    finally:
+        try:
+            conn.rollback()  # each check starts clean
+        except Exception:  # noqa: BLE001
+            pass
 
 ALLOWLISTED_SYSTEMD_UNITS = (
     "partition-job-api.service",
@@ -225,7 +304,7 @@ def _http_get_json(url: str, timeout: float = 2.0) -> Tuple[bool, Optional[Any],
 def check_database_connection() -> Dict[str, Any]:
     category = "database"
     try:
-        kwargs = _main_db_kwargs()
+        kwargs = _readiness_main_kwargs()  # bounded connect timeout (Phase 5F.1)
     except DatabaseError as exc:
         return _check(
             "database_connection",
@@ -291,7 +370,7 @@ def check_required_tables() -> List[Dict[str, Any]]:
     checks: List[Dict[str, Any]] = []
 
     try:
-        with _connection(_main_db_kwargs) as conn:
+        with _control_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
@@ -464,7 +543,7 @@ def check_required_functions() -> List[Dict[str, Any]]:
 
     checks: List[Dict[str, Any]] = []
     try:
-        with _connection(_main_db_kwargs) as conn:
+        with _control_connection() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
                 for key, label, fn, argtypes in required:
                     identity = _regprocedure(schema, fn, argtypes)
@@ -547,7 +626,8 @@ def check_database_targets() -> List[Dict[str, Any]]:
     from observability import emit_target_health
 
     try:
-        targets, invalid, available = list_database_targets()
+        targets, invalid, available = list_database_targets(_shared_conn())
+        _reset_shared()
     except DatabaseError as exc:
         return [_check("target_registry", "Database target registry", category,
                        STATUS_FAILED, exc.message)]
@@ -558,11 +638,25 @@ def check_database_targets() -> List[Dict[str, Any]]:
     checks: List[Dict[str, Any]] = []
     status_map = {HEALTHY: STATUS_READY, HEALTHY_WITH_WARNINGS: STATUS_WARNING,
                   DISABLED: STATUS_NOT_REQUIRED}
-    for target in targets:
+    def _bounded_connect(**kwargs: Any) -> Any:
+        from psycopg import connect as _pg_connect
+
+        return _pg_connect(**_clamp_connect_timeout(kwargs))
+
+    def _health(target: Any) -> Dict[str, Any]:
         try:
-            health = check_target_health(target)
+            return check_target_health(target, connect=_bounded_connect)
         except Exception as exc:  # noqa: BLE001 — isolate per target
-            health = {"state": "CONFIG_ERROR", "detail": type(exc).__name__}
+            return {"state": "CONFIG_ERROR", "detail": type(exc).__name__}
+
+    # Targets are independent: check them concurrently (bounded connect each).
+    if len(targets) > 1:
+        with ThreadPoolExecutor(max_workers=min(4, len(targets)),
+                                thread_name_prefix="readiness-target") as pool:
+            healths = list(pool.map(_health, targets))
+    else:
+        healths = [_health(t) for t in targets]
+    for target, health in zip(targets, healths):
         state = str(health.get("state"))
         emit_target_health(target=target.target_key, state=state)
         role = "Control database" if target.is_control_database else "Managed target"
@@ -601,7 +695,7 @@ def check_framework_manifest() -> List[Dict[str, Any]]:
         )
 
         manifest = load_manifest()
-        with _connection(_main_db_kwargs) as conn:
+        with _control_connection() as conn:
             snapshot = fetch_catalog_snapshot(conn, manifest)
         report = evaluate_snapshot(
             manifest, snapshot, scope="api", check_current_user_execute=True
@@ -638,7 +732,8 @@ def check_framework_manifest() -> List[Dict[str, Any]]:
 def check_database_privileges() -> List[Dict[str, Any]]:
     category = "database"
     try:
-        readiness = get_database_readiness()
+        readiness = get_database_readiness(_shared_conn())
+        _reset_shared()
     except DatabaseError as exc:
         return [
             _check(
@@ -702,7 +797,10 @@ def check_scheduler() -> List[Dict[str, Any]]:
     checks: List[Dict[str, Any]] = []
 
     health_url = _scheduler_health_url()
-    ok, payload, message = _http_get_json(health_url, timeout=2.0)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="readiness-sched") as pool:
+        status_future = pool.submit(fetch_scheduler_status)  # concurrent with /health
+        ok, payload, message = _http_get_json(health_url, timeout=_READINESS_HTTP_TIMEOUT)
+        status_ok, status_payload, status_message = status_future.result()
     if ok:
         summary = "Scheduler health endpoint responded."
         if isinstance(payload, dict) and payload.get("ok") is False:
@@ -740,7 +838,6 @@ def check_scheduler() -> List[Dict[str, Any]]:
             )
         )
 
-    status_ok, status_payload, status_message = fetch_scheduler_status()
     if status_ok and isinstance(status_payload, dict):
         checks.append(
             _check(
@@ -851,9 +948,20 @@ def check_systemd_services() -> List[Dict[str, Any]]:
 def check_local_ports() -> List[Dict[str, Any]]:
     category = "host"
     checks: List[Dict[str, Any]] = []
-    for port, label in LOCAL_TCP_PORTS:
+    def _probe(port: int) -> Optional[OSError]:
         try:
-            with socket.create_connection(("127.0.0.1", port), timeout=2):
+            with socket.create_connection(("127.0.0.1", port), timeout=_READINESS_PORT_TIMEOUT):
+                return None
+        except OSError as exc:
+            return exc
+
+    with ThreadPoolExecutor(max_workers=max(1, len(LOCAL_TCP_PORTS)),
+                            thread_name_prefix="readiness-port") as pool:
+        results = list(pool.map(_probe, [port for port, _label in LOCAL_TCP_PORTS]))
+    for (port, label), error in zip(LOCAL_TCP_PORTS, results):
+        try:
+            if error is not None:
+                raise error
                 checks.append(
                     _check(
                         f"tcp_{port}",
@@ -1030,7 +1138,7 @@ def check_runtime_configuration() -> List[Dict[str, Any]]:
 def check_legacy_conflicts() -> List[Dict[str, Any]]:
     category = "legacy"
     try:
-        with _connection(_pgagent_db_kwargs) as conn:
+        with _connection(_readiness_pgagent_kwargs) as conn:
             with conn.cursor() as cur:
                 cur.execute(_PGAGENT_EXISTS_SQL)
                 exists_row = cur.fetchone()
@@ -1099,7 +1207,7 @@ def check_legacy_conflicts() -> List[Dict[str, Any]]:
 def check_pgagent_access() -> List[Dict[str, Any]]:
     category = "legacy"
     try:
-        with _connection(_pgagent_db_kwargs) as conn:
+        with _connection(_readiness_pgagent_kwargs) as conn:
             with conn.cursor() as cur:
                 cur.execute(_PGAGENT_EXISTS_SQL)
                 exists_row = cur.fetchone()
@@ -1158,7 +1266,7 @@ def check_frontend_runtime() -> List[Dict[str, Any]]:
     url = "http://127.0.0.1:8501/"
     try:
         request = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(request, timeout=2) as response:
+        with urllib.request.urlopen(request, timeout=_READINESS_HTTP_TIMEOUT) as response:
             status = int(getattr(response, "status", 200))
             if 200 <= status < 400:
                 return [
@@ -1216,25 +1324,83 @@ def _control_db_unavailable_checks() -> List[Dict[str, Any]]:
     ]
 
 
-def _collect_all_checks() -> List[Dict[str, Any]]:
+def _safe_db_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: kwargs.get(k) for k in ("host", "port", "dbname", "user", "sslmode")}
+
+
+def _control_database_checks() -> List[Dict[str, Any]]:
+    """Connection check + every control-DB dependent check on ONE connection.
+
+    The connection probe IS the shared connection (Phase 5F.1: one control
+    connection per readiness build instead of one per check). If the control
+    database cannot be reached the dependent checks are not run (they could
+    only fail the same way after their own timeouts).
+    """
+    try:
+        safe = _safe_db_kwargs(_readiness_main_kwargs())
+    except DatabaseError:
+        # Not configured: no network wait; reuse the detailed config message.
+        return [check_database_connection()] + _control_db_unavailable_checks()
     checks: List[Dict[str, Any]] = []
-    connection = check_database_connection()
-    checks.append(connection)
-    if connection.get("status") == STATUS_FAILED:
-        checks.extend(_control_db_unavailable_checks())
-    else:
-        checks.extend(check_required_tables())
-        checks.extend(check_required_functions())
-        checks.extend(check_framework_manifest())
-        checks.extend(check_database_targets())
-        checks.extend(check_database_privileges())
-    checks.extend(check_scheduler())
-    checks.extend(check_systemd_services())
-    checks.extend(check_local_ports())
-    checks.extend(check_runtime_configuration())
-    checks.extend(check_legacy_conflicts())
-    checks.extend(check_pgagent_access())
-    checks.extend(check_frontend_runtime())
+    try:
+        with _connection(_readiness_main_kwargs) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 AS ok;")
+                row = cur.fetchone()
+            conn.rollback()
+            if not (row and row[0] == 1):
+                return [_check("database_connection", "Database connection", "database", STATUS_FAILED,
+                               "Connected but sanity query did not return expected result.",
+                               details=safe)] + _control_db_unavailable_checks()
+            checks.append(_check("database_connection", "Database connection", "database",
+                                 STATUS_READY, "Connected to PostgreSQL.", details=safe))
+            _shared.conn = conn
+            try:
+                checks.extend(check_required_tables())
+                checks.extend(check_required_functions())
+                checks.extend(check_framework_manifest())
+                checks.extend(check_database_targets())
+                checks.extend(check_database_privileges())
+            finally:
+                _shared.conn = None
+    except DatabaseError as exc:
+        if not checks:
+            return [_check("database_connection", "Database connection", "database", STATUS_FAILED,
+                           exc.message, details=safe,
+                           remediation_hint="Verify database reachability, credentials, and pg_hba.conf.")
+                    ] + _control_db_unavailable_checks()
+        # The database went away during the dependent checks.
+        logger.warning("event=readiness_control_db_lost detail=%s", exc.message)
+        done = {c.get("key") for c in checks}
+        checks.extend(c for c in _control_db_unavailable_checks() if c["key"] not in done)
+    return checks
+
+
+# Independent groups run concurrently; within the control-DB group the
+# order is sequential on one connection. Each group is total-bounded by its
+# own timeouts (connect <= readiness_connect_timeout(), HTTP 1.5 s, ports 1 s).
+def _collect_all_checks() -> List[Dict[str, Any]]:
+    groups: List[Callable[[], Any]] = [
+        _control_database_checks,
+        check_scheduler,
+        check_systemd_services,
+        check_local_ports,
+        check_runtime_configuration,
+        check_legacy_conflicts,
+        check_pgagent_access,
+        check_frontend_runtime,
+    ]
+    with ThreadPoolExecutor(max_workers=len(groups), thread_name_prefix="readiness") as pool:
+        futures = [pool.submit(group) for group in groups]
+        checks: List[Dict[str, Any]] = []
+        for group, future in zip(groups, futures):
+            try:
+                result = future.result()
+            except Exception as exc:  # noqa: BLE001 — one group never breaks readiness
+                logger.exception("event=readiness_group_failed group=%s", group.__name__)
+                result = [_check(group.__name__, group.__name__, "configuration", STATUS_UNKNOWN,
+                                 "Check could not run ({}).".format(type(exc).__name__))]
+            checks.extend(result if isinstance(result, list) else [result])
     return checks
 
 
@@ -1280,20 +1446,44 @@ def _count_statuses(checks: List[Dict[str, Any]]) -> Dict[str, int]:
     return counts
 
 
-def build_system_readiness(force_refresh: bool = False) -> Dict[str, Any]:
-    """Build the PartOps readiness report (10s in-process cache)."""
-    global _cache_payload, _cache_monotonic_at
-
-    now_mono = time.monotonic()
-    if (
-        not force_refresh
-        and _cache_payload is not None
-        and (now_mono - _cache_monotonic_at) < _CACHE_TTL_SECONDS
-    ):
+def _cached(now_mono: float) -> Optional[Dict[str, Any]]:
+    if _cache_payload is not None and (now_mono - _cache_monotonic_at) < _CACHE_TTL_SECONDS:
         cached = dict(_cache_payload)
         cached["from_cache"] = True
         return cached
+    return None
 
+
+def invalidate_readiness_cache() -> None:
+    global _cache_payload, _cache_monotonic_at
+    with _cache_lock:
+        _cache_payload = None
+        _cache_monotonic_at = 0.0
+
+
+def build_system_readiness(force_refresh: bool = False) -> Dict[str, Any]:
+    """Build the PartOps readiness report.
+
+    Phase 5F.1: 30 s in-process TTL cache (successes AND failures), guarded by
+    a lock so concurrent requests share one computation (single flight).
+    ``force_refresh`` (the explicit "Refresh checks" action) bypasses and
+    replaces the cache. Never cached indefinitely.
+    """
+    if not force_refresh:
+        hit = _cached(time.monotonic())
+        if hit is not None:
+            return hit
+    with _cache_lock:
+        if not force_refresh:
+            hit = _cached(time.monotonic())  # filled while we waited
+            if hit is not None:
+                return hit
+        return _build_uncached()
+
+
+def _build_uncached() -> Dict[str, Any]:
+    global _cache_payload, _cache_monotonic_at
+    started = time.monotonic()
     checks = _collect_all_checks()
     categories = _group_categories(checks)
     category_statuses = [str(c["status"]) for c in categories]
@@ -1311,5 +1501,8 @@ def build_system_readiness(force_refresh: bool = False) -> Dict[str, Any]:
     payload = _scrub_secrets(payload)
 
     _cache_payload = payload
-    _cache_monotonic_at = now_mono
+    _cache_monotonic_at = time.monotonic()
+    duration_ms = (time.monotonic() - started) * 1000.0
+    payload["duration_ms"] = int(duration_ms)
+    timing("readiness.duration_ms", duration_ms, tags={"overall": str(overall)})
     return dict(payload)

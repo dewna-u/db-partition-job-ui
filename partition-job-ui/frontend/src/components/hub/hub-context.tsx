@@ -3,19 +3,50 @@
 /**
  * Phase 5E — shared hub state (ONE hub: this PartOps instance's targets).
  *
- * Polling budget (conservative; Phase 5F optimises further):
- *  - scheduler status + DB readiness: every 30 s (unchanged shell cycle)
+ * Polling budget (Phase 5F.1):
+ *  - scheduler status: every 30 s (in-memory on the scheduler, no DB access)
+ *  - control-DB readiness (sidebar dot): every 60 s (one DB connection each)
  *  - target registry: on mount and every 5 min (DBA-managed, changes rarely)
  *  - target health: ON DEMAND only, cached 60 s per target (each check opens
  *    a short read-only connection to that database)
+ *  - while the browser tab is hidden nothing is polled; on return, anything
+ *    older than its interval is refreshed once.
+ *  - explicit refresh buttons always fetch immediately.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import type { DatabaseTarget, SchedulerStatus, TargetHealth } from "@/lib/types";
 
-const TARGETS_REFRESH_MS = 5 * 60 * 1000;
-const SCHEDULER_REFRESH_MS = 30 * 1000;
+export const TARGETS_REFRESH_MS = 5 * 60 * 1000;
+export const SCHEDULER_REFRESH_MS = 30 * 1000;
+export const DB_READINESS_REFRESH_MS = 60 * 1000;
 const HEALTH_TTL_MS = 60 * 1000;
+
+/**
+ * Run ``fn`` now and every ``intervalMs`` while the page is visible. Hidden
+ * tabs skip ticks; becoming visible triggers one catch-up run if stale.
+ */
+function useVisiblePolling(fn: () => Promise<void>, intervalMs: number) {
+  const lastRun = useRef(0);
+  useEffect(() => {
+    const run = () => {
+      lastRun.current = Date.now();
+      void fn();
+    };
+    run();
+    const id = window.setInterval(() => {
+      if (!document.hidden) run();
+    }, intervalMs);
+    const onVisibility = () => {
+      if (!document.hidden && Date.now() - lastRun.current >= intervalMs) run();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [fn, intervalMs]);
+}
 
 type HealthEntry = { health: TargetHealth | null; error: string | null; at: number };
 
@@ -50,7 +81,7 @@ export function HubProvider({ children }: { children: React.ReactNode }) {
   const healthRef = useRef<Record<number, HealthEntry>>({});
   const inflight = useRef<Record<number, Promise<HealthEntry> | undefined>>({});
 
-  const refreshScheduler = useCallback(async () => {
+  const pollScheduler = useCallback(async () => {
     try {
       const sched = await api.schedulerStatus();
       setSchedulerOk(sched.ok);
@@ -61,6 +92,9 @@ export function HubProvider({ children }: { children: React.ReactNode }) {
       setScheduler(null);
       setSchedulerMessage(err instanceof Error ? err.message : "Unavailable");
     }
+  }, []);
+
+  const pollDb = useCallback(async () => {
     try {
       await api.readiness();
       setDbConnected(true);
@@ -68,6 +102,11 @@ export function HubProvider({ children }: { children: React.ReactNode }) {
       setDbConnected(false);
     }
   }, []);
+
+  // Explicit refresh (buttons): both, immediately.
+  const refreshScheduler = useCallback(async () => {
+    await Promise.all([pollScheduler(), pollDb()]);
+  }, [pollScheduler, pollDb]);
 
   const refreshTargets = useCallback(async () => {
     try {
@@ -105,17 +144,9 @@ export function HubProvider({ children }: { children: React.ReactNode }) {
     return p;
   }, []);
 
-  useEffect(() => {
-    void refreshScheduler();
-    const id = window.setInterval(() => void refreshScheduler(), SCHEDULER_REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [refreshScheduler]);
-
-  useEffect(() => {
-    void refreshTargets();
-    const id = window.setInterval(() => void refreshTargets(), TARGETS_REFRESH_MS);
-    return () => window.clearInterval(id);
-  }, [refreshTargets]);
+  useVisiblePolling(pollScheduler, SCHEDULER_REFRESH_MS);
+  useVisiblePolling(pollDb, DB_READINESS_REFRESH_MS);
+  useVisiblePolling(refreshTargets, TARGETS_REFRESH_MS);
 
   const value = useMemo<HubState>(
     () => ({

@@ -508,34 +508,64 @@ if __name__ == "__main__":
     unittest.main()
 
 
+_OTHER_GROUPS = ("check_scheduler", "check_systemd_services", "check_local_ports",
+                 "check_runtime_configuration", "check_legacy_conflicts",
+                 "check_pgagent_access", "check_frontend_runtime")
+_DEPENDENT = ("check_required_tables", "check_required_functions", "check_framework_manifest",
+              "check_database_targets", "check_database_privileges")
+
+
+def _fake_connection_cm(conn=None, error=None, delay=0.0):
+    """Stand-in for database._connection: yields conn or raises error."""
+    from contextlib import contextmanager
+    import time as _t
+
+    @contextmanager
+    def _cm(_kwargs_factory):
+        if delay:
+            _t.sleep(delay)
+        if error is not None:
+            raise error
+        yield conn
+    return _cm
+
+
+def _ok_conn():
+    from unittest.mock import MagicMock
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchone.return_value = (1,)
+    return conn
+
+
 class ControlDatabaseDownShortCircuitTests(unittest.TestCase):
-    """Phase 5E.1: with the control DB down, DB-dependent checks are not run
-    (each would wait for its own connect timeout); they report 'unknown'."""
+    """Phase 5E.1/5F.1: with the control DB down, DB-dependent checks are not
+    run (each would wait for its own connect timeout); they report 'unknown'.
+    Phase 5F.1: the connection probe is the ONE shared control connection."""
+
+    def _patched(self, sr, connection_cm, dependent):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(patch.object(sr, "_connection", connection_cm))
+        stack.enter_context(patch.object(sr, "_safe_db_kwargs", return_value={"host": "h"}))
+        stack.enter_context(patch.object(sr, "_readiness_main_kwargs", return_value={}))
+        for name in _DEPENDENT:
+            stack.enter_context(patch.object(sr, name, **dependent(name)))
+        for name in _OTHER_GROUPS:
+            stack.enter_context(patch.object(sr, name, return_value=[]))
+        return stack
 
     def test_dependent_checks_skipped_when_connection_failed(self):
         import system_readiness as sr
+        from database import DatabaseError
 
-        failed = sr._check("database_connection", "Database connection", "database",
-                           sr.STATUS_FAILED, "Unable to connect to the database.")
         called = []
 
         def boom(*_a, **_k):
             called.append(True)
             raise AssertionError("control-DB dependent check must not run")
 
-        with patch.object(sr, "check_database_connection", return_value=failed), \
-                patch.object(sr, "check_required_tables", side_effect=boom), \
-                patch.object(sr, "check_required_functions", side_effect=boom), \
-                patch.object(sr, "check_framework_manifest", side_effect=boom), \
-                patch.object(sr, "check_database_targets", side_effect=boom), \
-                patch.object(sr, "check_database_privileges", side_effect=boom), \
-                patch.object(sr, "check_scheduler", return_value=[]), \
-                patch.object(sr, "check_systemd_services", return_value=[]), \
-                patch.object(sr, "check_local_ports", return_value=[]), \
-                patch.object(sr, "check_runtime_configuration", return_value=[]), \
-                patch.object(sr, "check_legacy_conflicts", return_value=[]), \
-                patch.object(sr, "check_pgagent_access", return_value=[]), \
-                patch.object(sr, "check_frontend_runtime", return_value=[]):
+        cm = _fake_connection_cm(error=DatabaseError("Unable to connect to the database."))
+        with self._patched(sr, cm, lambda _n: {"side_effect": boom}):
             checks = sr._collect_all_checks()
         self.assertEqual(called, [])
         by_key = {c["key"]: c for c in checks}
@@ -546,23 +576,155 @@ class ControlDatabaseDownShortCircuitTests(unittest.TestCase):
             self.assertIn("control database is unavailable", by_key[key]["summary"])
         self.assertEqual(by_key["target_registry"]["category"], "targets")
 
-    def test_dependent_checks_run_when_connected(self):
+    def test_dependent_checks_run_when_connected_on_shared_connection(self):
         import system_readiness as sr
 
-        ok = sr._check("database_connection", "Database connection", "database", sr.STATUS_READY, "ok")
-        with patch.object(sr, "check_database_connection", return_value=ok), \
-                patch.object(sr, "check_required_tables", return_value=[]) as t, \
-                patch.object(sr, "check_required_functions", return_value=[]), \
-                patch.object(sr, "check_framework_manifest", return_value=[]), \
-                patch.object(sr, "check_database_targets", return_value=[]) as g, \
-                patch.object(sr, "check_database_privileges", return_value=[]), \
-                patch.object(sr, "check_scheduler", return_value=[]), \
-                patch.object(sr, "check_systemd_services", return_value=[]), \
-                patch.object(sr, "check_local_ports", return_value=[]), \
-                patch.object(sr, "check_runtime_configuration", return_value=[]), \
-                patch.object(sr, "check_legacy_conflicts", return_value=[]), \
-                patch.object(sr, "check_pgagent_access", return_value=[]), \
-                patch.object(sr, "check_frontend_runtime", return_value=[]):
-            sr._collect_all_checks()
-        t.assert_called_once()
-        g.assert_called_once()
+        conn = _ok_conn()
+        seen = []
+
+        def record(name):
+            def _f(*_a, **_k):
+                seen.append((name, sr._shared_conn()))
+                return []
+            return {"side_effect": _f}
+
+        with self._patched(sr, _fake_connection_cm(conn=conn), record):
+            checks = sr._collect_all_checks()
+        self.assertEqual([n for n, _c in seen], list(_DEPENDENT))
+        # every dependent check saw the SAME (single) control connection
+        self.assertTrue(all(c is conn for _n, c in seen))
+        self.assertIsNone(sr._shared_conn())  # never kept after the build
+        by_key = {c["key"]: c for c in checks}
+        self.assertEqual(by_key["database_connection"]["status"], sr.STATUS_READY)
+
+    def test_connection_lost_midway_marks_remaining_unknown(self):
+        import system_readiness as sr
+        from database import DatabaseError
+
+        conn = _ok_conn()
+
+        def deps(name):
+            if name == "check_required_tables":
+                return {"return_value": [sr._check("required_tables", "t", "database", sr.STATUS_READY, "ok")]}
+            if name == "check_required_functions":
+                return {"side_effect": DatabaseError("server closed the connection")}
+            return {"side_effect": AssertionError("must not run after the connection is lost")}
+
+        with self._patched(sr, _fake_connection_cm(conn=conn), deps):
+            checks = sr._collect_all_checks()
+        by_key = {c["key"]: c for c in checks}
+        self.assertEqual(by_key["required_tables"]["status"], sr.STATUS_READY)
+        for key in ("required_functions", "framework_manifest", "target_registry", "database_privileges"):
+            self.assertEqual(by_key[key]["status"], sr.STATUS_UNKNOWN, key)
+
+    def test_slow_unavailable_db_is_bounded_and_independent_checks_still_run(self):
+        """Simulated control DB that takes 1 s to fail; the other groups take
+        1 s each too. Groups run concurrently: total well under the sum."""
+        import time as _t
+        from contextlib import ExitStack
+        import system_readiness as sr
+        from database import DatabaseError
+
+        cm = _fake_connection_cm(error=DatabaseError("timeout expired"), delay=1.0)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(sr, "_connection", cm))
+            stack.enter_context(patch.object(sr, "_safe_db_kwargs", return_value={}))
+            stack.enter_context(patch.object(sr, "_readiness_main_kwargs", return_value={}))
+            for name in _DEPENDENT:
+                stack.enter_context(patch.object(
+                    sr, name, side_effect=AssertionError("dependent check must not run")))
+            for name in _OTHER_GROUPS:
+                key = name.replace("check_", "")
+
+                def _slow_group(key=key):
+                    _t.sleep(1.0)
+                    return [sr._check(key, key, "host", sr.STATUS_READY, "ok")]
+                stack.enter_context(patch.object(sr, name, side_effect=_slow_group))
+            started = _t.monotonic()
+            checks = sr._collect_all_checks()
+            elapsed = _t.monotonic() - started
+        self.assertLess(elapsed, 2.5)  # sequential would be >= 8 s
+        keys = {c["key"] for c in checks}
+        for name in _OTHER_GROUPS:
+            self.assertIn(name.replace("check_", ""), keys)  # independent checks ran
+        self.assertEqual({c["key"]: c for c in checks}["database_connection"]["status"], sr.STATUS_FAILED)
+
+    def test_readiness_connect_timeout_is_bounded(self):
+        import os
+        import system_readiness as sr
+        for raw, expected in (("", 3), ("1", 2), ("5", 5), ("99", 10), ("abc", 3)):
+            with patch.dict(os.environ, {"PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS": raw}):
+                self.assertEqual(sr.readiness_connect_timeout(), expected, raw)
+        with patch.dict(os.environ, {"PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS": "3"}):
+            self.assertEqual(sr._clamp_connect_timeout({"connect_timeout": 15})["connect_timeout"], 3)
+            self.assertEqual(sr._clamp_connect_timeout({"connect_timeout": 2})["connect_timeout"], 2)
+            self.assertEqual(sr._clamp_connect_timeout({})["connect_timeout"], 3)
+
+
+class ReadinessCacheTests(unittest.TestCase):
+    """Phase 5F.1: bounded in-process TTL cache (failures cached too)."""
+
+    def setUp(self):
+        import system_readiness as sr
+        sr.invalidate_readiness_cache()
+        self.sr = sr
+        self.calls = []
+
+        def fake_collect():
+            self.calls.append(1)
+            return [sr._check("database_connection", "Database connection", "database",
+                              sr.STATUS_FAILED, "down")]
+        self._p = patch.object(sr, "_collect_all_checks", side_effect=fake_collect)
+        self._p.start()
+
+    def tearDown(self):
+        self._p.stop()
+        self.sr.invalidate_readiness_cache()
+
+    def test_cache_hit_including_failures(self):
+        first = self.sr.build_system_readiness()
+        second = self.sr.build_system_readiness()
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse(first.get("from_cache"))
+        self.assertTrue(second.get("from_cache"))
+        self.assertIn("duration_ms", first)
+
+    def test_cache_expiry(self):
+        self.sr.build_system_readiness()
+        with patch.object(self.sr, "_CACHE_TTL_SECONDS", 0.0):
+            self.sr.build_system_readiness()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_ttl_is_bounded(self):
+        self.assertGreaterEqual(self.sr._CACHE_TTL_SECONDS, 30)
+        self.assertLessEqual(self.sr._CACHE_TTL_SECONDS, 60)
+
+    def test_force_refresh_bypasses_and_replaces_cache(self):
+        self.sr.build_system_readiness()
+        fresh = self.sr.build_system_readiness(force_refresh=True)
+        self.assertFalse(fresh.get("from_cache"))
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(self.sr.build_system_readiness().get("from_cache"))
+        self.assertEqual(len(self.calls), 2)
+
+    def test_invalidate(self):
+        self.sr.build_system_readiness()
+        self.sr.invalidate_readiness_cache()
+        self.sr.build_system_readiness()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_concurrent_requests_share_one_computation(self):
+        import threading
+        import time as _t
+
+        def slow_collect():
+            self.calls.append(1)
+            _t.sleep(0.3)
+            return []
+        with patch.object(self.sr, "_collect_all_checks", side_effect=slow_collect):
+            threads = [threading.Thread(target=self.sr.build_system_readiness) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(len(self.calls), 1)

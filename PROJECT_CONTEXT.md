@@ -703,6 +703,34 @@ Design reference: `partition-job-ui/REMOTE_EXECUTION.md`.
 - Authentication remains absent (ISSUE-014): PartOps must stay
   network-restricted until an approved authentication architecture exists.
 
+## Phase 5F.1 — performance / resource optimization (2026-11-18; in source)
+
+- Readiness (`system_readiness.py`): independent check groups run
+  concurrently; control-DB checks share ONE connection and are skipped
+  ("not checked") when it is down; readiness DB connects are bounded by
+  `PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS` (default 3, clamped 2..10),
+  HTTP probes 1.5 s, port probes 1 s. 30 s in-process TTL cache (failures
+  cached too, single-flight lock); `?refresh=true` bypasses and replaces it.
+  Control DB + scheduler unreachable: 27.3 s → 3.1 s.
+- History `GET /api/logs`: server-side `limit` (≤500) / `offset` (≤100000) and
+  filters `target_id`, `status`, `job` (id or name), `operation`, `since`,
+  `until`; order `job_runtime DESC, job_log_id DESC`; `has_more` via LIMIT n+1
+  (no COUNT). NULL target rows belong to the control target.
+- `GET /api/execution-attempts`: `limit`/`offset`/`target_id` added;
+  `unknown_count` = every unresolved OUTCOME_UNKNOWN (all pages, all filters).
+- `GET /api/jobs/{id}/runtime-context` (latest MANUAL_* row of that job, open
+  attempt state, pending review items; one connection) replaces the job
+  drawer's 200-row history scan, which missed older manual runs.
+  `GET /api/jobs/{id}/attention` is the per-job review list; the global
+  `/api/attention` is unchanged. `last_run_status` keeps its meaning.
+- Dashboard summary uses one connection (was 3). Readiness refresh opens
+  4 connections instead of 9 (1 control + pgAgent ×2 + target health).
+- UI polling: scheduler status 30 s, control-DB dot 60 s, targets 5 min,
+  target health on demand; nothing polls while the tab is hidden.
+- No new migration or index (framework version unchanged); a
+  `(job_runtime DESC, job_log_id DESC)` log index is measured and documented as
+  a recommendation (ISSUE-015). No pool, Redis or WebSockets.
+
 ## Concurrency
 
 **CURRENT**
@@ -729,6 +757,8 @@ Design reference: `partition-job-ui/REMOTE_EXECUTION.md`.
 
 - Connection: `DB_HOST`, `DB_PORT` (code default **5444**), `DB_NAME`, `DB_USER`,
   `DB_PASSWORD`, `DB_SSLMODE`, `DB_CONNECT_TIMEOUT`.
+- Readiness probes only: `PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS`
+  (default 3, clamped 2..10; Phase 5F.1).
 - Credentials: `PARTITION_DB_SECRET_PROVIDER`, `PARTITION_DB_SECRET_ID`,
   `AWS_REGION` / `AWS_DEFAULT_REGION`, `PARTITION_DB_SECRET_CACHE_TTL_SECONDS`.
 - pgAgent: `PGAGENT_DB_*`.
@@ -804,7 +834,7 @@ Design reference: `partition-job-ui/REMOTE_EXECUTION.md`.
 | Per-target remote execution (Phase 5D) | Complete in source; migrations 20261117_03/04 not applied; disposable-validated with test-only stubs |
 | Multi-target UI (Phase 5E) | Complete in source (frontend; ISSUE-012 closed) |
 | Legacy definition import (Phase 5B.1) | DEFERRED — production is the only source; capture not permitted |
-| Optimization | Not started |
+| Optimization (Phase 5F.1) | Complete in source: readiness, pagination, per-job drawer data, polling (no migration) |
 | Runbook | Partial (good ops runbook; README has Streamlit-era drift) |
 | Final handover | Not started |
 
@@ -869,7 +899,8 @@ Important but not critical:
    3. Run the preflight (§16.6).
    4. Deploy, then verify in production.
 3. Phase 5C/5D rollout: `20261117_01`…`_04`, preflight, deploy (RUNBOOK
-   §10.7, §10.8). Phase 5E: multi-target UI — done in source. Phase 5F: optimization.
+   §10.7, §10.8). Phase 5E: multi-target UI — done in source. Phase 5F.1: optimization — done in source
+   (ISSUE-015: optional history index once production log volume is known).
    Phase 5G: multi-host installation runbook. Phase 5B.1 stays deferred
    (ISSUE-003/008/009/010/013 open).
 4. Resource optimization.

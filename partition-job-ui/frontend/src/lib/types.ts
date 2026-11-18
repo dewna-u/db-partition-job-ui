@@ -340,10 +340,42 @@ export type ExecutionAttempt = {
   execution_duration_ms: number | null;
 };
 
-export type AttemptsResponse = {
+/** Phase 5F.1: server-side pagination envelope (LIMIT n+1, no COUNT scan). */
+export type PageInfo = {
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  next_offset: number | null;
+  previous_offset: number | null;
+};
+
+export type AttemptsResponse = PageInfo & {
   attempts: ExecutionAttempt[];
   available: boolean;
   message: string | null;
+  /** All unresolved OUTCOME_UNKNOWN attempts (every page / filter). */
+  unknown_count: number;
+};
+
+export type LogsPage = PageInfo & { logs: JobLog[] };
+
+export type LogsQuery = {
+  limit?: number;
+  offset?: number;
+  targetId?: number;
+  status?: string;
+  job?: string;
+  operation?: "create" | "drop";
+};
+
+export type JobRuntimeContext = {
+  job_id: number;
+  /** Latest MANUAL_* history row of THIS job (null = never run manually). */
+  latest_manual_run: JobLog | null;
+  /** Most significant open remote attempt state (null = none / pre-5D). */
+  open_attempt_state: string | null;
+  pending_attention: AttentionItem[];
+  attention_available: boolean;
 };
 
 export type AttemptResolution = "APPLIED" | "NOT_APPLIED";

@@ -13,7 +13,7 @@ from dashboard_metrics import (
     success_rate,
     system_insights,
 )
-from database import DatabaseError, get_database_readiness, get_partition_job_logs, get_partition_jobs
+from database import get_dashboard_snapshot
 from scheduler_client import fetch_scheduler_status
 
 router = APIRouter(tags=["dashboard"])
@@ -21,25 +21,15 @@ router = APIRouter(tags=["dashboard"])
 
 @router.get("/dashboard/summary")
 def dashboard_summary():
-    jobs: list = []
-    logs: list = []
-    readiness = None
-    readiness_error = None
-    jobs_error = None
-    logs_error = None
-
-    try:
-        jobs = get_partition_jobs()
-    except DatabaseError as exc:
-        jobs_error = exc.message
-    try:
-        logs = get_partition_job_logs(200)
-    except DatabaseError as exc:
-        logs_error = exc.message
-    try:
-        readiness = get_database_readiness()
-    except DatabaseError as exc:
-        readiness_error = exc.message
+    # Phase 5F.1: jobs + recent history + privilege readiness on ONE
+    # short-lived connection (was three); each section fails independently.
+    snapshot = get_dashboard_snapshot(200)
+    jobs = snapshot["jobs"] or []
+    logs = snapshot["logs"] or []
+    readiness = snapshot["readiness"]
+    jobs_error = snapshot["jobs_error"]
+    logs_error = snapshot["logs_error"]
+    readiness_error = snapshot["readiness_error"]
 
     scheduler_ok, status, scheduler_message = fetch_scheduler_status()
     counts = job_counts(jobs)

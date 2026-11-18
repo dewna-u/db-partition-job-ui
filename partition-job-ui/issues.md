@@ -607,3 +607,39 @@ Mitigation until fixed:
     (admin network only, host firewall, no public exposure, scheduler bound to
     127.0.0.1) until an authentication architecture is approved. Do not add an
     ad-hoc login.
+
+## ISSUE-015 — History log table has no index for global newest-first paging
+
+Severity:
+    Low (performance; grows with history volume)
+
+Status:
+    OPEN — recommendation; decide once production log volume is known
+
+Description:
+    `partitioning_job_table_log` has only the primary key and
+    `(job_id, job_runtime DESC)`. The History page (no job filter), its status
+    / target / date filters and the dashboard's newest-200 query sort the
+    whole table: a parallel seq scan of ≈138 ms per page at 500 000 rows
+    (disposable PostgreSQL 16, Phase 5F.1), growing linearly. Per-job queries
+    (drawer latest manual run, job filter) already use the existing index.
+
+    Measured with `CREATE INDEX ... (job_runtime DESC, job_log_id DESC)`: first
+    page 0.3 ms, offset 10000 1.2 ms, status filter 2.8 ms; index size 15 MB
+    per 500k rows; one extra index entry per history insert.
+
+Why not added in Phase 5F.1:
+    - Production row count is unknown (no production access); at a few
+      thousand rows the scan is negligible.
+    - Any migration bumps the framework version, so the scheduler version gate
+      requires it before the code deploys.
+    - On a large live table it must be built with `CREATE INDEX CONCURRENTLY`,
+      which cannot run inside the transactional migration format.
+
+Fix (when justified):
+    DBA checks `SELECT count(*) FROM mubasher_oms.partitioning_job_table_log`.
+    If large (≥ ~100k rows) or History is slow, add a migration (with version
+    row + manifest bump) or a DBA-run script:
+    `CREATE INDEX CONCURRENTLY IF NOT EXISTS partitioning_job_table_log_runtime_idx
+     ON mubasher_oms.partitioning_job_table_log (job_runtime DESC, job_log_id DESC);`
+    Validate on EDB first (ISSUE-009).

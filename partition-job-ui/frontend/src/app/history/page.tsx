@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { OctagonAlert } from "lucide-react";
 import { PageHeader } from "@/components/shell/page-header";
 import { useHub } from "@/components/hub/hub-context";
@@ -10,12 +10,18 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PartOpsLoader } from "@/components/ui/partops-loader";
 import { Input, Select } from "@/components/ui/input";
+import { Pager } from "@/components/ui/pager";
 import { Panel, PanelHeader } from "@/components/ui/panel";
 import { Sheet } from "@/components/ui/sheet";
 import { api, ApiError } from "@/lib/api";
 import { formatDurationMs, formatWhen, isFailStatus, isSuccessStatus } from "@/lib/format";
 import { attemptResultLabel, redactText, resolveTarget, safeText } from "@/lib/targets";
-import type { ExecutionAttempt, JobLog } from "@/lib/types";
+import type { ExecutionAttempt, JobLog, PageInfo } from "@/lib/types";
+
+// Phase 5F.1: history and attempts are filtered and paged on the server.
+const HISTORY_PAGE_SIZE = 100;
+const ATTEMPTS_PAGE_SIZE = 50;
+const JOB_FILTER_DEBOUNCE_MS = 350;
 
 /** History statuses written by the local and remote executors. */
 const HISTORY_STATUSES = [
@@ -40,81 +46,99 @@ function logTone(status?: string | null) {
 export default function HistoryPage() {
   const { targets } = useHub();
   const [logs, setLogs] = useState<JobLog[]>([]);
+  const [logPage, setLogPage] = useState<PageInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [jobFilter, setJobFilter] = useState("");
+  const [jobQuery, setJobQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
   const [targetFilter, setTargetFilter] = useState("All");
+  const [operationFilter, setOperationFilter] = useState<"" | "create" | "drop">("");
   const [selected, setSelected] = useState<JobLog | null>(null);
   const [attempts, setAttempts] = useState<ExecutionAttempt[]>([]);
+  const [attemptPage, setAttemptPage] = useState<PageInfo | null>(null);
   const [attemptsAvailable, setAttemptsAvailable] = useState(true);
+  const [unknownCount, setUnknownCount] = useState(0);
   const [showFinalized, setShowFinalized] = useState(false);
   const [attemptId, setAttemptId] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  async function loadAttempts(all: boolean) {
-    try {
-      const res = await api.attempts({ open: !all, limit: all ? 200 : 100 });
-      setAttempts(res.attempts || []);
-      setAttemptsAvailable(res.available);
-    } catch {
-      setAttempts([]);
-    }
-  }
+  // Target filter is a key in the UI; the API filters by target id.
+  const targetId = useMemo(() => {
+    if (targetFilter === "All") return undefined;
+    return (targets || []).find((t) => t.target_key === targetFilter)?.target_id;
+  }, [targetFilter, targets]);
+
+  // Typing in the job filter must not issue one request per keystroke.
+  useEffect(() => {
+    const id = window.setTimeout(() => setJobQuery(jobFilter.trim()), JOB_FILTER_DEBOUNCE_MS);
+    return () => window.clearTimeout(id);
+  }, [jobFilter]);
+
+  const loadAttempts = useCallback(
+    async (all: boolean, offset = 0) => {
+      try {
+        const res = await api.attempts({
+          open: !all,
+          targetId,
+          limit: ATTEMPTS_PAGE_SIZE,
+          offset,
+        });
+        setAttempts(res.attempts || []);
+        setAttemptsAvailable(res.available);
+        setAttemptPage(res);
+        // All unresolved unknown outcomes, not only this page / target.
+        setUnknownCount(res.unknown_count ?? 0);
+      } catch {
+        setAttempts([]);
+        setAttemptPage(null);
+      }
+    },
+    [targetId],
+  );
+
+  const loadLogs = useCallback(
+    async (offset = 0, opts?: { refresh?: boolean }) => {
+      const isRefresh = Boolean(opts?.refresh);
+      setError(null);
+      if (isRefresh) setRefreshing(true);
+      else setLoading(true);
+      try {
+        const res = await api.logsPage({
+          limit: HISTORY_PAGE_SIZE,
+          offset,
+          targetId,
+          status: statusFilter === "All" ? undefined : statusFilter,
+          job: jobQuery || undefined,
+          operation: operationFilter || undefined,
+        });
+        setLogs(res.logs || []);
+        setLogPage(res);
+      } catch (err) {
+        setError(err instanceof ApiError ? safeText(err.message) : "Failed to load history");
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [targetId, statusFilter, jobQuery, operationFilter],
+  );
 
   async function load(opts?: { refresh?: boolean }) {
-    const isRefresh = Boolean(opts?.refresh);
-    setError(null);
-    if (isRefresh) setRefreshing(true);
-    else setLoading(true);
-    try {
-      const [res] = await Promise.all([api.logs(200), loadAttempts(showFinalized)]);
-      setLogs(res.logs || []);
-    } catch (err) {
-      setError(err instanceof ApiError ? safeText(err.message) : "Failed to load history");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
+    await Promise.all([loadLogs(logPage?.offset ?? 0, opts), loadAttempts(showFinalized, attemptPage?.offset ?? 0)]);
   }
 
+  // Any filter change returns to the first page.
   useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    void loadLogs(0);
+  }, [loadLogs]);
 
   useEffect(() => {
-    void loadAttempts(showFinalized);
-  }, [showFinalized]);
+    void loadAttempts(showFinalized, 0);
+  }, [showFinalized, loadAttempts]);
 
-  const filtered = useMemo(() => {
-    return logs.filter((row) => {
-      if (statusFilter !== "All" && String(row.last_run_status || "") !== statusFilter) return false;
-      if (targetFilter !== "All") {
-        const key = row.target_key || resolveTarget(row.database_target_id, targets)?.target_key || "";
-        if (key !== targetFilter) return false;
-      }
-      if (jobFilter.trim()) {
-        const wanted = Number(jobFilter);
-        if (!Number.isNaN(wanted) && row.job_id !== wanted) return false;
-        if (Number.isNaN(wanted)) {
-          const hay = `${row.job_name || ""}`.toLowerCase();
-          if (!hay.includes(jobFilter.trim().toLowerCase())) return false;
-        }
-      }
-      return true;
-    });
-  }, [logs, jobFilter, statusFilter, targetFilter, targets]);
-
-  const visibleAttempts = useMemo(
-    () =>
-      attempts.filter(
-        (a) => targetFilter === "All" || a.target_key === targetFilter,
-      ),
-    [attempts, targetFilter],
-  );
-  const unknown = visibleAttempts.filter((a) => String(a.state).toUpperCase() === "OUTCOME_UNKNOWN");
+  const unknown = attempts.filter((a) => String(a.state).toUpperCase() === "OUTCOME_UNKNOWN");
 
   return (
     <div className="pj-enter space-y-3">
@@ -148,6 +172,16 @@ export default function HistoryPage() {
           </Select>
         ) : null}
         <Select
+          className="w-36"
+          value={operationFilter}
+          onChange={(e) => setOperationFilter(e.target.value as "" | "create" | "drop")}
+          aria-label="Operation filter"
+        >
+          <option value="">All operations</option>
+          <option value="create">Create</option>
+          <option value="drop">Drop</option>
+        </Select>
+        <Select
           className="w-52"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -179,14 +213,14 @@ export default function HistoryPage() {
         <p className="text-[12px] font-semibold text-[var(--success-fg)]" role="status">{notice}</p>
       ) : null}
 
-      {unknown.length ? (
+      {unknownCount ? (
         <div
           role="alert"
           className="rounded-[6px] border-2 border-[var(--error-fg)] bg-[var(--error-bg)] px-3 py-2.5 text-[12px]"
         >
           <div className="flex items-center gap-1.5 font-semibold text-[var(--error-fg)]">
             <OctagonAlert className="h-4 w-4" aria-hidden />
-            {unknown.length} execution outcome{unknown.length === 1 ? "" : "s"} unknown
+            {unknownCount} execution outcome{unknownCount === 1 ? "" : "s"} unknown
           </div>
           <p className="mt-0.5 text-[var(--content-primary)]">
             PartOps cannot confirm whether the target database committed these operations. Do not run
@@ -219,7 +253,7 @@ export default function HistoryPage() {
             </tr>
           </thead>
           <tbody>
-            {filtered.map((row) => {
+            {logs.map((row) => {
               const target = resolveTarget(row.database_target_id, targets);
               return (
                 <tr key={row.job_log_id} className="border-t border-pj-line">
@@ -266,7 +300,7 @@ export default function HistoryPage() {
                 </tr>
               );
             })}
-            {!filtered.length && !loading ? (
+            {!logs.length && !loading ? (
               <tr>
                 <td colSpan={7} className="px-3 py-10 text-center text-pj-muted">
                   No execution history rows match.
@@ -275,6 +309,13 @@ export default function HistoryPage() {
             ) : null}
           </tbody>
         </table>
+        <Pager
+          page={logPage}
+          count={logs.length}
+          busy={loading || refreshing}
+          onOffset={(o) => void loadLogs(o)}
+          label="History"
+        />
       </div>
 
       <Panel>
@@ -317,7 +358,7 @@ export default function HistoryPage() {
                 </tr>
               </thead>
               <tbody>
-                {[...unknown, ...visibleAttempts.filter((a) => !unknown.includes(a))].map((a) => {
+                {[...unknown, ...attempts.filter((a) => !unknown.includes(a))].map((a) => {
                   const isUnknown = String(a.state).toUpperCase() === "OUTCOME_UNKNOWN";
                   return (
                     <tr
@@ -357,7 +398,7 @@ export default function HistoryPage() {
                     </tr>
                   );
                 })}
-                {!visibleAttempts.length ? (
+                {!attempts.length ? (
                   <tr>
                     <td colSpan={8} className="px-3 py-4 text-center text-[var(--content-tertiary)]">
                       {showFinalized ? "No remote execution attempts recorded." : "No open remote execution attempts."}
@@ -366,6 +407,12 @@ export default function HistoryPage() {
                 ) : null}
               </tbody>
             </table>
+            <Pager
+              page={attemptPage}
+              count={attempts.length}
+              onOffset={(o) => void loadAttempts(showFinalized, o)}
+              label="Remote execution attempts"
+            />
           </div>
         )}
       </Panel>

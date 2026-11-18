@@ -850,6 +850,20 @@ Design: `REMOTE_EXECUTION.md`.
   Running, Waiting, Next execution.
 * RUNBOOK §18 (UI guide, message guide, manual verification matrix).
 
+### Phase 5F.1 — performance / resource optimization
+
+* Readiness: concurrent check groups, one shared control-DB connection,
+  bounded probes (`PARTITION_READINESS_CONNECT_TIMEOUT_SECONDS`, default 3),
+  30 s cache (`?refresh=true` bypasses). Control DB down: ~3 s (was ~27 s).
+* `GET /api/logs?limit=&offset=&target_id=&status=&job=&operation=&since=&until=`
+  (limit ≤ 500) returns `logs`, `has_more`, `next_offset`, `previous_offset`.
+* `GET /api/execution-attempts?open=&state=&job_id=&target_id=&limit=&offset=`
+  also returns `unknown_count` (all unresolved unknown outcomes).
+* `GET /api/jobs/{id}/runtime-context` (latest manual result of that job, open
+  attempt state, pending review items) and `GET /api/jobs/{id}/attention`.
+* UI: History pages on the server; nothing polls while the tab is hidden.
+  No migration (ISSUE-015 documents an optional history index). CHANGE-020.
+
 ### New database configuration (production-copy / sensitive)
 
 The NEW database is a **backup/copy of production**. It already contains application

@@ -32,19 +32,23 @@ import {
 } from "@/lib/targets";
 import type { AttentionItem, JobLog, ManualRunResult, PartitionJob } from "@/lib/types";
 
+// Open attempt states that block an immediate manual run from the drawer.
+const BLOCKING_ATTEMPT_STATES = ["OUTCOME_UNKNOWN", "DISPATCHING", "TARGET_SUCCEEDED"];
+
 export function JobDetailPanel({
   job,
   onRan,
   onUpdated,
   startInEdit = false,
-  attention = [],
+  attention: attentionProp,
   onAttentionChanged,
 }: {
   job: PartitionJob;
   onRan?: () => void;
   onUpdated?: () => void;
   startInEdit?: boolean;
-  /** Pending missed-run items for this job (Phase 5A). */
+  /** Pending missed-run items for this job (Phase 5A). When omitted, the
+   * drawer uses the per-job items from /api/jobs/{id}/runtime-context. */
   attention?: AttentionItem[];
   onAttentionChanged?: (message?: string) => void;
 }) {
@@ -59,6 +63,10 @@ export function JobDetailPanel({
   const [lastManual, setLastManual] = useState<JobLog | null>(null);
   // Phase 5E.1: open remote attempts of THIS job (null = not loaded / not installed).
   const [openAttemptState, setOpenAttemptState] = useState<string | null>(null);
+  // Phase 5F.1: per-job pending review items (used when the parent page did
+  // not pass its own list, e.g. the Overview drawer).
+  const [jobAttention, setJobAttention] = useState<AttentionItem[]>([]);
+  const [attentionVersion, setAttentionVersion] = useState(0);
   // After a 504 / unknown outcome the result of the click is not known:
   // never offer an immediate second run from this drawer.
   const [runLocked, setRunLocked] = useState(false);
@@ -70,47 +78,31 @@ export function JobDetailPanel({
     if (targetId != null && targetEnabled) void loadHealth(targetId);
   }, [targetId, targetEnabled, loadHealth]);
 
-  // Open / unresolved remote execution attempts of this job (one request per open).
+  // Phase 5F.1: ONE request per drawer open for THIS job — latest MANUAL_*
+  // result (shown separately from the scheduled status), the most significant
+  // open remote attempt and pending review items. Replaces the client-side
+  // scan of the 200 newest history rows (which missed older manual runs).
   useEffect(() => {
     let alive = true;
     api
-      .attempts({ jobId: job.job_id, open: true, limit: 20 })
-      .then((res) => {
-        const states = (res.attempts || []).map((a) => String(a.state).toUpperCase());
-        const blocking =
-          states.find((s) => s === "OUTCOME_UNKNOWN") ||
-          states.find((s) => s === "DISPATCHING" || s === "TARGET_SUCCEEDED") ||
-          null;
-        if (alive) setOpenAttemptState(blocking);
+      .jobRuntimeContext(job.job_id)
+      .then((ctx) => {
+        if (!alive) return;
+        const state = String(ctx.open_attempt_state || "").toUpperCase();
+        setOpenAttemptState(BLOCKING_ATTEMPT_STATES.includes(state) ? state : null);
+        setLastManual(ctx.latest_manual_run || null);
+        setJobAttention(ctx.pending_attention || []);
       })
       .catch(() => {
-        if (alive) setOpenAttemptState(null);
+        if (!alive) return;
+        setOpenAttemptState(null);
+        setLastManual(null);
+        setJobAttention([]);
       });
     return () => {
       alive = false;
     };
-  }, [job.job_id]);
-
-  // Latest MANUAL_* result, shown separately from the scheduled status.
-  useEffect(() => {
-    let alive = true;
-    api
-      .logs(200)
-      .then((res) => {
-        const row = (res.logs || []).find(
-          (l) =>
-            l.job_id === job.job_id &&
-            String(l.last_run_status || "").toUpperCase().startsWith("MANUAL_"),
-        );
-        if (alive) setLastManual(row || null);
-      })
-      .catch(() => {
-        if (alive) setLastManual(null);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [job.job_id]);
+  }, [job.job_id, attentionVersion]);
   const [confirmDrop, setConfirmDrop] = useState(false);
   const [editing, setEditing] = useState(startInEdit);
   const status = displayStatus(job);
@@ -164,9 +156,15 @@ export function JobDetailPanel({
       onRan?.();
     } finally {
       setBusy(false);
+      setAttentionVersion((v) => v + 1); // reload latest manual result / open attempt
     }
   }
 
+  const attention = attentionProp ?? jobAttention;
+  const handleAttentionChanged = (msg?: string) => {
+    setAttentionVersion((v) => v + 1);
+    onAttentionChanged?.(msg);
+  };
   const unknownPending = attention.some((a) => isUnknownOutcomeReason(a.reason));
   const runBlockReason: string | null =
     runLocked
@@ -218,7 +216,7 @@ export function JobDetailPanel({
           <div className="text-[0.62rem] font-semibold uppercase tracking-[0.13em] text-[var(--warning-fg)]">
             Needs review · {attention.length} item{attention.length === 1 ? "" : "s"}
           </div>
-          <AttentionReviewList items={attention} onChanged={onAttentionChanged} />
+          <AttentionReviewList items={attention} onChanged={handleAttentionChanged} />
         </section>
       ) : null}
 
